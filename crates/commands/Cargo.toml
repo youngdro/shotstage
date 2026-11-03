@@ -1,0 +1,14 @@
+[package]
+name = "shotstage-commands"
+description = "Command registry, JSON Schema, undo history and batching: the one API behind the UI, web, CLI and MCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shotstage-core.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true

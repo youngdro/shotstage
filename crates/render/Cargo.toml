@@ -1,0 +1,12 @@
+[package]
+name = "shotstage-render"
+description = "wgpu renderer for shotstage: clay, depth and normal passes, grid and camera overlays"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shotstage-core.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+wgpu.workspace = true
