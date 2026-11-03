@@ -96,6 +96,9 @@ fn drive_joint(scene: &Scene, joint: &str) -> String {
     }
 }
 
+/// A view-cube axis on screen: (depth, position, label, colour, (yaw, pitch) to look along it).
+type CubeAxis<'a> = (f32, Pos2, &'a str, Color32, (f32, f32));
+
 /// A command id as words for the History menu.
 fn friendly(command: &str) -> String {
     match command {
@@ -3142,6 +3145,21 @@ impl EditorApp {
             }
         }
         self.toolbar(ui, full, cam.is_some() || camera_id_at(&scene, f).is_some());
+        if !clean {
+            self.view_cube(ui, full);
+            // name of what the pointer would grab
+            if let (Some(h), Some(p)) = (&self.hovered, inside)
+                && matches!(self.drag, Gesture::Idle)
+                && self.palette.is_none()
+                && let Ok(e) = scene.get(h)
+            {
+                let font = egui::FontId::proportional(11.5);
+                let g = painter.layout_no_wrap(e.name.clone(), font, Color32::WHITE);
+                let r = Rect::from_min_size(p + Vec2::new(14.0, 14.0), g.size() + Vec2::new(10.0, 6.0));
+                painter.rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(20, 22, 28, 200));
+                painter.galley(r.min + Vec2::new(5.0, 3.0), g, Color32::WHITE);
+            }
+        }
         if scene.entities.is_empty() && self.palette.is_none() {
             self.welcome(ui, full);
         }
@@ -3195,6 +3213,81 @@ impl EditorApp {
         let tex = ctx.load_texture(format!("ref:{key}"), color, egui::TextureOptions::LINEAR);
         self.ref_textures.insert(key.to_string(), (identity, tex.clone()));
         Some(tex)
+    }
+
+    /// Axis gizmo at the top-right: shows which way the view faces; click an axis (or a button)
+    /// to look from that side.
+    fn view_cube(&mut self, ui: &egui::Ui, full: Rect) {
+        let size = Vec2::new(92.0, 124.0);
+        let view = self.orbit.view();
+        let (yaw, pitch) = (self.orbit.yaw, self.orbit.pitch);
+        let mut pick: Option<(f32, f32)> = None;
+        egui::Area::new(egui::Id::unique("view_cube"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(full.right() - size.x - 6.0, full.top() + 8.0))
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+                let painter = ui.painter_at(rect);
+                let c = egui::pos2(rect.center().x, rect.top() + 46.0);
+                painter.circle_filled(c, 42.0, Color32::from_rgba_unmultiplied(20, 22, 28, 150));
+                let axes = [
+                    (Vec3::X, "X", Color32::from_rgb(235, 80, 80), (std::f32::consts::FRAC_PI_2, 0.0)),
+                    (Vec3::Y, "Y", Color32::from_rgb(110, 210, 90), (yaw, 1.45)),
+                    (Vec3::Z, "Z", Color32::from_rgb(80, 140, 255), (0.0, 0.0)),
+                    (Vec3::NEG_X, "", Color32::from_rgb(160, 70, 70), (-std::f32::consts::FRAC_PI_2, 0.0)),
+                    (Vec3::NEG_Z, "", Color32::from_rgb(70, 100, 170), (std::f32::consts::PI, 0.0)),
+                ];
+                // far axes first so the near ones draw on top
+                let mut items: Vec<CubeAxis> = axes
+                    .iter()
+                    .map(|(a, l, col, target)| {
+                        let v = view.transform_vector3(*a);
+                        (v.z, c + Vec2::new(v.x, -v.y) * 30.0, *l, *col, *target)
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let pointer = resp.hover_pos();
+                for (_, p, label, col, target) in &items {
+                    painter.line_segment([c, *p], (2.0, *col));
+                    let hot = pointer.is_some_and(|q| (q - *p).length() < 9.0);
+                    painter.circle_filled(*p, if hot { 9.0 } else { 7.0 }, if hot { Color32::WHITE } else { *col });
+                    if !label.is_empty() {
+                        painter.text(
+                            *p,
+                            egui::Align2::CENTER_CENTER,
+                            *label,
+                            egui::FontId::proportional(10.0),
+                            Color32::from_gray(20),
+                        );
+                    }
+                    if hot && resp.clicked() {
+                        pick = Some(*target);
+                    }
+                }
+                // a reset to a pleasant three-quarter view under the gizmo
+                let r = Rect::from_center_size(egui::pos2(c.x, rect.bottom() - 12.0), Vec2::new(46.0, 18.0));
+                let hot = pointer.is_some_and(|q| r.contains(q));
+                painter.rect_filled(
+                    r,
+                    4.0,
+                    if hot { Color32::from_rgb(60, 66, 80) } else { Color32::from_rgba_unmultiplied(20, 22, 28, 170) },
+                );
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "3/4",
+                    egui::FontId::proportional(11.0),
+                    Color32::WHITE,
+                );
+                if hot && resp.clicked() {
+                    pick = Some((0.6, 0.35));
+                }
+                let _ = pitch;
+                resp.on_hover_text("Click an axis to look along it (Y: from above) · 3/4: the default view");
+            });
+        if let Some((y, p)) = pick {
+            (self.orbit.yaw, self.orbit.pitch) = (y, p);
+        }
     }
 
     /// The empty-scene card: start from a template or drag blocks in.
