@@ -192,7 +192,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
 | 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
-| 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.setInterp` |
+| 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.set` `shot.delete` |
 
 约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。
