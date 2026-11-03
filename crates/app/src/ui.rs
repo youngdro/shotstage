@@ -3301,7 +3301,7 @@ impl EditorApp {
         let shots = t.shots.clone();
         ruler_resp.context_menu(|ui| {
             if shots.is_empty() {
-                ui.weak("No shots yet: + Shot makes one through the active camera");
+                ui.weak("No shots yet: + Shot makes one through the selected or active camera");
             }
             for s in &shots {
                 ui.menu_button(format!("{} · {}–{} · {}", s.name, s.start, s.end, s.camera), |ui| {
@@ -3342,7 +3342,11 @@ impl EditorApp {
                 p.text(
                     egui::pos2(area.left() + 6.0, srow.center().y),
                     egui::Align2::LEFT_CENTER,
-                    "No shots: + Shot (top) or right-click here",
+                    if scene.entities.iter().any(|e| matches!(e.kind, EntityKind::Camera(_))) {
+                        "No shots: + Shot (above) or right-click here"
+                    } else {
+                        "No camera yet: + Camera in the view toolbar puts one where you look from"
+                    },
                     egui::FontId::proportional(11.0),
                     Color32::from_gray(110),
                 );
