@@ -3713,9 +3713,34 @@ impl EditorApp {
                         if current { Color32::WHITE } else { Color32::from_gray(190) },
                     );
                     let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+                    resp.context_menu(|ui| {
+                        ui.weak(format!("{} · {cam}", sh.name));
+                        if ui
+                            .button(format!("Select {cam}"))
+                            .on_hover_text("To move it, change its lens or animate it")
+                            .clicked()
+                        {
+                            self.also.clear();
+                            self.select(Some(sh.camera.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Go to its middle frame").on_hover_text("The frame this picture shows").clicked() {
+                            self.playing = false;
+                            self.look_through = true;
+                            let mut h = self.hub.borrow_mut();
+                            h.frame = (sh.start + sh.end) as f32 / 2.0;
+                            h.look_through = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Delete shot").clicked() {
+                            self.run("shot.delete", json!({"id": sh.id}));
+                            ui.close();
+                        }
+                    });
                     if resp
                         .on_hover_text(format!(
-                            "{}: frames {}–{} through {cam}. Click to go there.",
+                            "{}: frames {}–{} through {cam}. Click to go there; right-click for more.",
                             sh.name, sh.start, sh.end
                         ))
                         .clicked()
