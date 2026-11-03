@@ -49,8 +49,15 @@ struct Uniforms {
     params: [f32; 4],
     /// x = number of scene lights (0 = studio light), y = ambient
     light_params: [f32; 4],
+    /// World to the shadow map of the one shadow-casting light.
+    shadow_vp: [f32; 16],
+    /// x = shadows on, y = depth bias, z = index of the shadow light (-1 = studio key), w = texel
+    shadow_params: [f32; 4],
     lights: [GpuLight; MAX_LIGHTS],
 }
+
+/// Shadow map size in texels.
+const SHADOW_SIZE: u32 = 2048;
 
 /// Most lights the clay pass shades with (the brightest are kept).
 pub const MAX_LIGHTS: usize = 8;
@@ -64,6 +71,46 @@ struct GpuLight {
     dir: [f32; 4],
     /// rgb = colour × intensity, w = cos of the inner cone half angle
     rad: [f32; 4],
+}
+
+/// The light that casts shadows and its view of the scene: the brightest sun, spot or area
+/// light, else the studio key. Returns (world -> shadow clip, light index or -1, depth bias).
+fn shadow_setup(geo: &geometry::Geometry, lights: &[GpuLight]) -> Option<(Mat4, f32, f32)> {
+    use glam::Vec3;
+    let mut it = geo.triangles.iter().map(|v| Vec3::from_array(v.pos));
+    let first = it.next()?;
+    let (lo, hi) = it.fold((first, first), |(a, b), p| (a.min(p), b.max(p)));
+    let (center, radius) = ((lo + hi) / 2.0, ((hi - lo).length() / 2.0).max(0.5));
+    // brightest light that has a direction worth shadowing (point lights are skipped)
+    let pick = lights
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.pos[3] != 1.0)
+        .max_by(|a, b| (a.1.rad[0] + a.1.rad[1] + a.1.rad[2]).total_cmp(&(b.1.rad[0] + b.1.rad[1] + b.1.rad[2])));
+    let up_for = |d: Vec3| if d.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    let ortho = |dir: Vec3| {
+        let eye = center - dir * (radius * 2.0 + 1.0);
+        let view = Mat4::look_at_rh(eye, center, up_for(dir));
+        let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.01, radius * 4.0 + 2.0);
+        proj * view
+    };
+    match pick {
+        None if !lights.is_empty() => None,
+        None => Some((ortho(-Vec3::new(0.45, 0.8, 0.4).normalize()), -1.0, 0.0015)),
+        Some((i, l)) => {
+            let dir = Vec3::new(l.dir[0], l.dir[1], l.dir[2]).normalize_or_zero();
+            if l.pos[3] == 0.0 {
+                return Some((ortho(dir), i as f32, 0.0015));
+            }
+            // spot and area lights: a perspective view from the light
+            let pos = Vec3::new(l.pos[0], l.pos[1], l.pos[2]);
+            let half = l.dir[3].clamp(-1.0, 1.0).acos();
+            let fov = (half * 2.0 * 1.1).clamp(0.3, 2.8);
+            let far = (pos - center).length() + radius + 1.0;
+            let view = Mat4::look_at_rh(pos, pos + dir, up_for(dir));
+            Some((Mat4::perspective_rh(fov, 1.0, 0.05, far) * view, i as f32, 0.0005))
+        }
+    }
 }
 
 fn gpu_lights(scene: &Scene, frame: f32) -> (usize, [GpuLight; MAX_LIGHTS]) {
@@ -88,8 +135,31 @@ fn gpu_lights(scene: &Scene, frame: f32) -> (usize, [GpuLight; MAX_LIGHTS]) {
 
 const SHADER: &str = r#"
 struct L { pos: vec4<f32>, dir: vec4<f32>, rad: vec4<f32> };
-struct U { view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, light_params: vec4<f32>, lights: array<L, 8> };
+struct U { view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, light_params: vec4<f32>, shadow_vp: mat4x4<f32>, shadow_params: vec4<f32>, lights: array<L, 8> };
 @group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var shadow_tex: texture_depth_2d;
+@group(0) @binding(2) var shadow_smp: sampler_comparison;
+
+// How much of the shadow light reaches a point: 1 = lit, 0 = in shadow (3x3 filtered edges).
+fn shadow_vis(wp: vec3<f32>) -> f32 {
+    let lp = u.shadow_vp * vec4<f32>(wp, 1.0);
+    let ndc = lp.xyz / max(lp.w, 1e-5);
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let depth = ndc.z - u.shadow_params.y;
+    var sum = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let o = vec2<f32>(f32(x), f32(y)) * u.shadow_params.w * 1.5;
+            sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, uv + o, depth);
+        }
+    }
+    let inside = uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 && ndc.z < 1.0 && lp.w > 0.0;
+    return select(1.0, sum / 9.0, inside && u.shadow_params.x > 0.5);
+}
+
+@vertex fn vs_shadow(v: MeshIn) -> @builtin(position) vec4<f32> {
+    return u.shadow_vp * vec4<f32>(v.pos, 1.0);
+}
 
 struct MeshIn { @location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) color: vec3<f32>, @location(3) id: u32 };
 struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec3<f32>, @location(2) vz: f32, @location(3) wp: vec3<f32> };
@@ -116,6 +186,7 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
         let vn = normalize((u.view * vec4<f32>(n, 0.0)).xyz);
         return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
     }
+    let vis = shadow_vis(i.wp);
     let count = u32(u.light_params.x + 0.5);
     if (count > 0u) {
         // scene lights: soft sky ambient plus each light's Lambert term (no shadows)
@@ -139,6 +210,9 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
             if (kind == 3u) {
                 ndl = max((dot(n, ldir) + 0.35) / 1.35, 0.0);
             }
+            if (f32(k) == u.shadow_params.z) {
+                att = att * vis;
+            }
             col = col + i.c * l.rad.rgb * ndl * att;
         }
         // roll highlights off softly instead of clipping to white
@@ -149,7 +223,9 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     }
     let key = normalize(vec3<f32>(0.45, 0.8, 0.4));
     let fill = normalize(vec3<f32>(-0.6, 0.25, -0.5));
-    let light = 0.28 + 0.62 * max(dot(n, key), 0.0) + 0.18 * max(dot(n, fill), 0.0) + 0.08 * max(n.y, 0.0);
+    // the studio key casts a soft shadow (so things sit on the ground)
+    let key_vis = mix(1.0, vis, 0.7);
+    let light = 0.28 + 0.62 * max(dot(n, key), 0.0) * key_vis + 0.18 * max(dot(n, fill), 0.0) + 0.08 * max(n.y, 0.0);
     return vec4<f32>(i.c * light, 1.0);
 }
 
@@ -221,6 +297,9 @@ struct Target {
 
 pub struct Renderer {
     mesh_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_bind_group: wgpu::BindGroup,
+    shadow_view: wgpu::TextureView,
     line_pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
     image_layout: wgpu::BindGroupLayout,
@@ -246,23 +325,105 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let uniform_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shotstage"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                uniform_entry,
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+        // the shadow pass binds only the uniforms (the shadow map is its target)
+        let shadow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shotstage shadow"),
+            entries: &[uniform_entry],
+        });
+        let shadow_map = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shotstage shadow map"),
+            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_map.create_view(&Default::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shotstage shadow"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shotstage"),
             layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+            ],
+        });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shotstage shadow"),
+            layout: &shadow_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
+        });
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shotstage shadow"),
+            bind_group_layouts: &[Some(&shadow_bgl)],
+            immediate_size: 0,
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vs_shadow"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32],
+                })],
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shotstage"),
@@ -397,6 +558,9 @@ impl Renderer {
         });
         Self {
             mesh_pipeline,
+            shadow_pipeline,
+            shadow_bind_group,
+            shadow_view,
             line_pipeline,
             image_pipeline,
             image_layout,
@@ -534,13 +698,22 @@ impl Renderer {
             view: view.view.to_cols_array(),
             params: [pass as u32 as f32, near, far, 0.0],
             light_params: [0.0, 0.0, 0.0, 0.0],
+            shadow_vp: Mat4::IDENTITY.to_cols_array(),
+            shadow_params: [0.0; 4],
             lights: [GpuLight::default(); MAX_LIGHTS],
         };
         let mut u = u;
+        let mut lights_used = vec![];
         if !overlay.studio_light {
             let (n, lights) = gpu_lights(scene, frame);
             u.light_params = [n as f32, 0.12, 0.0, 0.0];
             u.lights = lights;
+            lights_used = lights[..n].to_vec();
+        }
+        let shadow = if pass == Pass::Clay && !overlay.no_shadows { shadow_setup(&geo, &lights_used) } else { None };
+        if let Some((vp, index, bias)) = shadow {
+            u.shadow_vp = vp.to_cols_array();
+            u.shadow_params = [1.0, bias, index, 1.0 / SHADOW_SIZE as f32];
         }
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
         let tri_buf = (!geo.triangles.is_empty()).then(|| {
@@ -571,6 +744,24 @@ impl Renderer {
             Pass::Normal => wgpu::Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 },
         };
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("shotstage") });
+        if let (Some(_), Some(b)) = (shadow, &tri_buf) {
+            let mut sp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shotstage shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            sp.set_pipeline(&self.shadow_pipeline);
+            sp.set_bind_group(0, &self.shadow_bind_group, &[]);
+            sp.set_vertex_buffer(0, b.slice(..));
+            sp.draw(0..geo.triangles.len() as u32, 0..1);
+        }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shotstage"),

@@ -41,6 +41,8 @@ pub struct Overlay {
     pub eye: Option<[f32; 3]>,
     /// More selected entities (multi-selection), highlighted like `selected`.
     pub also_selected: Vec<String>,
+    /// Turn shadows off (they are on by default).
+    pub no_shadows: bool,
 }
 
 /// Vertex of a textured image card.

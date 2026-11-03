@@ -85,7 +85,7 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
             p("openChiller", "chiller", [0.2, 0.0, -3.2], 0.0),
             p("openChiller", "chiller_2", [1.5, 0.0, -3.2], 0.0),
             p("gondolaShelf", "shelf", [-1.6, 0.0, -3.2], 0.0),
-            p("priceSign", "sign", [1.2, 0.0, -0.3], 0.0),
+            p("priceSign", "sign", [1.5, 0.0, -1.5], 0.0),
             p("woman", "shopper", [0.3, 0.0, 1.0], 180.0),
             (
                 "pose.set",

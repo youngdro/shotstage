@@ -404,6 +404,8 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Draw shadows in the view.
+    shadows: bool,
     /// More selected objects (Shift+click), besides the hub's selection.
     also: Vec<String>,
     /// The camera the next picked picture becomes the reference of.
@@ -478,6 +480,7 @@ impl EditorApp {
             thumbs: None,
             reference_for: None,
             also: vec![],
+            shadows: true,
             ref_textures: Default::default(),
             auto_key: false,
             key_drag: None,
@@ -2883,6 +2886,7 @@ impl EditorApp {
             studio_light: self.studio_light,
             eye: None,
             also_selected: if clean { vec![] } else { self.also.clone() },
+            no_shadows: !self.shadows,
         };
         let pass = self.pass;
         let (Some(rs), Some(renderer)) = (frame.wgpu_render_state(), self.renderer.as_mut()) else {
@@ -3133,6 +3137,7 @@ impl EditorApp {
                         {
                             crate::files::save_frame(&self.hub, 1920, &self.saved);
                         }
+                        ui.toggle_value(&mut self.shadows, "Shadows").on_hover_text("Shadows from the key light (snapshots always have them)");
                         ui.toggle_value(&mut self.studio_light, "Studio light").on_hover_text(
                             "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
                         );
