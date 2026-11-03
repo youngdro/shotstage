@@ -278,6 +278,8 @@ enum QuickAction {
     Duplicate,
     Delete,
     CameraHere,
+    SaveFrame,
+    ExportBoard,
 }
 
 /// `holdBasket` → `Hold basket`, `tPose` → `T pose`.
@@ -1444,6 +1446,12 @@ impl EditorApp {
         out.push(act("New scene", "clear everything (undoable)", QuickAction::New));
         out.push(act("Toggle shadows", "", QuickAction::Shadows));
         out.push(act("New camera from this view", "where you are looking from", QuickAction::CameraHere));
+        if scene.active_camera.is_some() || !scene.timeline.shots.is_empty() {
+            out.push(act("Save frame as PNG", "the shot camera at the playhead, 1920 px", QuickAction::SaveFrame));
+        }
+        if !scene.timeline.shots.is_empty() {
+            out.push(act("Export storyboard", "every shot as one HTML page", QuickAction::ExportBoard));
+        }
         if sel.is_some() {
             out.push(act("Focus the selection", "F", QuickAction::Focus));
             out.push(act("Key the selection", "K: keyframe at the playhead", QuickAction::Key));
@@ -1578,6 +1586,8 @@ impl EditorApp {
                 QuickAction::Duplicate => self.duplicate_selection(),
                 QuickAction::Delete => self.delete_selection(),
                 QuickAction::CameraHere => self.camera_from_view(),
+                QuickAction::SaveFrame => crate::files::save_frame(&self.hub, 1920, &self.saved),
+                QuickAction::ExportBoard => self.export_board(),
             },
         }
     }
@@ -3667,25 +3677,7 @@ impl EditorApp {
                 .on_hover_text("Save every shot's picture as one HTML page (open it, print it or send it)")
                 .clicked()
             {
-                let panels = shots
-                    .iter()
-                    .enumerate()
-                    .map(|(i, sh)| {
-                        let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
-                        crate::files::Panel {
-                            heading: format!("{} · {}", i + 1, sh.name),
-                            note: format!(
-                                "{cam} · frames {}–{} · {:.1}s",
-                                sh.start,
-                                sh.end,
-                                (sh.end + 1 - sh.start) as f32 / fps
-                            ),
-                            camera: sh.camera.clone(),
-                            frame: (sh.start + sh.end) as f32 / 2.0,
-                        }
-                    })
-                    .collect();
-                crate::files::save_storyboard(&self.hub, panels, 960, &self.saved);
+                self.export_board();
             }
         });
         egui::ScrollArea::horizontal().id_salt("storyboard").show(ui, |ui| {
@@ -3764,6 +3756,33 @@ impl EditorApp {
             });
         });
         ui.add_space(2.0);
+    }
+
+    /// Every shot through its camera at its middle frame, saved as one HTML page.
+    fn export_board(&mut self) {
+        let scene = self.scene();
+        let fps = scene.timeline.fps.max(1.0);
+        let panels = scene
+            .timeline
+            .shots
+            .iter()
+            .enumerate()
+            .map(|(i, sh)| {
+                let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+                crate::files::Panel {
+                    heading: format!("{} · {}", i + 1, sh.name),
+                    note: format!(
+                        "{cam} · frames {}–{} · {:.1}s",
+                        sh.start,
+                        sh.end,
+                        (sh.end + 1 - sh.start) as f32 / fps
+                    ),
+                    camera: sh.camera.clone(),
+                    frame: (sh.start + sh.end) as f32 / 2.0,
+                }
+            })
+            .collect();
+        crate::files::save_storyboard(&self.hub, panels, 960, &self.saved);
     }
 
     /// Keyframe the selection at the playhead (a whole person: every joint).
