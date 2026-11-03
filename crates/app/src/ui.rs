@@ -683,6 +683,8 @@ pub struct EditorApp {
     cam_preview: bool,
     /// What scrolling does in the view, and whether the last wheel input looked like a trackpad.
     scroll_mode: ScrollMode,
+    /// Scrolling not yet turned into a 15° turn of the dragged object.
+    turn_acc: f32,
     wheel_trackpad: bool,
     orbit: Orbit,
     look_through: bool,
@@ -772,6 +774,7 @@ impl EditorApp {
             pip: None,
             cam_preview: true,
             scroll_mode: ScrollMode::Auto,
+            turn_acc: 0.0,
             wheel_trackpad: false,
             orbit: Orbit { target: Vec3::new(0.0, 0.5, 0.0), yaw: 0.6, pitch: 0.35, distance: 9.0 },
             look_through: false,
@@ -1160,6 +1163,56 @@ impl EditorApp {
         });
     }
 
+    /// The selection with its Shift+clicked extras, leaving out anything inside another of them
+    /// (it goes along with its parent).
+    fn selection_roots(&self) -> Vec<String> {
+        let Some(id) = self.selected() else { return vec![] };
+        let scene = self.scene();
+        let all: Vec<String> = std::iter::once(id).chain(self.also.iter().cloned()).collect();
+        all.iter()
+            .filter(|i| !all.iter().any(|o| o != *i && spatial::subtree(&scene, o).contains(i)))
+            .cloned()
+            .collect()
+    }
+
+    /// Duplicate everything selected as one undo step and select the copies.
+    fn duplicate_selection(&mut self) {
+        let ids = self.selection_roots();
+        if ids.is_empty() {
+            return;
+        }
+        let steps: Vec<Value> =
+            ids.iter().map(|i| json!({"command": "entity.duplicate", "params": {"id": i}})).collect();
+        match hub::dispatch(&self.hub, json!({"batch": steps})) {
+            Ok(o) => {
+                let mut new: Vec<String> = o
+                    .result
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|r| r["id"].as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if !new.is_empty() {
+                    let first = new.remove(0);
+                    self.select(Some(first));
+                    self.also = new;
+                }
+            }
+            Err(e) => self.toast(format!("Could not duplicate: {}", e.message)),
+        }
+    }
+
+    /// Delete everything selected (with Shift+clicked extras) as one undo step.
+    fn delete_selection(&mut self) {
+        let ids = self.selection_roots();
+        if ids.is_empty() {
+            return;
+        }
+        self.also.clear();
+        let steps: Vec<Value> = ids.iter().map(|i| json!({"command": "entity.delete", "params": {"id": i}})).collect();
+        if let Err(e) = hub::dispatch(&self.hub, json!({"batch": steps})) {
+            self.toast(format!("Could not delete: {}", e.message));
+        }
+    }
+
     /// Write a motion preset's keys on `target` from `frame`, then play it back.
     fn apply_motion(
         &mut self,
@@ -1295,18 +1348,8 @@ impl EditorApp {
                 QuickAction::Shadows => self.shadows = !self.shadows,
                 QuickAction::Focus => self.focus_selection(),
                 QuickAction::Key => self.key_selection(),
-                QuickAction::Duplicate => {
-                    if let Some(id) = self.selected()
-                        && let Some(r) = self.run("entity.duplicate", json!({"id": id}))
-                    {
-                        self.select(r["id"].as_str().map(str::to_string));
-                    }
-                }
-                QuickAction::Delete => {
-                    if let Some(id) = self.selected() {
-                        self.run("entity.delete", json!({ "id": id }));
-                    }
-                }
+                QuickAction::Duplicate => self.duplicate_selection(),
+                QuickAction::Delete => self.delete_selection(),
             },
         }
     }
@@ -1583,11 +1626,8 @@ impl EditorApp {
                 }
             }
         }
-        if dup
-            && let Some(id) = self.selected()
-            && let Some(r) = self.run("entity.duplicate", json!({"id": id}))
-        {
-            self.select(r["id"].as_str().map(str::to_string));
+        if dup {
+            self.duplicate_selection();
         }
         if undo {
             self.run("history.undo", json!({}));
@@ -1595,8 +1635,8 @@ impl EditorApp {
         if redo {
             self.run("history.redo", json!({}));
         }
-        if del && let Some(id) = self.selected() {
-            self.run("entity.delete", json!({ "id": id }));
+        if del {
+            self.delete_selection();
         }
         if space {
             self.playing = !self.playing;
@@ -1606,6 +1646,16 @@ impl EditorApp {
                 || i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "/"))
         }) {
             self.quick = Some((String::new(), 0));
+        }
+        // Esc with nothing in progress clears the selection
+        if ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && matches!(self.drag, Gesture::Idle)
+            && self.palette.is_none()
+            && self.quick.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+        {
+            self.also.clear();
+            self.select(None);
         }
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_scene();
@@ -3631,12 +3681,13 @@ impl EditorApp {
                             self.place_on_ray(&key, &id, (o, d), offset, modifiers.command);
                         }
                         self.drag = Gesture::Move { id: id.clone(), grab, offset, key: key.clone(), lift: None };
-                        if scroll != 0.0 {
-                            self.run_key(
-                                &key,
-                                "entity.rotate",
-                                json!({"id": id, "degrees": scroll.signum() * 15.0, "frame": f}),
-                            );
+                        // scrolling turns it 15° per ~40 points of scroll (smoothed wheel notches
+                        // and trackpad swipes arrive spread over many frames)
+                        self.turn_acc += scroll;
+                        let steps = (self.turn_acc / 40.0).trunc();
+                        if steps != 0.0 {
+                            self.turn_acc -= steps * 40.0;
+                            self.run_key(&key, "entity.rotate", json!({"id": id, "degrees": steps * 15.0, "frame": f}));
                         }
                     }
                 }
@@ -3747,6 +3798,7 @@ impl EditorApp {
             }
             if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
                 self.drag = Gesture::Idle;
+                self.turn_acc = 0.0;
             }
         }
         if cam.is_none() && self.palette.is_none() {
