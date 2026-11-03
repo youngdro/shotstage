@@ -258,6 +258,10 @@ enum QuickRun {
     Motion(&'static shotstage_commands::motion::Preset, String, Option<String>),
     /// person root, pose
     Pose(String, &'static str),
+    /// a shot's first frame
+    Shot(u32),
+    LookThrough(String),
+    Select(String),
     Action(QuickAction),
 }
 
@@ -311,6 +315,7 @@ fn rank_quick(items: &[QuickItem], query: &str) -> Vec<usize> {
                 match it.kind {
                     "Pose" | "Motion" | "Camera move" => 1,
                     "Action" => 2,
+                    "Shot" | "Camera" => 3,
                     _ => 4,
                 }
             } else if label.starts_with(&q) {
@@ -1424,6 +1429,34 @@ impl EditorApp {
                 }
             }
         }
+        // getting around: shots, cameras, and every object by name (before the blocks, so typing
+        // an object's name selects it rather than adding another one)
+        let fps = scene.timeline.fps.max(1.0);
+        for (i, sh) in scene.timeline.shots.iter().enumerate() {
+            let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+            out.push(QuickItem {
+                label: format!("Go to shot {}: {}", i + 1, sh.name),
+                kind: "Shot",
+                hint: format!("{:.1}s through {cam}", (sh.end + 1 - sh.start) as f32 / fps),
+                run: QuickRun::Shot(sh.start),
+            });
+        }
+        for e in scene.entities.iter().filter(|e| e.parent.is_none()) {
+            if matches!(e.kind, EntityKind::Camera(_)) {
+                out.push(QuickItem {
+                    label: format!("Look through {}", e.name),
+                    kind: "Camera",
+                    hint: "makes it the active camera".into(),
+                    run: QuickRun::LookThrough(e.id.clone()),
+                });
+            }
+            out.push(QuickItem {
+                label: e.name.clone(),
+                kind: "Select",
+                hint: e.id.clone(),
+                run: QuickRun::Select(e.id.clone()),
+            });
+        }
         for (_, _, blocks) in palette() {
             for b in blocks {
                 let kind = if matches!(b, Block::LightPreset(..)) { "Lighting" } else { "Add" };
@@ -1460,6 +1493,23 @@ impl EditorApp {
                     req["keyframeAt"] = json!(frame.round());
                 }
                 self.run("pose.set", req);
+            }
+            QuickRun::Shot(start) => {
+                self.playing = false;
+                self.look_through = true;
+                let mut h = self.hub.borrow_mut();
+                h.frame = start as f32;
+                h.look_through = true;
+            }
+            QuickRun::LookThrough(cam) => {
+                self.run("camera.setActive", json!({"id": cam}));
+                self.look_through = true;
+                self.hub.borrow_mut().look_through = true;
+            }
+            QuickRun::Select(id) => {
+                self.also.clear();
+                self.select(Some(id));
+                self.focus_selection();
             }
             QuickRun::Action(a) => match a {
                 QuickAction::Save => self.save_scene(),
