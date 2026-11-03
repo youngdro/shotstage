@@ -36,6 +36,15 @@ impl Block {
             Block::Prefab(_, _, d) | Block::Light(_, _, d) | Block::LightPreset(_, _, d) => d,
         }
     }
+    /// Key of this block's palette thumbnail.
+    fn thumb_key(&self) -> Option<String> {
+        match self {
+            Block::Prefab(k, ..) => Some(format!("prefab:{k}")),
+            Block::Shape(l, ..) => Some(format!("shape:{l}")),
+            _ => None,
+        }
+    }
+
     fn matches(&self, filter: &str) -> bool {
         filter.is_empty() || {
             let key = match self {
@@ -84,6 +93,25 @@ fn drive_joint(scene: &Scene, joint: &str) -> String {
         Some("wrist_l" | "wrist_r" | "ankle_l" | "ankle_r") => parent(joint).unwrap_or_else(|| joint.to_string()),
         _ => joint.to_string(),
     }
+}
+
+/// What the thumbnail renderer creates for each palette block (with id `thumb`).
+fn thumb_items() -> Vec<(String, Value)> {
+    let mut out = vec![];
+    for (_, _, blocks) in palette() {
+        for b in blocks {
+            let Some(key) = b.thumb_key() else { continue };
+            let create = match &b {
+                Block::Prefab(kind, ..) => json!({"command": "prefab.create", "params": {"kind": kind, "id": "thumb"}}),
+                Block::Shape(_, prim, color) => {
+                    json!({"command": "entity.create", "params": {"type": "mesh", "id": "thumb", "primitive": prim, "color": color}})
+                }
+                _ => continue,
+            };
+            out.push((key, create));
+        }
+    }
+    out
 }
 
 /// Palette sections: title, open at start, blocks.
@@ -350,6 +378,10 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Palette thumbnails (rendered in the background).
+    thumbs: Option<crate::thumbs::Thumbs>,
+    /// Draw action / title safe frames when looking through a camera.
+    safe_areas: bool,
     /// Result of a background "save frame".
     saved: crate::files::Outbox,
     /// Key every edit at the current frame.
@@ -410,6 +442,8 @@ impl EditorApp {
             show_console: false,
             image_mode: None,
             saved: Default::default(),
+            safe_areas: false,
+            thumbs: None,
             auto_key: false,
             key_drag: None,
             key_menu: None,
@@ -778,6 +812,13 @@ impl eframe::App for EditorApp {
                 h.selected = None;
             }
         }
+        // palette thumbnails, a few per frame until they are all done
+        if let Some(rs) = frame.wgpu_render_state() {
+            let thumbs = self.thumbs.get_or_insert_with(|| crate::thumbs::Thumbs::new(&rs.device, thumb_items()));
+            if thumbs.step(rs, 4) {
+                ui.ctx().request_repaint();
+            }
+        }
         crate::files::take_dropped(ui.ctx(), &self.incoming);
         let saved = self.saved.borrow_mut().take();
         match saved {
@@ -1070,13 +1111,34 @@ impl EditorApp {
     }
 
     fn block_tile(&mut self, ui: &mut egui::Ui, b: &Block, width: f32) {
-        let r = ui
-            .add_sized(
+        let thumb = b.thumb_key().and_then(|k| self.thumbs.as_ref()?.get(&k));
+        let r = match thumb {
+            // a picture with the label under it
+            Some((tex, uv)) => {
+                let height = (width - 8.0) * 0.75 + 24.0;
+                let (rect, r) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+                let v = ui.style().interact(&r);
+                let p = ui.painter_at(rect);
+                p.rect_filled(rect, 5.0, v.weak_bg_fill);
+                p.rect_stroke(rect, 5.0, v.bg_stroke, egui::StrokeKind::Inside);
+                let img =
+                    Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(width - 8.0, (width - 8.0) * 0.75));
+                p.image(tex, img, uv, Color32::WHITE);
+                p.text(
+                    egui::pos2(rect.center().x, rect.bottom() - 11.0),
+                    egui::Align2::CENTER_CENTER,
+                    b.label(),
+                    egui::FontId::proportional(11.5),
+                    v.text_color(),
+                );
+                r
+            }
+            None => ui.add_sized(
                 [width, 30.0],
                 egui::Button::new(egui::RichText::new(b.label()).size(12.5)).sense(Sense::click_and_drag()),
-            )
-            .on_hover_cursor(CursorIcon::Grab)
-            .on_hover_text(b.description());
+            ),
+        };
+        let r = r.on_hover_cursor(CursorIcon::Grab).on_hover_text(b.description());
         if let Block::LightPreset(preset, ..) = b {
             if r.clicked() {
                 let mut p = json!({"preset": preset});
@@ -1193,7 +1255,15 @@ impl EditorApp {
             (k, ..) => k.type_name(),
         };
         ui.heading(&e.name);
-        ui.weak(format!("{kind} · {}", e.id));
+        let dims = matches!(e.kind, EntityKind::Mesh { .. } | EntityKind::Empty | EntityKind::Image(_))
+            .then(|| spatial::bounds(&scene, &id, frame).ok().flatten())
+            .flatten()
+            .map(|b| {
+                let s = b.size();
+                format!(" · {:.2} × {:.2} × {:.2} m", s.x, s.y, s.z)
+            })
+            .unwrap_or_default();
+        ui.weak(format!("{kind} · {}{dims}", e.id));
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let mut visible = e.visible;
@@ -1404,6 +1474,45 @@ impl EditorApp {
             EntityKind::Camera(_) => {
                 section(ui, "Camera", true, |ui| {
                     let lens = camera_data_at(&scene, &id, frame).unwrap_or_default();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Frame");
+                        for (label, a, tip) in [
+                            ("16:9", 16.0 / 9.0, "Landscape video"),
+                            ("9:16", 9.0 / 16.0, "Vertical video: Reels, TikTok, Shorts"),
+                            ("1:1", 1.0, "Square"),
+                            ("4:5", 0.8, "Portrait feed post"),
+                            ("4:3", 4.0 / 3.0, "Classic"),
+                            ("2.39:1", 2.39, "Cinemascope"),
+                        ] {
+                            let on = (lens.aspect - a).abs() < 0.01;
+                            if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                                self.run("camera.setLens", json!({"id": id, "aspect": a}));
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .button("Match current view")
+                            .on_hover_text("Put this camera where you are looking from in the view")
+                            .clicked()
+                        {
+                            let eye = self.orbit.eye();
+                            let mut p = json!({"id": id, "position": eye.to_array(), "frame": frame});
+                            if self.keyed(&scene, &id) {
+                                p["keyframeAt"] = json!(frame.round());
+                            }
+                            self.run("entity.moveTo", p);
+                            self.run("camera.lookAt", json!({"id": id, "target": self.orbit.target.to_array()}));
+                            if self.keyed(&scene, &id) {
+                                self.run(
+                                    "keyframe.set",
+                                    json!({"id": id, "property": "transform", "frame": frame.round()}),
+                                );
+                            }
+                        }
+                        ui.checkbox(&mut self.safe_areas, "Safe areas")
+                            .on_hover_text("Action / title safe frames in the camera view");
+                    });
                     let mut focal = lens.focal_length_mm;
                     let focal_animated = scene.timeline.track(&id, TrackProperty::FocalLength).is_some();
                     ui.horizontal(|ui| {
@@ -2598,6 +2707,17 @@ impl EditorApp {
         }
         if let Some(c) = &cam {
             painter.rect_stroke(rect, 0.0, (1.0, Color32::from_rgb(90, 150, 255)), egui::StrokeKind::Inside);
+            if self.safe_areas {
+                // action safe (93 %) and title safe (90 %), plus a centre cross
+                for (k, a) in [(0.93, 70u8), (0.9, 50u8)] {
+                    let r = Rect::from_center_size(rect.center(), rect.size() * k);
+                    painter.rect_stroke(r, 0.0, (1.0, Color32::from_white_alpha(a)), egui::StrokeKind::Inside);
+                }
+                let c = rect.center();
+                let s = (1.0, Color32::from_white_alpha(70));
+                painter.line_segment([c - Vec2::new(10.0, 0.0), c + Vec2::new(10.0, 0.0)], s);
+                painter.line_segment([c - Vec2::new(0.0, 10.0), c + Vec2::new(0.0, 10.0)], s);
+            }
             // rule-of-thirds guides
             for i in 1..3 {
                 let x = rect.left() + rect.width() * i as f32 / 3.0;
