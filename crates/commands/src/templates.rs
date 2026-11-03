@@ -145,7 +145,10 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
             shot("cam_hero", "hero arc", 0, 71),
             cam("cam_detail", "Detail"),
             frame("cam_detail", "hero", "full", "frontRight", "eyeLevel", 100.0),
-            ("motion.apply", json!({"preset": "pushIn", "target": "cam_detail", "subject": "hero", "start": 72, "duration": 3.0, "intensity": 0.5})),
+            (
+                "motion.apply",
+                json!({"preset": "pushIn", "target": "cam_detail", "subject": "hero", "start": 72, "duration": 3.0, "intensity": 0.5}),
+            ),
             shot("cam_detail", "detail", 72, 143),
         ],
         "flatLay" => vec![
