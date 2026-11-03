@@ -192,3 +192,129 @@ pub fn autosave_read() -> Option<String> {
         web_sys::window()?.local_storage().ok()??.get_item("shotstage.autosave").ok()?
     }
 }
+
+/// One storyboard panel: heading, a line under it, and where to look (camera, frame).
+pub struct Panel {
+    pub heading: String,
+    pub note: String,
+    pub camera: String,
+    pub frame: f32,
+}
+
+/// A single HTML page with every panel's picture embedded, to open, print or send.
+fn board_html(title: &str, panels: &[Panel], pngs: &[Vec<u8>]) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let mut cards = String::new();
+    for (p, png) in panels.iter().zip(pngs) {
+        cards.push_str(&format!(
+            "<figure><img src=\"data:image/png;base64,{}\" alt=\"{}\"><figcaption><b>{}</b><span>{}</span></figcaption></figure>\n",
+            shotstage_commands::model::encode(png),
+            esc(&p.heading),
+            esc(&p.heading),
+            esc(&p.note)
+        ));
+    }
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">\
+<title>{t}</title><style>body{{font:14px system-ui,sans-serif;margin:24px;background:#fff;color:#111}}\
+h1{{font-size:20px;margin:0 0 16px}}main{{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:20px}}\
+figure{{margin:0}}img{{width:100%;display:block;border:1px solid #ccc;border-radius:4px}}\
+figcaption{{margin-top:6px;display:flex;flex-direction:column;gap:2px}}figcaption span{{color:#666}}\
+@media print{{body{{margin:0}}main{{gap:12px}}}}</style></head><body><h1>{t}</h1><main>\n{cards}</main></body></html>",
+        t = esc(title)
+    )
+}
+
+/// Render every panel through its camera and save one storyboard HTML page.
+pub fn save_storyboard(hub: &crate::hub::SharedHub, panels: Vec<Panel>, width: u32, done: &Outbox) {
+    let name = "storyboard.html";
+    let title = "Storyboard";
+    let params = |p: &Panel| serde_json::json!({ "width": width, "camera": p.camera, "frame": p.frame });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use base64::Engine as _;
+        let mut pngs = Vec::new();
+        for p in &panels {
+            let r = crate::hub::dispatch(hub, serde_json::json!({ "command": "render.snapshot", "params": params(p) }))
+                .map_err(|e| e.message)
+                .and_then(|o| {
+                    let b64 = o.result["data"].as_str().unwrap_or_default().to_string();
+                    base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())
+                });
+            match r {
+                Ok(png) => pngs.push(png),
+                Err(e) => {
+                    *done.borrow_mut() = Some(Err(e));
+                    return;
+                }
+            }
+        }
+        let html = board_html(title, &panels, &pngs);
+        *done.borrow_mut() = match save(name, html.as_bytes(), "text/html") {
+            Ok(Some(w)) => Some(Ok(w)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        };
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct SingleThread<T>(T);
+        // SAFETY: wasm32 without atomics has a single thread; the value is only used on it.
+        unsafe impl<T> Send for SingleThread<T> {}
+        impl<T> SingleThread<T> {
+            fn into_inner(self) -> T {
+                self.0
+            }
+        }
+        // the pictures arrive one by one; the page is written when the last one is in
+        let n = panels.len();
+        let state = Rc::new(RefCell::new((vec![None::<Vec<u8>>; n], n, None::<String>)));
+        let panels = Rc::new(panels);
+        for i in 0..n {
+            let drawn = hub.borrow_mut().draw_snapshot(params(&panels[i]));
+            let (_, rs, rb) = match drawn {
+                Ok(x) => x,
+                Err(e) => {
+                    *done.borrow_mut() = Some(Err(e.message));
+                    return;
+                }
+            };
+            hub.borrow_mut().pending_snapshots += 1;
+            let buffer = rb.buffer.clone();
+            let cell = SingleThread((hub.clone(), rb, done.clone(), state.clone(), panels.clone()));
+            buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+                let (hub, rb, done, state, panels) = cell.into_inner();
+                hub.borrow_mut().pending_snapshots -= 1;
+                let png = r
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| rb.rgba())
+                    .and_then(|rgba| shotstage_render::encode_png(&rgba, rb.width, rb.height));
+                let mut st = state.borrow_mut();
+                match png {
+                    Ok(p) => st.0[i] = Some(p),
+                    Err(e) => st.2 = Some(e),
+                }
+                st.1 -= 1;
+                if st.1 == 0 {
+                    *done.borrow_mut() = match st.2.take() {
+                        Some(e) => Some(Err(e)),
+                        None => {
+                            let pngs: Vec<Vec<u8>> = st.0.iter_mut().map(|p| p.take().unwrap_or_default()).collect();
+                            match save(name, board_html(title, &panels, &pngs).as_bytes(), "text/html") {
+                                Ok(Some(w)) => Some(Ok(w)),
+                                Ok(None) => None,
+                                Err(e) => Some(Err(e)),
+                            }
+                        }
+                    };
+                }
+                if let Some(ctx) = &hub.borrow().repaint {
+                    ctx.request_repaint();
+                }
+            });
+            let _ = rs.device.poll(wgpu::PollType::Poll);
+        }
+    }
+}

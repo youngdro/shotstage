@@ -1709,8 +1709,8 @@ impl eframe::App for EditorApp {
         self.autosave(ui.input(|i| i.time));
         let saved = self.saved.borrow_mut().take();
         match saved {
-            Some(Ok(w)) => self.toast(format!("Saved the frame: {w}")),
-            Some(Err(e)) => self.toast(format!("Could not save the frame: {e}")),
+            Some(Ok(w)) => self.toast(format!("Saved: {w}")),
+            Some(Err(e)) => self.toast(format!("Could not save: {e}")),
             None => {}
         }
         if !self.incoming.borrow().is_empty() {
@@ -3601,6 +3601,34 @@ impl EditorApp {
         let now = self.frame();
         let fps = scene.timeline.fps.max(1.0);
         let card = Vec2::new(160.0, 90.0);
+        ui.horizontal(|ui| {
+            ui.weak(format!("{} shots", shots.len()));
+            if ui
+                .small_button("Export…")
+                .on_hover_text("Save every shot's picture as one HTML page (open it, print it or send it)")
+                .clicked()
+            {
+                let panels = shots
+                    .iter()
+                    .enumerate()
+                    .map(|(i, sh)| {
+                        let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+                        crate::files::Panel {
+                            heading: format!("{} · {}", i + 1, sh.name),
+                            note: format!(
+                                "{cam} · frames {}–{} · {:.1}s",
+                                sh.start,
+                                sh.end,
+                                (sh.end + 1 - sh.start) as f32 / fps
+                            ),
+                            camera: sh.camera.clone(),
+                            frame: (sh.start + sh.end) as f32 / 2.0,
+                        }
+                    })
+                    .collect();
+                crate::files::save_storyboard(&self.hub, panels, 960, &self.saved);
+            }
+        });
         egui::ScrollArea::horizontal().id_salt("storyboard").show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (i, sh) in shots.iter().enumerate() {
