@@ -53,3 +53,15 @@ impl ImageData {
         }
     }
 }
+
+/// World matrix of an image card as drawn: turned to face `eye` about the vertical axis when it
+/// is a billboard.
+pub fn card_world(world: glam::Mat4, billboard: bool, eye: Option<glam::Vec3>) -> glam::Mat4 {
+    let (Some(eye), true) = (eye, billboard) else { return world };
+    let (s, _, t) = world.to_scale_rotation_translation();
+    let to = glam::Vec3::new(eye.x - t.x, 0.0, eye.z - t.z);
+    if to.length_squared() < 1e-8 {
+        return world;
+    }
+    glam::Mat4::from_scale_rotation_translation(s, glam::Quat::from_rotation_y(to.x.atan2(to.z)), t)
+}

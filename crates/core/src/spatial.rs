@@ -167,6 +167,8 @@ pub struct RayOptions<'a> {
     pub only: &'a [String],
     /// Fall back to the ground plane y = 0 when no mesh is hit.
     pub ground: bool,
+    /// The viewer, so billboard images are hit where they are drawn (turned to face it).
+    pub eye: Option<Vec3>,
 }
 
 /// Closest visible mesh hit along a world-space ray.
@@ -187,6 +189,10 @@ pub fn raycast(scene: &Scene, frame: f32, origin: Vec3, dir: Vec3, opts: &RayOpt
         let (Ok(world), Ok(mesh)) = (world_at(scene, &e.id, frame), crate::eval::posed_mesh(scene, &e.id, frame))
         else {
             continue;
+        };
+        let world = match &e.kind {
+            EntityKind::Image(img) => crate::image::card_world(world, img.billboard, opts.eye),
+            _ => world,
         };
         // cheap reject: the ray against the mesh's local bounding box
         let Some(local) = Aabb::of_points(mesh.positions.iter().map(|p| Vec3::from_array(*p))) else { continue };

@@ -58,17 +58,7 @@ pub struct ImageQuad {
     pub vertices: [ImageVertex; 6],
 }
 
-/// World matrix of an image card, turned to face `eye` about the vertical axis when it is a
-/// billboard.
-pub fn image_world(world: Mat4, billboard: bool, eye: Option<Vec3>) -> Mat4 {
-    let (Some(eye), true) = (eye, billboard) else { return world };
-    let (s, _, t) = world.to_scale_rotation_translation();
-    let to = Vec3::new(eye.x - t.x, 0.0, eye.z - t.z);
-    if to.length_squared() < 1e-8 {
-        return world;
-    }
-    Mat4::from_scale_rotation_translation(s, glam::Quat::from_rotation_y(to.x.atan2(to.z)), t)
-}
+pub use shotstage_core::image::card_world as image_world;
 
 #[derive(Default)]
 pub struct Geometry {
@@ -155,7 +145,11 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                 }
             }
             // group roots and a person's joints stay invisible unless selected
-            EntityKind::Empty if overlay.cameras && (selected || scene.children(Some(&e.id)).next().is_none()) => {
+            EntityKind::Empty
+                if overlay.cameras
+                    && (overlay.selected.as_deref() == Some(e.id.as_str())
+                        || scene.children(Some(&e.id)).next().is_none()) =>
+            {
                 let c = if selected { SELECT } else { [0.8, 0.8, 0.8] };
                 for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
                     line(&mut g.lines, world.transform_point3(-axis * 0.25), world.transform_point3(axis * 0.25), c);

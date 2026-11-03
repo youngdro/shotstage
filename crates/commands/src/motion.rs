@@ -81,7 +81,14 @@ pub const PRESETS: &[Preset] = &[
         "Fly in low from behind, rise over the subject and look down"
     ),
     preset!("productSpin", "360 spin", Camera, 6.0, "Circle once around the subject at a constant speed"),
+    preset!("spiralUp", "Spiral up", Camera, 6.0, "Circle half-way around the subject while rising, looking at it"),
+    preset!("chase", "Chase", Camera, 4.0, "Follow behind the (moving) subject, looking where it goes"),
+    preset!("topDown", "Top-down", Camera, 4.0, "Rise until straight above the subject, looking down"),
     preset!("turntable", "Turntable", Object, 6.0, "Spin the object once around its vertical axis"),
+    preset!("pulse", "Pulse", Object, 1.5, "Beat in size three times, like a heartbeat"),
+    preset!("shake", "Shake", Object, 0.8, "A quick nervous shake that dies down"),
+    preset!("swing", "Swing", Object, 3.0, "Swing like a hanging sign, settling"),
+    preset!("flip", "Flip", Object, 1.0, "Hop and do a full forward flip"),
     preset!("bounce", "Bounce", Object, 2.0, "Hop up and down a few times, settling"),
     preset!("float", "Float", Object, 4.0, "Hover gently up and down with a slight sway"),
     preset!("dropIn", "Drop in", Object, 1.2, "Fall into place from above with a small bounce"),
@@ -91,7 +98,10 @@ pub const PRESETS: &[Preset] = &[
     preset!("heroReveal", "Hero reveal", Object, 2.5, "Rise up, turn to the front and grow into place"),
     preset!("pathFollow", "Follow path", Object, 4.0, "Move through `points`, facing the way it goes"),
     preset!("walkCycle", "Walk", Character, 4.0, "Walk forward with a stepping cycle"),
+    preset!("runCycle", "Run", Character, 3.0, "Run forward with long strides"),
     preset!("wave", "Wave", Character, 2.0, "Raise the right hand and wave"),
+    preset!("pointAt", "Point", Character, 2.0, "Raise the right arm, point ahead, lower it again"),
+    preset!("talk", "Talk", Character, 4.0, "Small hand gestures and nods, as if talking"),
     preset!("pickUp", "Pick up", Character, 2.5, "Bend down to pick something up and stand again"),
     preset!("turnHead", "Look around", Character, 3.0, "Turn the head left and right"),
     preset!("nod", "Nod", Character, 1.2, "Nod twice"),
@@ -436,6 +446,70 @@ fn apply(scene: &mut Scene, p: MotionParams) -> CmdResult<Value> {
             }
             keys = Some(ks);
         }
+        "spiralUp" => {
+            let off = pos0 - center;
+            let rise = (dist * 0.7 * k).clamp(0.5, 8.0);
+            keys = Some(sampled(
+                scene,
+                &target,
+                start,
+                end,
+                24,
+                ease,
+                |s| {
+                    let e = center
+                        + Quat::from_rotation_y((180.0 * k.min(2.0) * s).to_radians()) * off
+                        + Vec3::Y * rise * s;
+                    (e, look(e, center, rot0))
+                },
+                scale0,
+            )?);
+        }
+        "topDown" => {
+            let above = Vec3::new(center.x, center.y + dist.max(1.5), center.z)
+                + (pos0 - center).with_y(0.0).normalize_or_zero() * 0.05;
+            keys = Some(sampled(
+                scene,
+                &target,
+                start,
+                end,
+                12,
+                ease,
+                |s| {
+                    let e = pos0.lerp(above, s);
+                    (e, look(e, center, rot0))
+                },
+                scale0,
+            )?);
+        }
+        "chase" => {
+            let sub = p.subject.clone().ok_or_else(|| CommandError::invalid("chase needs a `subject` to follow"))?;
+            let s0 = world_at(scene, &sub, start)?.w_axis.truncate();
+            let back = (pos0 - s0).with_y(0.0).length().clamp(1.5, 8.0);
+            let height = (pos0.y - s0.y).clamp(0.3, 4.0);
+            let mut ks = vec![];
+            for i in 0..=dense {
+                let f = start + frames * i as f32 / dense as f32;
+                let w = world_at(scene, &sub, f)?;
+                let sp = w.w_axis.truncate();
+                let face = w.transform_vector3(Vec3::Z).with_y(0.0).normalize_or_zero();
+                let face = if face == Vec3::ZERO { Vec3::Z } else { face };
+                let e = sp - face * back + Vec3::Y * height;
+                ks.push((
+                    f,
+                    local_from_world(
+                        scene,
+                        &target,
+                        f,
+                        e,
+                        look(e, sp + face * 2.0 + Vec3::Y * height * 0.5, rot0),
+                        scale0,
+                    )?,
+                    Interp::Linear,
+                ));
+            }
+            keys = Some(ks);
+        }
         "droneFlyover" => {
             let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
             let flat = if flat == Vec3::ZERO { Vec3::NEG_Z } else { flat };
@@ -517,6 +591,38 @@ fn apply(scene: &mut Scene, p: MotionParams) -> CmdResult<Value> {
                 },
                 scale0,
             )?);
+        }
+        "pulse" | "shake" | "swing" | "flip" => {
+            let h =
+                spatial::bounds(scene, &target, start)?.map(|b| b.size().max_element()).unwrap_or(1.0).clamp(0.05, 3.0);
+            let n = ((frames / 1.5).ceil() as usize).clamp(8, 400);
+            let name = preset.name;
+            let mut ks = vec![];
+            for i in 0..=n {
+                let u = i as f32 / n as f32;
+                let f = start + frames * u;
+                let (p, r, sc) = match name {
+                    "pulse" => {
+                        let beat = (u * 3.0 * std::f32::consts::PI).sin().abs().powf(3.0);
+                        (pos0, rot0, scale0 * (1.0 + 0.12 * k * beat))
+                    }
+                    "shake" => {
+                        let a = (u * 40.0).sin() * 0.03 * k * h.max(0.3) * (1.0 - u).powi(2);
+                        (pos0 + right * a, rot0, scale0)
+                    }
+                    "swing" => {
+                        let a = (u * std::f32::consts::TAU * 2.5).sin() * 25.0 * k * (1.0 - u);
+                        (pos0, rot0 * Quat::from_rotation_z(a.to_radians()), scale0)
+                    }
+                    _ => {
+                        let hop = (u * std::f32::consts::PI).sin() * h * 0.8 * k;
+                        let spin = Interp::Ease.apply(u) * 360.0;
+                        (pos0 + Vec3::Y * hop, Quat::from_axis_angle(right, -spin.to_radians()) * rot0, scale0)
+                    }
+                };
+                ks.push((f, local_from_world(scene, &target, f, p, r, sc)?, Interp::Linear));
+            }
+            keys = Some(ks);
         }
         "slideIn" => {
             let from = pos0 - right * (2.0 * k);
@@ -681,22 +787,23 @@ fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k:
     let frames = end - start;
     let mut n = 0;
     match name {
-        "walkCycle" => {
-            let walk = pose_map("walk");
+        "walkCycle" | "runCycle" => {
+            let run = name == "runCycle";
+            let walk = pose_map(if run { "run" } else { "walk" });
             let other = mirrored(&walk);
-            let step_frames = (0.5 * fps / k.clamp(0.5, 2.0)).max(2.0);
+            let step_frames = ((if run { 0.33 } else { 0.5 }) * fps / k.clamp(0.5, 2.0)).max(2.0);
             let steps = (frames / step_frames).floor().max(1.0) as usize;
             for i in 0..=steps {
                 let f = (start + i as f32 * step_frames).min(end);
                 let pose = if i % 2 == 0 { &walk } else { &other };
-                n += key_pose(scene, root, f, pose, pelvis_drop("walk"), Interp::Ease)?;
+                n += key_pose(scene, root, f, pose, pelvis_drop(if run { "run" } else { "walk" }), Interp::Ease)?;
             }
             // move forward along the person's front, 0.7 m per step
             let w = world_at(scene, root, start)?;
             let (s, r, t) = w.to_scale_rotation_translation();
             let front = r * Vec3::Z;
             let front = Vec3::new(front.x, 0.0, front.z).normalize_or_zero();
-            let dist = 0.7 * steps as f32 * s.x;
+            let dist = if run { 1.4 } else { 0.7 } * steps as f32 * s.x;
             let last = (start + steps as f32 * step_frames).min(end);
             let a = local_from_world(scene, root, start, t, r, s)?;
             let b = local_from_world(scene, root, last, t + front * dist, r, s)?;
@@ -724,6 +831,28 @@ fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k:
                 key_pose(scene, root, start + frames * 0.45, &pose_map("pickUp"), pelvis_drop("pickUp"), Interp::Ease)?;
             n += key_pose(scene, root, start + frames * 0.6, &pose_map("pickUp"), pelvis_drop("pickUp"), Interp::Ease)?;
             n += key_pose(scene, root, end, &pose_map("holdBasket"), 0.0, Interp::Ease)?;
+        }
+        "pointAt" => {
+            n += key_pose(scene, root, start, &stand, 0.0, Interp::Ease)?;
+            n += key_pose(scene, root, start + frames * 0.3, &pose_map("point"), 0.0, Interp::Ease)?;
+            n += key_pose(scene, root, start + frames * 0.75, &pose_map("point"), 0.0, Interp::Ease)?;
+            n += key_pose(scene, root, end, &stand, 0.0, Interp::Ease)?;
+        }
+        "talk" => {
+            let beats = ((frames / fps) * 1.5 * k.clamp(0.5, 2.0)).round().max(2.0) as usize;
+            for i in 0..=beats {
+                let u = i as f32 / beats as f32;
+                let mut p = stand.clone();
+                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                if i != 0 && i != beats {
+                    p.insert("shoulder_r", [-25.0 - 10.0 * side, 0.0, -10.0]);
+                    p.insert("elbow_r", [-70.0 + 15.0 * side, 0.0, 0.0]);
+                    p.insert("shoulder_l", [-15.0 + 8.0 * side, 0.0, 10.0]);
+                    p.insert("elbow_l", [-55.0 - 10.0 * side, 0.0, 0.0]);
+                    p.insert("head", [6.0 * side, 8.0 * side, 0.0]);
+                }
+                n += key_pose(scene, root, start + frames * u, &p, 0.0, Interp::Ease)?;
+            }
         }
         "turnHead" => {
             let a = 45.0 * k.min(1.6);

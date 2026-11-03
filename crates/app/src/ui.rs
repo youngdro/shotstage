@@ -56,7 +56,7 @@ const HELP: &str = "Blocks: drag from the left panel into the view (or click to 
 Object: click to select (a second click picks a part); drag to slide it over surfaces.\n\
 Shift+drag: lift · Alt+drag: copy · R / Shift+R or wheel while dragging: turn · Ctrl: no snap · Esc: cancel.\n\
 People: click a body part to select its joint, then drag the part to bend it, or turn the coloured rings.\n\
-View: drag empty space to orbit · right-drag or Shift+drag to pan · scroll or pinch to zoom · double-click to focus.\n\
+View: drag empty space to orbit · right-drag or Shift+drag to pan · scroll or pinch to zoom · double-click or F to focus.\n\
 Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play.";
 
 /// A collapsible properties section.
@@ -72,7 +72,8 @@ fn joint_at(scene: &Scene, hit: &str, point: Vec3, frame: f32) -> Option<String>
 
 /// Mesh under a ray, with the point hit.
 fn pick_point(scene: &Scene, frame: f32, o: Vec3, d: Vec3) -> Option<(String, Vec3)> {
-    let h = raycast(scene, frame, o, d, &RayOptions::default())?;
+    // the ray starts at the viewer: billboards are hit where they are drawn
+    let h = raycast(scene, frame, o, d, &RayOptions { eye: Some(o), ..Default::default() })?;
     Some((h.id?, Vec3::from_array(h.point)))
 }
 
@@ -257,7 +258,7 @@ fn root_of(scene: &Scene, id: &str) -> String {
 
 /// The mesh under a viewport ray that drags may grab (locked groups let the drag through).
 fn pick_grabbable(scene: &Scene, frame: f32, o: Vec3, d: Vec3) -> Option<String> {
-    let hit = pick(scene, frame, o, d)?;
+    let hit = pick_point(scene, frame, o, d)?.0;
     let locked = scene.get(&root_of(scene, &hit)).map(|e| e.locked).unwrap_or(false)
         || scene.get(&hit).map(|e| e.locked).unwrap_or(false);
     (!locked).then_some(hit)
@@ -634,7 +635,9 @@ impl EditorApp {
             }
             let filter = self.motion_filter.trim().to_lowercase();
             ui.horizontal_wrapped(|ui| {
-                for p in PRESETS.iter().filter(|p| groups.contains(&p.group) && p.name != "pathFollow") {
+                // a person's own actions first, then general motion
+                let ordered = groups.iter().flat_map(|g| PRESETS.iter().filter(move |p| p.group == *g));
+                for p in ordered.filter(|p| p.name != "pathFollow") {
                     if !filter.is_empty() && !p.label.to_lowercase().contains(&filter) && !p.description.to_lowercase().contains(&filter) {
                         continue;
                     }
@@ -660,6 +663,29 @@ impl EditorApp {
                 }
             });
         });
+    }
+
+    /// Point the orbit view at the selection and fit it (F).
+    fn focus_selection(&mut self) {
+        let Some(id) = self.selected() else { return };
+        let scene = self.scene();
+        let f = self.frame();
+        let solid = matches!(
+            scene.get(&id).map(|e| &e.kind),
+            Ok(EntityKind::Mesh { .. } | EntityKind::Empty | EntityKind::Image(_))
+        );
+        let target = if solid { root_of(&scene, &id) } else { id.clone() };
+        let (center, size) = match spatial::bounds(&scene, &target, f) {
+            Ok(Some(b)) => (b.center(), b.size().max_element()),
+            _ => match world_at(&scene, &id, f) {
+                Ok(w) => (w.w_axis.truncate(), 1.0),
+                Err(_) => return,
+            },
+        };
+        self.orbit.target = center;
+        self.orbit.distance = (size * 2.2).clamp(0.4, 200.0);
+        self.look_through = false;
+        self.hub.borrow_mut().look_through = false;
     }
 
     /// Should edits to `id` be keyed? (animated already, or Auto-key is on)
@@ -800,6 +826,9 @@ impl EditorApp {
         }
         if space {
             self.playing = !self.playing;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::F)) {
+            self.focus_selection();
         }
         let (key, home, end, step) = ui.input(|i| {
             let step = if i.key_pressed(egui::Key::ArrowLeft) {
@@ -1810,6 +1839,28 @@ impl EditorApp {
         if ruler_resp.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
+        let shots = t.shots.clone();
+        ruler_resp.context_menu(|ui| {
+            if shots.is_empty() {
+                ui.weak("No shots yet: + Shot makes one through the active camera");
+            }
+            for s in &shots {
+                ui.menu_button(format!("{} · {}–{} · {}", s.name, s.start, s.end, s.camera), |ui| {
+                    if ui.button("Look through its camera").clicked() {
+                        self.run("camera.setActive", json!({"id": s.camera}));
+                        self.select(Some(s.camera.clone()));
+                        self.hub.borrow_mut().frame = s.start as f32;
+                        self.look_through = true;
+                        self.hub.borrow_mut().look_through = true;
+                        ui.close();
+                    }
+                    if ui.button("Delete shot").clicked() {
+                        self.run("shot.delete", json!({"id": s.id}));
+                        ui.close();
+                    }
+                });
+            }
+        });
         let mut playhead_bottom = ruler.bottom();
         egui::ScrollArea::vertical().id_salt("tracks").max_height(row_h * 5.0 + 2.0).auto_shrink([false, true]).show(ui, |ui| {
             if rows.is_empty() {

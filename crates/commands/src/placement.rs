@@ -324,7 +324,7 @@ fn place(scene: &mut Scene, p: PlaceParams) -> CmdResult<Value> {
                         .ok_or_else(|| CommandError::new("failed", format!("`{t}` has no geometry to rest on")))?;
                     let only = spatial::subtree(scene, t);
                     let from = Vec3::new(base.x, tb.max.y + 1.0, base.z);
-                    let opts = RayOptions { ignore: &ignore, only: &only, ground: false };
+                    let opts = RayOptions { ignore: &ignore, only: &only, ground: false, eye: None };
                     // a ray that slips past (a hole, a torus centre) rests on the bounds' top
                     raycast(scene, frame, from, Vec3::NEG_Y, &opts).unwrap_or(spatial::Hit {
                         id: Some(t.to_string()),
