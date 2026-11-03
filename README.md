@@ -21,6 +21,10 @@
 视口工具栏的 **📷 Save frame** 把当前帧透过镜头的画面存成 1920 宽的 PNG。
 
 
+### Camera preview
+
+While you work in the free view, a small inset in the bottom-right corner shows what the shot camera sees at the playhead, so you can arrange things and watch the framing at the same time. Click it to look through the camera; switch it off with **Cam preview** in the view toolbar. It only re-renders when the scene, the frame or the view settings change, at most about 20 times a second while you drag.
+
 ### Scene list
 
 Every row has show/hide (👁) and lock (🔒) toggles. Shift+click adds a row to the selection; double-click a row, or click the name at the top of the properties, to rename it. Right-click for Focus, Rename, Duplicate, Hide, Lock and Delete. With more than a handful of objects, a filter box narrows the list by name.

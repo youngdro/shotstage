@@ -203,6 +203,16 @@ fn tree_row(ui: &mut egui::Ui, cx: &mut TreeCtx, e: &shotstage_core::Entity) {
     });
 }
 
+/// Offscreen renderer and texture of the shot-camera preview; `key` says what it last showed.
+struct Pip {
+    renderer: Renderer,
+    tex: Option<(egui::TextureId, u64)>,
+    key: Option<String>,
+    at: f64,
+    /// Where it was drawn last frame (None when hidden).
+    rect: Option<Rect>,
+}
+
 /// One entry of the quick-actions box.
 struct QuickItem {
     label: String,
@@ -635,6 +645,9 @@ pub struct EditorApp {
     hub: SharedHub,
     renderer: Option<Renderer>,
     texture: Option<(egui::TextureId, u64)>,
+    /// The small shot-camera preview in the corner of the free view.
+    pip: Option<Pip>,
+    cam_preview: bool,
     orbit: Orbit,
     look_through: bool,
     pass: Pass,
@@ -720,6 +733,8 @@ impl EditorApp {
             hub,
             renderer,
             texture: None,
+            pip: None,
+            cam_preview: true,
             orbit: Orbit { target: Vec3::new(0.0, 0.5, 0.0), yaw: 0.6, pitch: 0.35, distance: 9.0 },
             look_through: false,
             pass: Pass::Clay,
@@ -3244,7 +3259,9 @@ impl EditorApp {
                 i.pointer.any_released(),
             )
         });
-        let inside = pointer.filter(|p| rect.contains(*p));
+        // (the camera preview in the corner sits on top: no hovering through it)
+        let pip_rect = self.pip.as_ref().and_then(|p| p.rect);
+        let inside = pointer.filter(|p| rect.contains(*p) && !pip_rect.is_some_and(|r| r.contains(*p)));
         let eye = view.view.inverse().w_axis.truncate();
         let clean = cam.is_some();
 
@@ -3785,6 +3802,96 @@ impl EditorApp {
             let id = egui_renderer.register_native_texture(&rs.device, view_tex, wgpu::FilterMode::Linear);
             self.texture = Some((id, generation));
         }
+        // the shot camera's view in the corner, re-rendered only when what it shows changes
+        let pip_cam = (!clean && self.cam_preview && self.palette.is_none()).then(|| camera_id_at(&scene, f)).flatten();
+        let mut pip_show = None;
+        if let Some(p) = self.pip.as_mut() {
+            p.rect = None;
+        }
+        if let Some(c) = pip_cam
+            && let (Ok(lens), Ok(world)) = (camera_data_at(&scene, &c, f), world_at(&scene, &c, f))
+        {
+            let a = lens.aspect.clamp(0.3, 4.0);
+            let w = (full.width() * 0.24).clamp(150.0, 300.0);
+            let size = Vec2::new(w, w / a);
+            let prect = Rect::from_min_size(full.right_bottom() - size - Vec2::splat(12.0), size);
+            let ppx = ((size.x * ppp).round() as u32, (size.y * ppp).round() as u32);
+            let pip = self.pip.get_or_insert_with(|| Pip {
+                renderer: Renderer::new(&rs.device),
+                tex: None,
+                rect: None,
+                key: None,
+                at: 0.0,
+            });
+            let key = format!(
+                "{}|{f}|{c}|{:?}|{ppx:?}|{}|{}",
+                self.hub.borrow().session.revision(),
+                pass as u32,
+                self.studio_light,
+                self.shadows
+            );
+            let now = ui.input(|i| i.time);
+            if pip.key.as_deref() != Some(key.as_str()) {
+                // at most ~20 times a second while something is being dragged
+                if now - pip.at >= 0.05 || pip.key.is_none() {
+                    let view =
+                        View { view: world.inverse(), proj: lens.projection(a), depth_near: 0.0, depth_far: 0.0 };
+                    let mut ov = shotstage_render::clean_overlay(&c);
+                    ov.studio_light = self.studio_light;
+                    ov.no_shadows = !self.shadows;
+                    pip.renderer.render(&rs.device, &rs.queue, &scene, f, view, pass, &ov, ppx);
+                    pip.key = Some(key);
+                    pip.at = now;
+                    let generation = pip.renderer.target_generation;
+                    if pip.tex.is_none_or(|(_, g)| g != generation)
+                        && let Some(v) = pip.renderer.color_view()
+                    {
+                        let mut egui_renderer = rs.renderer.write();
+                        if let Some((old, _)) = pip.tex.take() {
+                            egui_renderer.free_texture(&old);
+                        }
+                        pip.tex = Some((
+                            egui_renderer.register_native_texture(&rs.device, v, wgpu::FilterMode::Linear),
+                            generation,
+                        ));
+                    }
+                } else {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+            if let Some((tex, _)) = pip.tex {
+                pip.rect = Some(prect);
+                let name = scene.get(&c).map(|e| e.name.clone()).unwrap_or(c.clone());
+                pip_show = Some((tex, prect, name));
+            }
+        }
+        if let Some((tex, prect, name)) = pip_show {
+            let r = egui::Area::new(egui::Id::unique("cam_preview"))
+                .order(egui::Order::Middle)
+                .fixed_pos(prect.min)
+                .show(ui.ctx(), |ui| {
+                    let (r, p) = ui.allocate_painter(prect.size(), Sense::click());
+                    p.image(
+                        tex,
+                        r.rect,
+                        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    let stroke = if r.hovered() { (1.5, ACCENT) } else { (1.0, Color32::from_white_alpha(60)) };
+                    p.rect_stroke(r.rect, 3.0, stroke, egui::StrokeKind::Outside);
+                    let label = p.layout_no_wrap(name, egui::FontId::proportional(11.0), Color32::WHITE);
+                    let lr = Rect::from_min_size(r.rect.min + Vec2::new(4.0, 4.0), label.size() + Vec2::new(8.0, 4.0));
+                    p.rect_filled(lr, 3.0, Color32::from_black_alpha(140));
+                    p.galley(lr.min + Vec2::new(4.0, 2.0), label, Color32::WHITE);
+                    r.on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Shot camera at the playhead: click to look through it")
+                })
+                .inner;
+            if r.clicked() {
+                self.look_through = true;
+                self.hub.borrow_mut().look_through = true;
+            }
+        }
         let painter = ui.painter_at(full);
         painter.rect_filled(full, 0.0, Color32::from_gray(10));
         if let Some((id, _)) = self.texture {
@@ -4145,6 +4252,8 @@ impl EditorApp {
                             crate::files::save_frame(&self.hub, 1920, &self.saved);
                         }
                         ui.toggle_value(&mut self.shadows, "Shadows").on_hover_text("Shadows from the key light (snapshots always have them)");
+                        ui.toggle_value(&mut self.cam_preview, "Cam preview")
+                            .on_hover_text("A small live view of the shot camera in the corner while you work in the free view");
                         ui.toggle_value(&mut self.studio_light, "Studio light").on_hover_text(
                             "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
                         );
