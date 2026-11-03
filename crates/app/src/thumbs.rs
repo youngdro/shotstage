@@ -22,15 +22,49 @@ pub struct Thumbs {
     slots: HashMap<String, u32>,
     /// still to render: (key, what to create)
     todo: Vec<(String, serde_json::Value)>,
+    /// ready-made pictures (PNG, W × H) still to copy in: (key, file)
+    pictures: Vec<(String, &'static [u8])>,
     next_slot: u32,
 }
 
 impl Thumbs {
     /// `items`: (key, a command `{command, params}` that creates the thing with id `thumb`).
-    pub fn new(device: &wgpu::Device, items: Vec<(String, serde_json::Value)>) -> Self {
+    /// `pictures`: (key, PNG of W × H) for things that are not rendered here.
+    pub fn new(
+        device: &wgpu::Device,
+        items: Vec<(String, serde_json::Value)>,
+        pictures: Vec<(String, &'static [u8])>,
+    ) -> Self {
         let mut todo = items;
         todo.reverse();
-        Self { renderer: Renderer::new(device), atlas: None, slots: HashMap::new(), todo, next_slot: 0 }
+        Self { renderer: Renderer::new(device), atlas: None, slots: HashMap::new(), todo, pictures, next_slot: 0 }
+    }
+
+    fn slot_origin(slot: u32) -> wgpu::Origin3d {
+        wgpu::Origin3d { x: (slot % COLS) * W, y: (slot / COLS) * H, z: 0 }
+    }
+
+    /// Copy the ready-made pictures into the atlas.
+    fn copy_pictures(&mut self, rs: &RenderState) {
+        let Some((atlas, _)) = self.atlas.as_ref() else { return };
+        for (key, png) in std::mem::take(&mut self.pictures) {
+            let Ok(img) = image::load_from_memory(png) else { continue };
+            let img = image::imageops::resize(&img.to_rgba8(), W, H, image::imageops::FilterType::Triangle);
+            let slot = self.next_slot;
+            self.next_slot += 1;
+            rs.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: atlas,
+                    mip_level: 0,
+                    origin: Self::slot_origin(slot),
+                    aspect: wgpu::TextureAspect::All,
+                },
+                img.as_raw(),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * W), rows_per_image: Some(H) },
+                wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            );
+            self.slots.insert(key, slot);
+        }
     }
 
     /// The atlas texture and the UV rectangle of `key`, once it is ready.
@@ -44,12 +78,12 @@ impl Thumbs {
     }
 
     fn rows(&self) -> u32 {
-        (self.slots.len() as u32 + self.todo.len() as u32).div_ceil(COLS).max(1)
+        (self.slots.len() as u32 + self.todo.len() as u32 + self.pictures.len() as u32).div_ceil(COLS).max(1)
     }
 
     /// Render up to `n` thumbnails. Returns true while there is more to do.
     pub fn step(&mut self, rs: &RenderState, n: usize) -> bool {
-        if self.todo.is_empty() {
+        if self.todo.is_empty() && self.pictures.is_empty() {
             return false;
         }
         if self.atlas.is_none() {
@@ -67,6 +101,7 @@ impl Thumbs {
             let view = tex.create_view(&Default::default());
             let id = rs.renderer.write().register_native_texture(&rs.device, &view, wgpu::FilterMode::Linear);
             self.atlas = Some((tex, id));
+            self.copy_pictures(rs);
         }
         for _ in 0..n {
             let Some((key, create)) = self.todo.pop() else { break };

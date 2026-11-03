@@ -6,6 +6,7 @@
 
 mod files;
 pub mod hub;
+pub mod i18n;
 mod storyboard;
 mod thumbs;
 mod ui;
