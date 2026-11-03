@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>shotstage</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 13px system-ui, sans-serif; }
+    #app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
+    header { padding: 6px 12px; border-bottom: 1px solid #333; }
+    /* The editor fills whatever container you mount it in. */
+    #stage { position: relative; min-height: 0; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>shotstage demo host page · the editor below is mounted into <code>#stage</code>; try <code>shotstage.dispatch(...)</code> or <code>await shotstage.snapshot()</code> in the console</header>
+    <div id="stage"></div>
+  </div>
+  <script type="module">
+    import init, { mount } from "./pkg/shotstage_app.js";
+    await init();
+    const editor = await mount("#stage", {});
+    window.shotstage = editor;   // optional global for agents and the devtools console
+
+    // A small starter scene, built through the same API agents use: real-size blocks that
+    // rest on each other, and a camera framed by shot size instead of coordinates.
+    editor.batch([
+      // A fresh-food aisle, built through the same API agents use.
+      { command: "entity.create", params: { type: "mesh", id: "floor", primitive: { shape: "plane", size: [14, 14] }, color: [0.62, 0.62, 0.6], locked: true } },
+      { command: "prefab.create", params: { kind: "produceStand", id: "produce", position: [0, 0, -0.6] } },
+      { command: "prefab.create", params: { kind: "watermelonBin", id: "melons", position: [-2.0, 0, -0.4] } },
+      { command: "prefab.create", params: { kind: "openChiller", id: "chiller", position: [0.2, 0, -3.2] } },
+      { command: "prefab.create", params: { kind: "openChiller", id: "chiller_2", position: [1.5, 0, -3.2] } },
+      { command: "prefab.create", params: { kind: "gondolaShelf", id: "shelf", position: [-1.6, 0, -3.2] } },
+      { command: "prefab.create", params: { kind: "priceSign", id: "sign", position: [1.2, 0, -0.3] } },
+      { command: "prefab.create", params: { kind: "woman", id: "shopper", name: "Shopper", position: [0.3, 0, 1.0], rotationY: 180 } },
+      { command: "pose.set", params: { id: "shopper", pose: "reach", joints: { shoulder_r: [-70, 0, -6], elbow_r: [-20, 0, 0] } } },
+      { command: "prefab.create", params: { kind: "basket", id: "basket", position: [0.65, 0, 1.0] } },
+      { command: "prefab.create", params: { kind: "man", id: "clerk", name: "Clerk", position: [-2.0, 0, 0.6], rotationY: 200 } },
+      { command: "pose.set", params: { id: "clerk", pose: "crouch" } },
+      { command: "prefab.create", params: { kind: "cart", id: "cart", position: [2.2, 0, 1.2], rotationY: 200 } },
+      { command: "entity.create", params: { type: "camera", id: "cam_a", name: "Cam A" } },
+      { command: "camera.frame", params: { camera: "cam_a", subject: "shopper", size: "full", side: "frontRight", focalLengthMm: 35 } },
+      { command: "camera.dollyMove", params: { id: "cam_a", distance: 1.0, start: 0, end: 72 } },
+      { command: "camera.orbitMove", params: { id: "cam_a", target: "shopper", degrees: 30, start: 72, end: 119 } },
+      { command: "shot.create", params: { camera: "cam_a", start: 0, end: 119, name: "push-in" } },
+    ]);
+    editor.on(ev => { if (ev.type === "change") console.debug("shotstage change", ev.revision); });
+  </script>
+</body>
+</html>

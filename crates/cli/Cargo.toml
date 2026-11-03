@@ -1,0 +1,17 @@
+[package]
+name = "shotstage-cli"
+description = "shotstage command line: run commands, JSON-lines server and MCP server over stdio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "shotstage"
+path = "src/main.rs"
+
+[dependencies]
+shotstage-core.workspace = true
+shotstage-commands.workspace = true
+shotstage-render.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }

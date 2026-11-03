@@ -1,0 +1,33 @@
+[package]
+name = "shotstage-app"
+description = "shotstage editor: egui + wgpu, native and WebAssembly (mountable into any DOM container)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "shotstage-editor"
+path = "src/main.rs"
+
+[dependencies]
+shotstage-core.workspace = true
+shotstage-commands.workspace = true
+shotstage-render.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+egui.workspace = true
+eframe.workspace = true
+wgpu.workspace = true
+log.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { workspace = true, features = ["x11", "wayland"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "CssStyleDeclaration", "Node"] }
