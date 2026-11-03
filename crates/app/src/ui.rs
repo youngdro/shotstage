@@ -203,6 +203,36 @@ fn tree_row(ui: &mut egui::Ui, cx: &mut TreeCtx, e: &shotstage_core::Entity) {
     });
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ScrollMode {
+    /// Trackpad: orbit; mouse wheel: zoom.
+    Auto,
+    Zoom,
+    Orbit,
+}
+
+/// Whether this frame's wheel input came from a trackpad (None: no wheel input). Native macOS
+/// says so; the web does not, so there fingers are told apart from a wheel by their sideways or
+/// fractional movement.
+fn wheel_from_trackpad(events: &[egui::Event]) -> Option<bool> {
+    let mut out = None;
+    for e in events {
+        if let egui::Event::MouseWheel { unit, delta, source, .. } = e {
+            let t = match source {
+                egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum => Some(true),
+                egui::MouseWheelSource::Wheel => Some(false),
+                _ if *unit != egui::MouseWheelUnit::Point => Some(false),
+                _ if delta.x != 0.0 || delta.y.fract() != 0.0 => Some(true),
+                // a big, whole, vertical step is a wheel notch; small ones keep the last guess
+                _ if delta.y.abs() >= 50.0 => Some(false),
+                _ => None,
+            };
+            out = t.or(out);
+        }
+    }
+    out
+}
+
 /// Offscreen renderer and texture of the shot-camera preview; `key` says what it last showed.
 struct Pip {
     renderer: Renderer,
@@ -306,7 +336,7 @@ Blocks: drag from the left panel into the view (or click to drop in the middle).
 Object: click to select (a second click picks a part); drag to slide it over surfaces.\n\
 Shift+drag: lift · Alt+drag: copy · R / Shift+R or wheel while dragging: turn · Ctrl: no snap · Esc: cancel.\n\
 People: click a body part to select its joint, then drag the part to bend it, or turn the coloured rings.\n\
-View: drag empty space to orbit · right-drag or Shift+drag to pan · scroll or pinch to zoom · double-click or F to focus.\n\
+View: drag empty space to orbit · right-drag or Shift+drag to pan · pinch or mouse wheel to zoom · trackpad two-finger scroll orbits (Shift: pan) · double-click or F to focus.\n\
 Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus · Cmd/Ctrl+S save.\n\
 Several objects: Shift+click to add · Cmd/Ctrl+G group · Cmd/Ctrl+Shift+G ungroup.";
 
@@ -651,6 +681,9 @@ pub struct EditorApp {
     /// The small shot-camera preview in the corner of the free view.
     pip: Option<Pip>,
     cam_preview: bool,
+    /// What scrolling does in the view, and whether the last wheel input looked like a trackpad.
+    scroll_mode: ScrollMode,
+    wheel_trackpad: bool,
     orbit: Orbit,
     look_through: bool,
     pass: Pass,
@@ -738,6 +771,8 @@ impl EditorApp {
             texture: None,
             pip: None,
             cam_preview: true,
+            scroll_mode: ScrollMode::Auto,
+            wheel_trackpad: false,
             orbit: Orbit { target: Vec3::new(0.0, 0.5, 0.0), yaw: 0.6, pitch: 0.35, distance: 9.0 },
             look_through: false,
             pass: Pass::Clay,
@@ -1993,7 +2028,7 @@ impl EditorApp {
             ui.label("• Drag a block from the left into the scene.");
             ui.label("• Click an object to select it; drag it to slide it over surfaces.");
             ui.label("• Click a person, then a body part, to pose it.");
-            ui.label("• Pinch or scroll to zoom, drag empty space to orbit.");
+            ui.label("• Drag empty space (or two fingers on a trackpad) to orbit; pinch or wheel to zoom.");
             return;
         };
         let scene = self.scene();
@@ -3726,8 +3761,27 @@ impl EditorApp {
                 let k = self.orbit.distance * 0.0015;
                 self.orbit.target += (-inv.x_axis.xyz() * d.x + inv.y_axis.xyz() * d.y) * k;
             }
-            if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && scroll != 0.0 {
-                self.orbit.distance = (self.orbit.distance * (1.0 - scroll * 0.0015)).clamp(0.3, 500.0);
+            // two fingers on a trackpad orbit (Shift: pan) and pinching zooms; a mouse wheel zooms
+            let (trackpad, delta) = ui.input(|i| (wheel_from_trackpad(&i.events), i.smooth_scroll_delta));
+            if let Some(t) = trackpad {
+                self.wheel_trackpad = t;
+            }
+            let orbit_scroll = match self.scroll_mode {
+                ScrollMode::Auto => self.wheel_trackpad,
+                ScrollMode::Zoom => false,
+                ScrollMode::Orbit => true,
+            };
+            if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && delta != Vec2::ZERO {
+                if !orbit_scroll {
+                    self.orbit.distance = (self.orbit.distance * (1.0 - delta.y * 0.0015)).clamp(0.3, 500.0);
+                } else if modifiers.shift {
+                    let inv = self.orbit.view().inverse();
+                    let k = self.orbit.distance * 0.0015;
+                    self.orbit.target += (-inv.x_axis.xyz() * delta.x + inv.y_axis.xyz() * delta.y) * k;
+                } else {
+                    self.orbit.yaw -= delta.x * 0.006;
+                    self.orbit.pitch = (self.orbit.pitch + delta.y * 0.006).clamp(-1.5, 1.5);
+                }
             }
             // trackpad pinch (and Ctrl+wheel) arrives as a zoom factor, not as scrolling
             let pinch = ui.input(|i| i.zoom_delta());
@@ -4267,29 +4321,32 @@ impl EditorApp {
             .fixed_pos(full.left_top() + Vec2::new(8.0, 8.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
-                    // wrap rather than spill over the side panels in a narrow view
-                    ui.set_max_width((full.width() - 28.0).max(120.0));
+                    // wrap rather than spill over the side panels or under the view cube
+                    ui.set_max_width((full.width() - 28.0 - 100.0).max(160.0));
                     ui.horizontal_wrapped(|ui| {
                         ui.selectable_value(&mut self.pass, Pass::Clay, "Clay").on_hover_text("Clay shading");
                         ui.selectable_value(&mut self.pass, Pass::Depth, "Depth")
                             .on_hover_text("Depth pass (near = white)");
                         ui.selectable_value(&mut self.pass, Pass::Normal, "Normal").on_hover_text("Normal pass");
-                        ui.separator();
+                        ui.add_space(6.0);
                         ui.toggle_value(&mut self.snap, "Snap")
                             .on_hover_text("Snap dragged blocks to a grid (hold Ctrl to place freely)");
                         ui.add_enabled(
                             self.snap,
                             egui::DragValue::new(&mut self.snap_step).range(0.01..=5.0).speed(0.01).suffix(" m"),
                         );
-                        ui.separator();
-                        ui.add_enabled_ui(has_cam, |ui| {
-                            ui.toggle_value(&mut self.look_through, "🎥 Camera view")
-                                .on_hover_text("Look through the shot camera (the clean reference frame)")
-                        });
+                        ui.add_space(6.0);
+                        // (a plain button: an enabled_ui wrapper would wrap its text letter by letter)
+                        if ui
+                            .add_enabled(has_cam, egui::Button::selectable(self.look_through, "🎥 Camera view"))
+                            .on_hover_text("Look through the shot camera (the clean reference frame)")
+                            .clicked()
+                        {
+                            self.look_through = !self.look_through;
+                        }
                         if !has_cam {
                             self.look_through = false;
                         }
-                        ui.separator();
                         if ui
                             .add_enabled(has_cam, egui::Button::new("📷 Save frame"))
                             .on_hover_text("Save the shot camera's view at this frame as a PNG (1920 px wide)")
@@ -4297,13 +4354,28 @@ impl EditorApp {
                         {
                             crate::files::save_frame(&self.hub, 1920, &self.saved);
                         }
-                        ui.toggle_value(&mut self.shadows, "Shadows").on_hover_text("Shadows from the key light (snapshots always have them)");
-                        ui.toggle_value(&mut self.cam_preview, "Cam preview")
-                            .on_hover_text("A small live view of the shot camera in the corner while you work in the free view");
-                        ui.toggle_value(&mut self.studio_light, "Studio light").on_hover_text(
-                            "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
-                        );
-                        ui.separator();
+                        ui.menu_button("View ▾", |ui| {
+                            ui.checkbox(&mut self.shadows, "Shadows")
+                                .on_hover_text("Shadows from the key light (snapshots always have them)");
+                            ui.checkbox(&mut self.studio_light, "Studio light").on_hover_text(
+                                "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
+                            );
+                            ui.checkbox(&mut self.cam_preview, "Camera preview in the corner")
+                                .on_hover_text("A small live view of the shot camera while you work in the free view");
+                            ui.separator();
+                            ui.label("Two-finger scroll / mouse wheel");
+                            ui.horizontal(|ui| {
+                                for (m, label, tip) in [
+                                    (ScrollMode::Auto, "Auto", "Trackpad orbits, mouse wheel zooms"),
+                                    (ScrollMode::Orbit, "Orbit", "Scrolling orbits (Shift: pan); pinch or Ctrl+scroll zooms"),
+                                    (ScrollMode::Zoom, "Zoom", "Scrolling always zooms"),
+                                ] {
+                                    ui.selectable_value(&mut self.scroll_mode, m, label).on_hover_text(tip);
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text("Shadows, lighting, camera preview and navigation");
                         ui.label(egui::RichText::new(" ? ").strong()).on_hover_text(HELP);
                     });
                 });
@@ -4339,5 +4411,28 @@ mod quick_tests {
         assert_eq!(rank_quick(&items, "crate apples"), vec![3]);
         assert_eq!(rank_quick(&items, "zzz"), Vec::<usize>::new());
         assert_eq!(rank_quick(&items, "").len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    fn wheel(unit: egui::MouseWheelUnit, delta: Vec2, source: egui::MouseWheelSource) -> egui::Event {
+        egui::Event::MouseWheel { unit, delta, phase: egui::TouchPhase::Move, source, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn tells_trackpad_from_wheel() {
+        use egui::{MouseWheelSource as S, MouseWheelUnit as U};
+        assert_eq!(wheel_from_trackpad(&[]), None);
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, 3.0), S::Trackpad)]), Some(true));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Line, Vec2::new(0.0, 1.0), S::Wheel)]), Some(false));
+        // the web does not say: guess from the movement
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(1.5, 0.0), S::Unknown)]), Some(true));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, 2.25), S::Unknown)]), Some(true));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, -100.0), S::Unknown)]), Some(false));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, 4.0), S::Unknown)]), None);
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Line, Vec2::new(0.0, 1.0), S::Unknown)]), Some(false));
     }
 }
