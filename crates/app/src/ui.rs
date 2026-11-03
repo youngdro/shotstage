@@ -4935,6 +4935,8 @@ impl EditorApp {
                             ui.checkbox(&mut self.studio_light, "Studio light").on_hover_text(
                                 "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
                             );
+                            ui.checkbox(&mut self.safe_areas, "Safe areas in camera view")
+                                .on_hover_text("Action / title safe frames and a centre cross when looking through a camera");
                             ui.checkbox(&mut self.cam_preview, "Camera preview in the corner")
                                 .on_hover_text("A small live view of the shot camera while you work in the free view");
                             ui.separator();
