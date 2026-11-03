@@ -273,6 +273,7 @@ enum QuickAction {
     Key,
     Duplicate,
     Delete,
+    CameraHere,
 }
 
 /// `holdBasket` → `Hold basket`, `tPose` → `T pose`.
@@ -1191,6 +1192,39 @@ impl EditorApp {
             .collect()
     }
 
+    /// A new 16:9 camera where the free view looks from, aimed at the orbit target, with a lens
+    /// whose frame fits inside what the view shows (the view is 45° tall); it becomes the active
+    /// camera if there is none.
+    fn camera_from_view(&mut self) {
+        let scene = self.scene();
+        let id = scene.unique_id("cam");
+        let aspect = 16.0_f32 / 9.0;
+        let view_aspect = self.last_view.map(|(r, _)| r.width() / r.height().max(1.0)).unwrap_or(aspect);
+        let mut tan_half = 22.5_f32.to_radians().tan();
+        if view_aspect < aspect {
+            // a narrow view: match its width instead, so the frame stays inside it
+            tan_half *= view_aspect / aspect;
+        }
+        let focal = ((36.0 / aspect) / (2.0 * tan_half)).clamp(8.0, 300.0);
+        let n = scene.entities.iter().filter(|e| matches!(e.kind, EntityKind::Camera(_))).count();
+        let name = format!("Cam {}", (b'A' + (n as u8).min(25)) as char);
+        let steps = json!([
+            {"command": "entity.create", "params": {"type": "camera", "id": id, "name": name,
+                "position": self.orbit.eye().to_array(),
+                "camera": {"focalLengthMm": (focal * 10.0).round() / 10.0, "aspect": aspect},
+                "makeActive": scene.active_camera.is_none()}},
+            {"command": "camera.lookAt", "params": {"id": id, "target": self.orbit.target.to_array()}},
+        ]);
+        match hub::dispatch(&self.hub, json!({"batch": steps})) {
+            Ok(_) => {
+                self.also.clear();
+                self.select(Some(id));
+                self.toast(format!("{name} placed where you are looking from: + Shot or the Shots row uses it"));
+            }
+            Err(e) => self.toast(format!("Could not add a camera: {}", e.message)),
+        }
+    }
+
     /// Put the selection on the clipboard as a shotstage clip (and delete it for Cut).
     fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
         let ids = self.selection_roots();
@@ -1329,6 +1363,7 @@ impl EditorApp {
         out.push(act("Redo", "Cmd/Ctrl+Shift+Z", QuickAction::Redo));
         out.push(act("New scene", "clear everything (undoable)", QuickAction::New));
         out.push(act("Toggle shadows", "", QuickAction::Shadows));
+        out.push(act("New camera from this view", "where you are looking from", QuickAction::CameraHere));
         if sel.is_some() {
             out.push(act("Focus the selection", "F", QuickAction::Focus));
             out.push(act("Key the selection", "K: keyframe at the playhead", QuickAction::Key));
@@ -1417,6 +1452,7 @@ impl EditorApp {
                 QuickAction::Key => self.key_selection(),
                 QuickAction::Duplicate => self.duplicate_selection(),
                 QuickAction::Delete => self.delete_selection(),
+                QuickAction::CameraHere => self.camera_from_view(),
             },
         }
     }
@@ -2469,18 +2505,17 @@ impl EditorApp {
                             .on_hover_text("Put this camera where you are looking from in the view")
                             .clicked()
                         {
+                            // one undo step: move, aim, and key it if it is animated
                             let eye = self.orbit.eye();
-                            let mut p = json!({"id": id, "position": eye.to_array(), "frame": frame});
+                            let mut steps = vec![
+                                json!({"command": "entity.moveTo", "params": {"id": id, "position": eye.to_array(), "frame": frame}}),
+                                json!({"command": "camera.lookAt", "params": {"id": id, "target": self.orbit.target.to_array()}}),
+                            ];
                             if self.keyed(&scene, &id) {
-                                p["keyframeAt"] = json!(frame.round());
+                                steps.push(json!({"command": "keyframe.set", "params": {"id": id, "property": "transform", "frame": frame.round()}}));
                             }
-                            self.run("entity.moveTo", p);
-                            self.run("camera.lookAt", json!({"id": id, "target": self.orbit.target.to_array()}));
-                            if self.keyed(&scene, &id) {
-                                self.run(
-                                    "keyframe.set",
-                                    json!({"id": id, "property": "transform", "frame": frame.round()}),
-                                );
+                            if let Err(e) = hub::dispatch(&self.hub, json!({"batch": steps})) {
+                                self.toast(format!("Could not match the view: {}", e.message));
                             }
                         }
                         ui.checkbox(&mut self.safe_areas, "Safe areas")
@@ -4576,6 +4611,11 @@ impl EditorApp {
                             .clicked()
                         {
                             crate::files::save_frame(&self.hub, 1920, &self.saved);
+                        }
+                        if !self.look_through
+                            && ui.button("+ Camera").on_hover_text("A new camera right where you are looking from").clicked()
+                        {
+                            self.camera_from_view();
                         }
                         ui.menu_button("View ▾", |ui| {
                             ui.checkbox(&mut self.shadows, "Shadows")
