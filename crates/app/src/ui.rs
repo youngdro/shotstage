@@ -246,6 +246,11 @@ enum Gesture {
         id: String,
         key: String,
     },
+    /// Drag where a light points (a handle on the surface it shines at).
+    LightAim {
+        id: String,
+        key: String,
+    },
     /// Drag a key point of a motion path (moves that key's position).
     PathKey {
         id: String,
@@ -727,6 +732,9 @@ impl EditorApp {
     fn animate_section(&mut self, ui: &mut egui::Ui, scene: &Scene, id: &str, frame: f32) {
         use shotstage_commands::motion::{Group, PRESETS};
         let is_cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));
+        if matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Light(_))) {
+            return;
+        }
         let person = rig::person_root(scene, id).ok();
         let groups: &[Group] = if is_cam {
             &[Group::Camera]
@@ -1404,6 +1412,47 @@ impl EditorApp {
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Drop to surface").on_hover_text("entity.place").clicked() {
                         self.run("entity.place", json!({"id": id, "frame": frame}));
+                    }
+                    // props can be held by a person (they follow the hand)
+                    if person.is_none() {
+                        let held_by = e.parent.as_ref().filter(|p| rig::is_joint(&scene, p)).cloned();
+                        match held_by {
+                            Some(_) => {
+                                if ui
+                                    .button("Let go")
+                                    .on_hover_text("Stop following the hand (stays where it is)")
+                                    .clicked()
+                                {
+                                    self.run("entity.attach", json!({"id": id, "to": null}));
+                                }
+                            }
+                            None => {
+                                let people: Vec<(String, String)> = scene
+                                    .entities
+                                    .iter()
+                                    .filter(|x| {
+                                        x.parent.is_none() && rig::person_root(&scene, &x.id).is_ok_and(|r| r == x.id)
+                                    })
+                                    .map(|x| (x.id.clone(), x.name.clone()))
+                                    .collect();
+                                if !people.is_empty() {
+                                    ui.menu_button("Hold in hand", |ui| {
+                                        for (pid, pname) in &people {
+                                            for (hand, label) in [("right", "right hand"), ("left", "left hand")] {
+                                                if ui.button(format!("{pname} · {label}")).clicked() {
+                                                    self.run(
+                                                        "entity.attach",
+                                                        json!({"id": id, "to": pid, "hand": hand}),
+                                                    );
+                                                    self.toast("It now follows the hand: pose or animate the person");
+                                                    ui.close();
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
                     }
                     if ui.button("↺ 45°").on_hover_text("R").clicked() {
                         self.run("entity.rotate", json!({"id": id, "degrees": 45, "frame": frame}));
@@ -2515,6 +2564,18 @@ impl EditorApp {
                 .collect();
             Some((id, line, keys))
         });
+        // a selected light's aim point: the surface it shines at, draggable
+        let aim: Option<(String, Pos2)> = selected.as_ref().filter(|_| !clean).and_then(|s| {
+            let EntityKind::Light(l) = &scene.get(s).ok()?.kind else { return None };
+            if l.kind == shotstage_core::LightKind::Point {
+                return None;
+            }
+            let w = world_at(&scene, s, f).ok()?;
+            let (o, d) = (w.w_axis.truncate(), w.transform_vector3(Vec3::NEG_Z).normalize_or_zero());
+            let opts = RayOptions { ground: true, ..Default::default() };
+            let hit = raycast(&scene, f, o, d, &opts).map(|h| Vec3::from_array(h.point)).unwrap_or(o + d * 3.0);
+            Some((s.clone(), project(rect, &view, hit)?))
+        });
         let path_key_at = |p: Pos2| -> Option<(String, f32, Vec3)> {
             let (id, _, keys) = path.as_ref()?;
             keys.iter()
@@ -2579,7 +2640,12 @@ impl EditorApp {
                     })
                     .and_then(|h| joint_at(&scene, h, hit_point, f))
                     .map(|j| drive_joint(&scene, &j));
-                self.drag = if let Some((id, frame, origin)) = path_key_at(start) {
+                self.drag = if let Some(id) =
+                    aim.as_ref().filter(|(_, sp)| (*sp - start).length() < 9.0).map(|(id, _)| id.clone())
+                {
+                    let key = self.new_key("aim");
+                    Gesture::LightAim { id, key }
+                } else if let Some((id, frame, origin)) = path_key_at(start) {
                     let key = self.new_key("path");
                     self.hub.borrow_mut().frame = frame;
                     Gesture::PathKey { id, frame, origin, key }
@@ -2724,6 +2790,13 @@ impl EditorApp {
                             }
                             self.run_key(&key, "pose.aim", p);
                         }
+                    }
+                }
+                Gesture::LightAim { id, key } if resp.dragged() => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    let opts = RayOptions { ground: true, eye: Some(o), ..Default::default() };
+                    if let Some(h) = raycast(&scene, f, o, d, &opts) {
+                        self.run_key(&key, "camera.lookAt", json!({"id": id, "target": h.point}));
                     }
                 }
                 Gesture::PathKey { id, frame, origin, key } if resp.dragged() => {
@@ -2965,6 +3038,26 @@ impl EditorApp {
                 egui::FontId::monospace(12.0),
                 Color32::from_white_alpha(180),
             );
+        }
+        if let Some((id, sp)) = &aim
+            && let Some(lp) = world_at(&scene, id, f).ok().and_then(|w| project(rect, &view, w.w_axis.truncate()))
+        {
+            let lit = matches!(&self.drag, Gesture::LightAim { .. })
+                || ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| (p - *sp).length() < 9.0);
+            let col = Color32::from_rgb(255, 210, 90);
+            painter.add(egui::Shape::dashed_line(&[lp, *sp], (1.0, col.gamma_multiply(0.7)), 6.0, 4.0));
+            painter.circle_stroke(*sp, if lit { 9.0 } else { 7.0 }, (2.0, col));
+            painter.circle_filled(*sp, 2.5, col);
+            if lit {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                painter.text(
+                    *sp + Vec2::new(12.0, -12.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "drag to aim",
+                    egui::FontId::proportional(11.0),
+                    col,
+                );
+            }
         }
         if let Some((id, line, keys)) = &path {
             let cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));

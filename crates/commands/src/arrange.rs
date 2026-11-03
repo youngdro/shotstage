@@ -73,6 +73,20 @@ struct DistributeParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AttachParams {
+    /// The prop (its group) to attach.
+    id: String,
+    /// What it follows: a person's hand (`<person>_wrist_r`, or the person with `hand`), or any
+    /// entity. Null detaches it (it stays where it is).
+    to: Option<String>,
+    /// With a person as `to`: `right` (default) or `left`.
+    hand: Option<String>,
+    /// Move the prop into the hand (its centre at the palm). Default true for hands.
+    snap: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LookParams {
     /// The person (root, joint or part).
     id: String,
@@ -223,6 +237,51 @@ fn distribute(scene: &mut Scene, p: DistributeParams) -> CmdResult<Value> {
     Ok(json!({ "moved": n - 1 }))
 }
 
+fn attach(scene: &mut Scene, p: AttachParams) -> CmdResult<Value> {
+    scene.get(&p.id)?;
+    let frame = scene.timeline.start as f32;
+    let Some(to) = p.to else {
+        let w = scene.world_matrix(&p.id)?;
+        scene.set_parent(&p.id, None)?;
+        keep_world(scene, &p.id, w)?;
+        return Ok(json!({ "id": p.id, "parent": Value::Null }));
+    };
+    // a person means one of their hands
+    let to = match rig::person_root(scene, &to) {
+        Ok(root) if rig::joint_name(scene, &to).is_none() => {
+            let side = match p.hand.as_deref().unwrap_or("right") {
+                "left" | "l" => "l",
+                "right" | "r" => "r",
+                other => return Err(CommandError::invalid(format!("hand must be left or right, not `{other}`"))),
+            };
+            format!("{root}_wrist_{side}")
+        }
+        _ => to,
+    };
+    scene.get(&to)?;
+    if spatial::subtree(scene, &p.id).contains(&to) {
+        return Err(CommandError::invalid("cannot attach something to itself or its child"));
+    }
+    let hand = rig::joint_name(scene, &to).is_some_and(|j| j.starts_with("wrist"));
+    let w = scene.world_matrix(&p.id)?;
+    scene.set_parent(&p.id, Some(&to))?;
+    keep_world(scene, &p.id, w)?;
+    if p.snap.unwrap_or(hand) {
+        // put the prop's centre at the palm: the middle of the hand mesh
+        let palm = scene
+            .children(Some(&to))
+            .find(|e| e.name.starts_with("hand"))
+            .map(|e| e.id.clone())
+            .and_then(|h| spatial::bounds(scene, &h, frame).ok().flatten())
+            .map(|b| b.center())
+            .unwrap_or(world_at(scene, &to, frame)?.w_axis.truncate());
+        if let Some(b) = spatial::bounds(scene, &p.id, frame)? {
+            shift(scene, &p.id, palm - b.center())?;
+        }
+    }
+    Ok(json!({ "id": p.id, "parent": to }))
+}
+
 fn look(scene: &mut Scene, p: LookParams) -> CmdResult<Value> {
     let root = rig::person_root(scene, &p.id)?;
     let frame = crate::builtin::frame_ok(p.frame.unwrap_or(scene.timeline.start as f32))?;
@@ -254,6 +313,7 @@ pub fn commands() -> Vec<Command> {
         command!("entity.ungroup", "Dissolve a group: its children move up a level and keep their place.", mutates: true, IdOnly, ungroup),
         command!("entity.align", "Line up entities' bounds on a world axis: min edges, centres or max edges.", mutates: true, AlignParams, align),
         command!("entity.distribute", "Space three or more entities evenly along a world axis (the outer two stay).", mutates: true, DistributeParams, distribute),
+        command!("entity.attach", "Make a prop follow something: a person's hand (it moves with their poses and actions), or any entity; null detaches it. Hands snap the prop to the palm.", mutates: true, AttachParams, attach),
         command!("person.lookAt", "Turn a person's head and neck towards an entity (e.g. the camera) or a point.", mutates: true, LookParams, look),
     ]
 }
@@ -293,5 +353,15 @@ mod tests {
         let r = s.dispatch("person.lookAt", json!({"id": "m", "target": [5, 1.6, 5]})).unwrap().result;
         assert!(r["yawDegrees"].as_f64().unwrap() > 60.0, "{r}");
         assert!(s.dispatch("entity.ungroup", json!({"id": "m"})).is_err());
+        // a phone in the right hand follows the hand when the arm moves
+        s.dispatch("prefab.create", json!({"kind": "phone", "id": "ph", "position": [3, 0, 3]})).unwrap();
+        let r = s.dispatch("entity.attach", json!({"id": "ph", "to": "m"})).unwrap().result;
+        assert_eq!(r["parent"], "m_wrist_r");
+        let before = spatial::bounds(s.scene(), "ph", 0.0).unwrap().unwrap().center();
+        s.dispatch("pose.set", json!({"id": "m", "pose": "phone"})).unwrap();
+        let after = spatial::bounds(s.scene(), "ph", 0.0).unwrap().unwrap().center();
+        assert!(after.y > before.y + 0.3, "the phone rose with the hand: {before} -> {after}");
+        s.dispatch("entity.attach", json!({"id": "ph", "to": null})).unwrap();
+        assert!(s.scene().get("ph").unwrap().parent.is_none());
     }
 }

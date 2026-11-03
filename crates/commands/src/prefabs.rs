@@ -43,6 +43,9 @@ pub enum PrefabKind {
     Scale,
     PriceSign,
     Pallet,
+    Phone,
+    ShoppingBag,
+    Handbag,
     Bottle,
     Jar,
     Can,
@@ -192,6 +195,12 @@ pub const PREFABS: &[PrefabInfo] = &[
     info!(Scale, "scale", "scale", "Scale", Retail, "Produce weighing scale with display"),
     info!(PriceSign, "priceSign", "price_sign", "Sign", Retail, "Price sign on a stand, 1.3 m"),
     info!(Pallet, "pallet", "pallet", "Pallet", Retail, "Pallet 1.2 × 1.0 m stacked with cartons"),
+    info!(
+        Phone,
+        "phone", "phone", "Phone", Retail, "Smartphone 7 × 15 cm (screen faces +Z); hold it with Hold in hand"
+    ),
+    info!(ShoppingBag, "shoppingBag", "bag", "Bag", Retail, "Paper shopping bag with handles, 32 cm"),
+    info!(Handbag, "handbag", "handbag", "Handbag", Retail, "Handbag with a strap, 28 cm"),
     info!(
         Bottle,
         "bottle",
@@ -638,6 +647,36 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
             part("pole", cyl(0.015, 1.0), [0.0, 0.53, 0.0], METAL),
             part("board", cube(0.6, 0.4, 0.02), [0.0, 1.15, 0.0], [0.95, 0.85, 0.3]),
             part("label", cube(0.5, 0.12, 0.022), [0.0, 1.22, 0.0], RED),
+        ],
+        Phone => vec![
+            part("body", cube(0.072, 0.15, 0.008), [0.0, 0.075, 0.0], DARK),
+            part("screen", cube(0.066, 0.138, 0.001), [0.0, 0.075, 0.0045], [0.25, 0.35, 0.5]),
+        ],
+        ShoppingBag => vec![
+            part("bag", cube(0.32, 0.28, 0.14), [0.0, 0.14, 0.0], CARDBOARD),
+            Part {
+                rot: [0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 0.4],
+                ..part(
+                    "handles",
+                    Primitive::Torus { major_radius: 0.07, minor_radius: 0.006, major_segments: 16, minor_segments: 6 },
+                    [0.0, 0.3, 0.0],
+                    WOOD,
+                )
+            },
+        ],
+        Handbag => vec![
+            part("bag", cube(0.28, 0.2, 0.1), [0.0, 0.1, 0.0], [0.5, 0.18, 0.18]),
+            part("flap", cube(0.28, 0.08, 0.105), [0.0, 0.16, 0.002], [0.42, 0.14, 0.14]),
+            Part {
+                scale: [1.0, 1.0, 0.3],
+                ..part(
+                    "strap",
+                    Primitive::Torus { major_radius: 0.11, minor_radius: 0.008, major_segments: 20, minor_segments: 6 },
+                    [0.0, 0.22, 0.0],
+                    DARK,
+                )
+            },
         ],
         Pallet => vec![
             part("deck", cube(1.2, 0.04, 1.0), [0.0, 0.124, 0.0], WOOD),
