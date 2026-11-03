@@ -137,6 +137,32 @@ impl Shotstage {
     }
 
     /// Run `[{command, params}, ...]` as one transaction (one undo step, all or nothing).
+    /// Add a detailed rigged person (see `person.catalog`), loading its file from `people/`
+    /// next to the page first: `await shotstage.addPerson("realisticWoman", {position: [1, 0, 0]})`.
+    #[wasm_bindgen(js_name = addPerson)]
+    pub fn add_person(&self, variant: String, params: JsValue) -> js_sys::Promise {
+        let hub = self.hub.clone();
+        let extra = from_js(&params);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let mut p = match extra? {
+                Value::Null => json!({}),
+                v => v,
+            };
+            let asset = shotstage_commands::people::PEOPLE
+                .iter()
+                .find(|a| a.key == variant)
+                .ok_or_else(|| JsValue::from_str(&format!("no person `{variant}`; see person.catalog")))?;
+            let bytes = crate::files::fetch_bytes(&format!("people/{}", asset.file))
+                .await
+                .map_err(|e| JsValue::from_str(&e))?;
+            p["variant"] = json!(variant);
+            p["data"] = json!(shotstage_commands::model::encode(&bytes));
+            hub::dispatch(&hub, json!({"command": "person.create", "params": p}))
+                .map(|o| to_js(&o.result))
+                .map_err(err_js)
+        })
+    }
+
     pub fn batch(&self, steps: JsValue) -> Result<JsValue, JsValue> {
         hub::dispatch(&self.hub, json!({ "batch": from_js(&steps)? })).map(|o| to_js(&o.result)).map_err(err_js)
     }

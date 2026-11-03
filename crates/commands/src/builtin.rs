@@ -850,5 +850,6 @@ pub fn registry() -> Vec<Command> {
     .chain(crate::templates::commands())
     .chain(crate::arrange::commands())
     .chain(crate::clipboard::commands())
+    .chain(crate::people::commands())
     .collect()
 }

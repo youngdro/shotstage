@@ -84,6 +84,16 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
     for a in &overlay.also_selected {
         selected_set.extend(spatial::subtree(scene, a));
     }
+    // bones of imported skeletons: no marker unless selected (finger tips would clutter hands)
+    let bones: std::collections::HashSet<&str> = scene
+        .entities
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntityKind::Mesh { source: shotstage_core::MeshSource::Skinned { skin, .. }, .. } => Some(skin),
+            _ => None,
+        })
+        .flat_map(|skin| skin.joints.iter().map(String::as_str))
+        .collect();
     for (index, e) in scene.entities.iter().enumerate() {
         if is_hidden(scene, &e.id) {
             continue;
@@ -154,7 +164,7 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
             EntityKind::Empty
                 if overlay.cameras
                     && (overlay.selected.as_deref() == Some(e.id.as_str())
-                        || scene.children(Some(&e.id)).next().is_none()) =>
+                        || (scene.children(Some(&e.id)).next().is_none() && !bones.contains(e.id.as_str()))) =>
             {
                 let c = if selected { SELECT } else { [0.8, 0.8, 0.8] };
                 for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
