@@ -21,6 +21,10 @@
 视口工具栏的 **📷 Save frame** 把当前帧透过镜头的画面存成 1920 宽的 PNG。
 
 
+### Scene list
+
+Every row has show/hide (👁) and lock (🔒) toggles. Shift+click adds a row to the selection; double-click a row, or click the name at the top of the properties, to rename it. Right-click for Focus, Rename, Duplicate, Hide, Lock and Delete. With more than a handful of objects, a filter box narrows the list by name.
+
 ### Quick actions
 
 **Cmd/Ctrl+K** (or `/`, or the **Actions** button) opens one search box over everything: blocks to add, lighting presets, templates, and, for the selection, its poses, character actions, object motion or camera moves, plus editor actions (save, undo, focus, duplicate…). Type a few letters, use ↑↓, and press Enter. Each pick is one ordinary undo step.

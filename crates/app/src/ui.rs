@@ -58,6 +58,151 @@ impl Block {
     }
 }
 
+/// What a scene-tree row asked for this frame.
+enum TreeAct {
+    /// id, add to the selection (Shift)
+    Pick(String, bool),
+    Visible(String, bool),
+    Locked(String, bool),
+    Rename(String, String),
+    Focus(String),
+    Duplicate(String),
+    Delete(String),
+}
+
+struct TreeCtx<'a> {
+    scene: &'a Scene,
+    selected: &'a Option<String>,
+    also: &'a [String],
+    /// (id, name being typed)
+    renaming: &'a mut Option<(String, String)>,
+    acts: Vec<TreeAct>,
+}
+
+fn tree_level(ui: &mut egui::Ui, cx: &mut TreeCtx, parent: Option<&str>) {
+    let scene = cx.scene;
+    for e in scene.children(parent) {
+        if scene.children(Some(&e.id)).next().is_none() {
+            tree_row(ui, cx, e);
+            continue;
+        }
+        // groups start folded; open the ones holding the selection
+        let id = ui.make_persistent_id(("tree", &e.id));
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+        if cx.selected.as_ref().is_some_and(|s| s != &e.id && spatial::subtree(scene, &e.id).contains(s)) {
+            state.set_open(true);
+        }
+        state.show_header(ui, |ui| tree_row(ui, cx, e)).body(|ui| tree_level(ui, cx, Some(&e.id)));
+    }
+}
+
+/// One row: icon and name (click selects, Shift+click adds, double-click renames, right-click
+/// for more), with show/lock toggles on the right (bright when hidden or locked).
+fn tree_row(ui: &mut egui::Ui, cx: &mut TreeCtx, e: &shotstage_core::Entity) {
+    let scene = cx.scene;
+    let joint = rig::is_joint(scene, &e.id);
+    let icon = match e.kind {
+        EntityKind::Mesh { .. } => "■",
+        EntityKind::Camera(_) => "◉",
+        EntityKind::Light(_) => "☀",
+        EntityKind::Image(_) => "▨",
+        EntityKind::Empty if joint => "•",
+        EntityKind::Empty => "▣",
+    };
+    if let Some((rid, buf)) = cx.renaming.as_mut()
+        && *rid == e.id
+    {
+        let r = ui.add(egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 8.0));
+        if r.lost_focus() {
+            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                cx.acts.push(TreeAct::Rename(e.id.clone(), buf.clone()));
+            }
+            *cx.renaming = None;
+        } else if !r.has_focus() {
+            r.request_focus();
+        }
+        return;
+    }
+    let on = cx.selected.as_deref() == Some(&e.id) || cx.also.contains(&e.id);
+    let active = if scene.active_camera.as_deref() == Some(&e.id) { " ★" } else { "" };
+    let text = format!("{icon} {}{active}", e.name);
+    let text = if e.visible { egui::RichText::new(text) } else { egui::RichText::new(text).weak() };
+    ui.horizontal(|ui| {
+        // toggles on the right, so the name gets what is left
+        let n = if joint { 1.0 } else { 2.0 };
+        let toggle_w = n * (18.0 + ui.spacing().item_spacing.x) + 6.0;
+        let r = ui
+            .allocate_ui_with_layout(
+                Vec2::new((ui.available_width() - toggle_w).max(40.0), 18.0),
+                egui::Layout::top_down_justified(egui::Align::LEFT),
+                |ui| ui.add(egui::Button::selectable(on, text).truncate()),
+            )
+            .inner;
+        if r.clicked() {
+            cx.acts.push(TreeAct::Pick(e.id.clone(), ui.input(|i| i.modifiers.shift)));
+        }
+        if r.double_clicked() && !joint {
+            *cx.renaming = Some((e.id.clone(), e.name.clone()));
+        }
+        r.context_menu(|ui| {
+            if ui.button("Focus").clicked() {
+                cx.acts.push(TreeAct::Focus(e.id.clone()));
+                ui.close();
+            }
+            if !joint {
+                if ui.button("Rename").clicked() {
+                    *cx.renaming = Some((e.id.clone(), e.name.clone()));
+                    ui.close();
+                }
+                if ui.button("Duplicate").clicked() {
+                    cx.acts.push(TreeAct::Duplicate(e.id.clone()));
+                    ui.close();
+                }
+            }
+            if ui.button(if e.visible { "Hide" } else { "Show" }).clicked() {
+                cx.acts.push(TreeAct::Visible(e.id.clone(), !e.visible));
+                ui.close();
+            }
+            if !joint {
+                if ui.button(if e.locked { "Unlock" } else { "Lock" }).clicked() {
+                    cx.acts.push(TreeAct::Locked(e.id.clone(), !e.locked));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Delete").clicked() {
+                    cx.acts.push(TreeAct::Delete(e.id.clone()));
+                    ui.close();
+                }
+            }
+        });
+        {
+            let small = |s: &str, active: bool| {
+                let t = egui::RichText::new(s).size(12.0);
+                egui::Button::new(if active { t } else { t.weak() }).frame(false).min_size(Vec2::new(18.0, 18.0))
+            };
+            if ui
+                .add(small(if e.visible { "👁" } else { "⊘" }, !e.visible))
+                .on_hover_text(if e.visible { "Hide" } else { "Show" })
+                .clicked()
+            {
+                cx.acts.push(TreeAct::Visible(e.id.clone(), !e.visible));
+            }
+            if !joint
+                && ui
+                    .add(small(if e.locked { "🔒" } else { "🔓" }, e.locked))
+                    .on_hover_text(if e.locked {
+                        "Unlock (drags pass through locked objects)"
+                    } else {
+                        "Lock: drags pass through it"
+                    })
+                    .clicked()
+            {
+                cx.acts.push(TreeAct::Locked(e.id.clone(), !e.locked));
+            }
+        }
+    });
+}
+
 /// One entry of the quick-actions box.
 struct QuickItem {
     label: String,
@@ -518,6 +663,11 @@ pub struct EditorApp {
     shadows: bool,
     /// More selected objects (Shift+click), besides the hub's selection.
     also: Vec<String>,
+    /// Scene tree: name filter and the row being renamed (id, text).
+    tree_filter: String,
+    renaming: Option<(String, String)>,
+    /// Properties header: the name being edited (id, text).
+    name_edit: Option<(String, String)>,
     /// The camera the next picked picture becomes the reference of.
     reference_for: Option<String>,
     /// egui textures of reference pictures: asset key -> (identity of the pixels, texture).
@@ -607,6 +757,9 @@ impl EditorApp {
             shot_drag: None,
             key_menu: None,
             motion_filter: String::new(),
+            tree_filter: String::new(),
+            renaming: None,
+            name_edit: None,
             quick: None,
 
             motion_secs: 0.0,
@@ -1706,61 +1859,112 @@ impl EditorApp {
         ui.horizontal(|ui| {
             ui.strong("Scene");
             ui.weak(format!("{} objects", scene.entities.iter().filter(|e| e.parent.is_none()).count()));
+            if scene.entities.len() > 8 {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tree_filter)
+                        .hint_text("Filter…")
+                        .desired_width(ui.available_width()),
+                );
+            }
         });
+        let filter = self.tree_filter.trim().to_lowercase();
+        // with a filter, show the matching objects flat
+        let flat: Option<Vec<&shotstage_core::Entity>> = (!filter.is_empty()).then(|| {
+            scene
+                .entities
+                .iter()
+                .filter(|e| !rig::is_joint(&scene, &e.id) && e.name.to_lowercase().contains(&filter))
+                .collect()
+        });
+        let mut ctx = TreeCtx {
+            scene: &scene,
+            selected: &selected,
+            also: &self.also,
+            renaming: &mut self.renaming,
+            acts: Vec::new(),
+        };
         egui::ScrollArea::vertical().id_salt("scene_tree").auto_shrink([false, false]).show(ui, |ui| {
-            fn row(ui: &mut egui::Ui, scene: &Scene, e: &shotstage_core::Entity, selected: &Option<String>) -> bool {
-                let icon = match e.kind {
-                    EntityKind::Mesh { .. } => "■",
-                    EntityKind::Camera(_) => "◉",
-                    EntityKind::Light(_) => "☀",
-                    EntityKind::Image(_) => "▨",
-                    EntityKind::Empty if rig::is_joint(scene, &e.id) => "•",
-                    EntityKind::Empty => "▣",
-                };
-                let active = if scene.active_camera.as_deref() == Some(&e.id) { " ★" } else { "" };
-                let text = format!("{icon} {}{active}", e.name);
-                let text = if e.visible { egui::RichText::new(text) } else { egui::RichText::new(text).weak() };
-                ui.selectable_label(selected.as_deref() == Some(&e.id), text).clicked()
-            }
-            fn tree(
-                ui: &mut egui::Ui,
-                scene: &Scene,
-                parent: Option<&str>,
-                selected: &Option<String>,
-                picked: &mut Option<Option<String>>,
-            ) {
-                for e in scene.children(parent) {
-                    if scene.children(Some(&e.id)).next().is_none() {
-                        if row(ui, scene, e, selected) {
-                            *picked = Some(Some(e.id.clone()));
-                        }
-                        continue;
+            match &flat {
+                Some(list) => {
+                    for e in list {
+                        tree_row(ui, &mut ctx, e);
                     }
-                    // groups start folded; open the ones holding the selection
-                    let id = ui.make_persistent_id(("tree", &e.id));
-                    let mut state =
-                        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-                    if selected.as_ref().is_some_and(|s| s != &e.id && spatial::subtree(scene, &e.id).contains(s)) {
-                        state.set_open(true);
+                    if list.is_empty() {
+                        ui.weak("Nothing matches.");
                     }
-                    state
-                        .show_header(ui, |ui| {
-                            if row(ui, scene, e, selected) {
-                                *picked = Some(Some(e.id.clone()));
-                            }
-                        })
-                        .body(|ui| tree(ui, scene, Some(&e.id), selected, picked));
                 }
-            }
-            let mut picked = None;
-            tree(ui, &scene, None, &selected, &mut picked);
-            if let Some(p) = picked {
-                self.select(p);
+                None => tree_level(ui, &mut ctx, None),
             }
             if scene.entities.is_empty() {
                 ui.weak("Empty scene. Add blocks above, or drive it from the console / API.");
             }
         });
+        let acts = std::mem::take(&mut ctx.acts);
+        for act in acts {
+            match act {
+                TreeAct::Pick(id, false) => {
+                    self.also.clear();
+                    self.select(Some(id));
+                }
+                TreeAct::Pick(id, true) => match self.selected() {
+                    None => self.select(Some(id)),
+                    Some(p) if p == id => {}
+                    Some(_) => match self.also.iter().position(|a| *a == id) {
+                        Some(i) => {
+                            self.also.remove(i);
+                        }
+                        None => self.also.push(id),
+                    },
+                },
+                TreeAct::Visible(id, v) => _ = self.run("entity.setVisible", json!({"id": id, "visible": v})),
+                TreeAct::Locked(id, v) => _ = self.run("entity.setLocked", json!({"id": id, "locked": v})),
+                TreeAct::Rename(id, name) => {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        self.run("entity.rename", json!({"id": id, "name": name}));
+                    }
+                }
+                TreeAct::Focus(id) => {
+                    self.also.clear();
+                    self.select(Some(id));
+                    self.focus_selection();
+                }
+                TreeAct::Duplicate(id) => {
+                    if let Some(r) = self.run("entity.duplicate", json!({"id": id})) {
+                        self.select(r["id"].as_str().map(str::to_string));
+                    }
+                }
+                TreeAct::Delete(id) => _ = self.run("entity.delete", json!({ "id": id })),
+            }
+        }
+    }
+
+    /// The selection's name as a heading; click it to rename.
+    fn name_header(&mut self, ui: &mut egui::Ui, id: &str, name: &str, editable: bool) {
+        if let Some((eid, buf)) = self.name_edit.as_mut()
+            && eid == id
+        {
+            let r = ui.add(egui::TextEdit::singleline(buf).font(egui::TextStyle::Heading).desired_width(f32::INFINITY));
+            // (lost_focus is read before asking for focus again, or it never reports)
+            if r.lost_focus() {
+                let new = buf.trim().to_string();
+                self.name_edit = None;
+                if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && !new.is_empty() && new != name {
+                    self.run("entity.rename", json!({"id": id, "name": new}));
+                }
+            } else if !r.has_focus() {
+                r.request_focus();
+            }
+            return;
+        }
+        let r = ui.add(egui::Label::new(egui::RichText::new(name).heading()).sense(if editable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        }));
+        if editable && r.on_hover_cursor(CursorIcon::Text).on_hover_text("Click to rename").clicked() {
+            self.name_edit = Some((id.to_string(), name.to_string()));
+        }
     }
 
     fn properties(&mut self, ui: &mut egui::Ui) {
@@ -1789,7 +1993,7 @@ impl EditorApp {
             (EntityKind::Empty, ..) if scene.children(Some(&id)).next().is_some() => "group",
             (k, ..) => k.type_name(),
         };
-        ui.heading(&e.name);
+        self.name_header(ui, &id, &e.name, joint.is_none());
         let dims = matches!(e.kind, EntityKind::Mesh { .. } | EntityKind::Empty | EntityKind::Image(_))
             .then(|| spatial::bounds(&scene, &id, frame).ok().flatten())
             .flatten()
