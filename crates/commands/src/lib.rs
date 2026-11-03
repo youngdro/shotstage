@@ -10,6 +10,7 @@ mod builtin;
 pub mod images;
 pub mod lights;
 pub mod model;
+pub mod motion;
 mod placement;
 pub mod prefabs;
 pub mod rig;

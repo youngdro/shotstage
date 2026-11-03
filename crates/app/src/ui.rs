@@ -191,6 +191,13 @@ enum Gesture {
         id: String,
         key: String,
     },
+    /// Drag a key point of a motion path (moves that key's position).
+    PathKey {
+        id: String,
+        frame: f32,
+        origin: Vec3,
+        key: String,
+    },
     /// Esc pressed: ignore the rest of this drag.
     Cancelled,
 }
@@ -256,6 +263,47 @@ fn pick_grabbable(scene: &Scene, frame: f32, o: Vec3, d: Vec3) -> Option<String>
     (!locked).then_some(hit)
 }
 
+/// A row of the track strip: one object (a person with all its joints) and its key frames.
+struct TrackRow {
+    id: String,
+    label: String,
+    tracks: Vec<(String, TrackProperty)>,
+    frames: Vec<f32>,
+}
+
+/// A keyframe diamond being dragged along the track strip.
+#[derive(Clone)]
+struct KeyDrag {
+    row: String,
+    frame: f32,
+    key: String,
+}
+
+fn timeline_rows(scene: &Scene) -> Vec<TrackRow> {
+    let mut rows: Vec<TrackRow> = vec![];
+    for tr in &scene.timeline.tracks {
+        if tr.keys.is_empty() || !scene.contains(&tr.entity) {
+            continue;
+        }
+        let root = root_of(scene, &tr.entity);
+        let i = match rows.iter().position(|r| r.id == root) {
+            Some(i) => i,
+            None => {
+                let name = scene.get(&root).map(|e| e.name.clone()).unwrap_or_else(|_| root.clone());
+                rows.push(TrackRow { id: root.clone(), label: name, tracks: vec![], frames: vec![] });
+                rows.len() - 1
+            }
+        };
+        rows[i].tracks.push((tr.entity.clone(), tr.property));
+        rows[i].frames.extend(tr.keys.iter().map(|k| k.frame));
+    }
+    for r in &mut rows {
+        r.frames.sort_by(|a, b| a.total_cmp(b));
+        r.frames.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    }
+    rows
+}
+
 fn is_animated(scene: &Scene, id: &str) -> bool {
     scene.timeline.track(id, TrackProperty::Transform).is_some()
 }
@@ -301,6 +349,14 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Key every edit at the current frame.
+    auto_key: bool,
+    key_drag: Option<KeyDrag>,
+    /// The key a context menu on the track strip is about: (row, frame).
+    key_menu: Option<(String, f32)>,
+    motion_filter: String,
+    motion_secs: f32,
+    motion_strength: f32,
     /// Mode for the next picked image (card, billboard, backdrop, floor).
     image_mode: Option<&'static str>,
     /// Ignore scene lights (view option).
@@ -350,6 +406,12 @@ impl EditorApp {
             block_filter: String::new(),
             show_console: false,
             image_mode: None,
+            auto_key: false,
+            key_drag: None,
+            key_menu: None,
+            motion_filter: String::new(),
+            motion_secs: 0.0,
+            motion_strength: 1.0,
             studio_light: false,
             last_subject: None,
             toast: None,
@@ -426,7 +488,7 @@ impl EditorApp {
         }
         let mut p = json!({"id": id, "ray": {"origin": ray.0.to_array(), "direction": ray.1.to_array()},
             "offset": offset.to_array(), "snap": self.snap_value(ctrl), "frame": f});
-        if is_animated(&scene, id) {
+        if self.keyed(&scene, id) {
             p["keyframeAt"] = json!(f.round());
         }
         if p["snap"].is_null() {
@@ -524,6 +586,85 @@ impl EditorApp {
             Ok(None) => {}
             Err(e) => self.toast(format!("Export failed: {e}")),
         }
+    }
+
+    /// Motion presets for the selection: camera moves for a camera, actions for a person,
+    /// motion for anything else. One click writes editable keyframes from the playhead.
+    fn animate_section(&mut self, ui: &mut egui::Ui, scene: &Scene, id: &str, frame: f32) {
+        use shotstage_commands::motion::{Group, PRESETS};
+        let is_cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));
+        let person = rig::person_root(scene, id).ok();
+        let groups: &[Group] = if is_cam {
+            &[Group::Camera]
+        } else if person.is_some() {
+            &[Group::Character, Group::Object]
+        } else {
+            &[Group::Object]
+        };
+        let target = person.clone().unwrap_or_else(|| if is_cam { id.to_string() } else { root_of(scene, id) });
+        section(ui, "Animate", true, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.motion_filter)
+                    .hint_text("Search moves…")
+                    .desired_width(f32::INFINITY),
+            );
+            egui::Grid::new("motion_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                ui.label("Length");
+                ui.add(
+                    egui::DragValue::new(&mut self.motion_secs)
+                        .range(0.0..=60.0)
+                        .speed(0.05)
+                        .custom_formatter(|v, _| if v <= 0.0 { "preset".into() } else { format!("{v:.1} s") }),
+                )
+                .on_hover_text("How long the move takes (preset = its own length)");
+                ui.end_row();
+                ui.label("Strength");
+                ui.add(egui::Slider::new(&mut self.motion_strength, 0.25..=3.0).max_decimals(2));
+                ui.end_row();
+            });
+            let subject = self.last_subject.clone().filter(|s| scene.contains(s) && *s != target);
+            if is_cam {
+                match &subject {
+                    Some(s) => ui.weak(format!(
+                        "Moves around / looks at: {}",
+                        scene.get(s).map(|e| e.name.as_str()).unwrap_or(s)
+                    )),
+                    None => ui.weak("Select an object first to move around it (otherwise: what the camera looks at)."),
+                };
+            }
+            let filter = self.motion_filter.trim().to_lowercase();
+            ui.horizontal_wrapped(|ui| {
+                for p in PRESETS.iter().filter(|p| groups.contains(&p.group) && p.name != "pathFollow") {
+                    if !filter.is_empty() && !p.label.to_lowercase().contains(&filter) && !p.description.to_lowercase().contains(&filter) {
+                        continue;
+                    }
+                    if ui.button(p.label).on_hover_text(format!("{} ({} s)", p.description, p.seconds)).clicked() {
+                        let mut req = json!({"preset": p.name, "target": target, "start": frame.round(), "intensity": self.motion_strength});
+                        if self.motion_secs > 0.0 {
+                            req["duration"] = json!(self.motion_secs);
+                        }
+                        if is_cam && let Some(s) = &subject {
+                            req["subject"] = json!(s);
+                        }
+                        match hub::dispatch(&self.hub, json!({"command": "motion.apply", "params": req})) {
+                            Ok(o) => {
+                                // play it back right away
+                                self.hub.borrow_mut().frame = o.result["start"].as_f64().unwrap_or(0.0) as f32;
+                                self.playing = true;
+                                let (st, en) = (o.result["start"].as_f64().unwrap_or(0.0), o.result["end"].as_f64().unwrap_or(0.0));
+                                self.toast(format!("{}: frames {st:.0}–{en:.0}, {} keys · drag them on the timeline to retime", p.label, o.result["keys"]));
+                            }
+                            Err(e) => self.toast(format!("{}: {}", p.label, e.message)),
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    /// Should edits to `id` be keyed? (animated already, or Auto-key is on)
+    fn keyed(&self, scene: &Scene, id: &str) -> bool {
+        self.auto_key || is_animated(scene, id)
     }
 
     fn scene(&self) -> Scene {
@@ -660,6 +801,36 @@ impl EditorApp {
         if space {
             self.playing = !self.playing;
         }
+        let (key, home, end, step) = ui.input(|i| {
+            let step = if i.key_pressed(egui::Key::ArrowLeft) {
+                -1.0
+            } else if i.key_pressed(egui::Key::ArrowRight) {
+                1.0
+            } else {
+                0.0
+            };
+            (
+                i.key_pressed(egui::Key::K),
+                i.key_pressed(egui::Key::Home),
+                i.key_pressed(egui::Key::End),
+                step * if i.modifiers.shift { 10.0 } else { 1.0 },
+            )
+        });
+        let t = self.scene().timeline;
+        if key {
+            self.key_selection();
+        }
+        if home {
+            self.hub.borrow_mut().frame = t.start as f32;
+        }
+        if end {
+            self.hub.borrow_mut().frame = t.end as f32;
+        }
+        if step != 0.0 {
+            self.playing = false;
+            let mut h = self.hub.borrow_mut();
+            h.frame = (h.frame.round() + step).clamp(t.start as f32, t.end as f32);
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -729,8 +900,12 @@ impl EditorApp {
         let filter = self.block_filter.trim().to_lowercase();
         egui::ScrollArea::vertical().id_salt("blocks").auto_shrink([false, false]).show(ui, |ui| {
             let gap = ui.spacing().item_spacing.x;
-            let cols = ((ui.available_width() + gap) / (74.0 + gap)).floor().max(2.0);
-            let tile = ((ui.available_width() + gap) / cols - gap).floor();
+            // tiles fill the width inside a section (sections are indented)
+            let tile_for = |w: f32| {
+                let cols = ((w + gap) / (70.0 + gap)).floor().max(2.0);
+                ((w + gap) / cols - gap).floor() - 0.5
+            };
+            let tile = tile_for(ui.available_width() - ui.spacing().indent);
             for (title, open, blocks) in palette() {
                 // searching a section's name shows all of it
                 let whole = !filter.is_empty() && title.to_lowercase().contains(&filter);
@@ -744,6 +919,7 @@ impl EditorApp {
                     header = header.open(Some(true));
                 }
                 header.show(ui, |ui| {
+                    let tile = tile_for(ui.available_width());
                     ui.horizontal_wrapped(|ui| {
                         for b in &shown {
                             self.block_tile(ui, b, tile);
@@ -1033,9 +1209,10 @@ impl EditorApp {
             });
         }
 
+        self.animate_section(ui, &scene, &id, frame);
         let plain = person.is_none() && !matches!(e.kind, EntityKind::Empty);
         section(ui, "Transform", plain, |ui| {
-            let animated = scene.timeline.track(&id, TrackProperty::Transform).is_some();
+            let animated = self.keyed(&scene, &id);
             let t = local_at(&scene, &id, frame).unwrap_or(e.transform);
             let (mut pos, mut rot, mut scale) = (t.translation, t.euler_degrees(), t.scale);
             let (mut changed, mut started) = (false, false);
@@ -1220,7 +1397,7 @@ impl EditorApp {
 
     /// A bone of an imported skeleton: plain rotation sliders.
     fn bone_section(&mut self, ui: &mut egui::Ui, scene: &Scene, id: &str, frame: f32) {
-        let animated = is_animated(scene, id);
+        let animated = self.keyed(scene, id);
         section(ui, "Bone", true, |ui| {
             ui.weak("Drag the model's surface in the view to bend this bone, or turn the coloured rings.");
             let mut r = local_at(scene, id, frame).map(|t| t.euler_degrees()).unwrap_or_default();
@@ -1337,7 +1514,7 @@ impl EditorApp {
     }
 
     fn person_section(&mut self, ui: &mut egui::Ui, scene: &Scene, root: &str, frame: f32) {
-        let animated = rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
+        let animated = self.auto_key || rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
         section(ui, "Pose", true, |ui| {
             ui.weak("Click a body part to select its joint, then drag it (or the rings) to bend it.");
             ui.horizontal_wrapped(|ui| {
@@ -1404,7 +1581,7 @@ impl EditorApp {
         let Ok(root) = rig::person_root(scene, id) else { return };
         let legs =
             joint.starts_with("hip") || joint.starts_with("knee") || joint.starts_with("ankle") || joint == "pelvis";
-        let animated = is_animated(scene, id);
+        let animated = self.keyed(scene, id);
         let set = |this: &mut Self, values: Value, merge: Option<&str>| {
             let mut req = json!({"id": root, "joints": values, "frame": frame, "drop": legs});
             if animated {
@@ -1460,50 +1637,56 @@ impl EditorApp {
     fn bottom(&mut self, ui: &mut egui::Ui) {
         let scene = self.scene();
         let t = scene.timeline.clone();
+        let fps = t.fps.max(1.0);
         ui.add_space(3.0);
         ui.horizontal(|ui| {
+            if ui.button("⏮").on_hover_text("To the start (Home)").clicked() {
+                self.hub.borrow_mut().frame = t.start as f32;
+            }
             if ui
-                .add_sized([64.0, 22.0], egui::Button::new(if self.playing { "⏸ Pause" } else { "▶ Play" }))
+                .add_sized([62.0, 22.0], egui::Button::new(if self.playing { "⏸ Pause" } else { "▶ Play" }))
                 .on_hover_text("Space")
                 .clicked()
             {
                 self.playing = !self.playing;
             }
-            let mut f = self.frame();
-            // keep room for the controls on the right
-            let w = (ui.available_width() - 560.0).max(120.0);
-            ui.spacing_mut().slider_width = w;
-            ui.add(egui::Slider::new(&mut f, t.start as f32..=t.end as f32).step_by(1.0).show_value(false));
-            if f != self.frame() {
-                self.hub.borrow_mut().frame = f;
+            if ui.button("⏭").on_hover_text("To the end (End)").clicked() {
+                self.hub.borrow_mut().frame = t.end as f32;
             }
-            ui.monospace(format!("{:>4.0} / {}", self.frame(), t.end));
-            ui.weak(format!("{:.1} s", (self.frame() - t.start as f32) / t.fps));
+            let has_cam = camera_id_at(&scene, t.start as f32).is_some();
+            if ui
+                .add_enabled(has_cam, egui::Button::new("🎥 Preview shot"))
+                .on_hover_text("Play from the start, looking through the shot camera")
+                .clicked()
+            {
+                self.hub.borrow_mut().frame = t.start as f32;
+                self.look_through = true;
+                self.hub.borrow_mut().look_through = true;
+                self.playing = true;
+            }
             ui.separator();
-            let (mut fps, mut start, mut end) = (t.fps, t.start, t.end);
-            let a = ui.add(egui::DragValue::new(&mut fps).range(1.0..=120.0).suffix(" fps"));
+            ui.monospace(format!("{:>4.0}", self.frame()));
+            ui.weak(format!("/ {} · {:.2} s", t.end, (self.frame() - t.start as f32) / fps));
+            ui.separator();
+            let sel = self.selected();
+            if ui
+                .add_enabled(sel.is_some(), egui::Button::new("◆ Key"))
+                .on_hover_text("Keyframe the selection at this frame (K)")
+                .clicked()
+            {
+                self.key_selection();
+            }
+            ui.toggle_value(&mut self.auto_key, "Auto-key")
+                .on_hover_text("Every move, turn or pose change is keyed at the current frame");
+            ui.separator();
+            let (mut fps2, mut start, mut end) = (t.fps, t.start, t.end);
+            let a = ui.add(egui::DragValue::new(&mut fps2).range(1.0..=120.0).suffix(" fps"));
             let b = ui.add(egui::DragValue::new(&mut start).range(0..=end));
             ui.label("–");
             let c = ui.add(egui::DragValue::new(&mut end).range(start..=100_000));
             if a.changed() || b.changed() || c.changed() {
-                self.run("timeline.set", json!({"fps": fps, "start": start, "end": end}));
+                self.run("timeline.set", json!({"fps": fps2, "start": start, "end": end}));
             }
-            ui.separator();
-            let shots = match t.shots.as_slice() {
-                [] => "no shots".to_string(),
-                [one] => format!("{} {}–{}", one.name, one.start, one.end),
-                many => format!("{} shots", many.len()),
-            };
-            let all = t
-                .shots
-                .iter()
-                .map(|s| format!("{} {}–{} via {}", s.name, s.start, s.end, s.camera))
-                .collect::<Vec<_>>();
-            ui.weak(shots).on_hover_text(if all.is_empty() {
-                "Shots: frame ranges seen through one camera".to_string()
-            } else {
-                all.join("\n")
-            });
             if let Some(cam) = scene.active_camera.clone()
                 && ui
                     .small_button("+ Shot")
@@ -1516,23 +1699,7 @@ impl EditorApp {
             ui.toggle_value(&mut self.show_console, "Console")
                 .on_hover_text("Type commands: the same API as window.shotstage, the CLI and MCP");
         });
-        // keyframe ticks for the selection
-        if let Some(id) = self.selected() {
-            let frames: Vec<f32> =
-                t.tracks.iter().filter(|tr| tr.entity == id).flat_map(|tr| tr.keys.iter().map(|k| k.frame)).collect();
-            if !frames.is_empty() {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 10.0), Sense::hover());
-                let p = ui.painter_at(rect);
-                p.rect_filled(rect, 2.0, Color32::from_gray(38));
-                let span = (t.end - t.start).max(1) as f32;
-                for f in frames {
-                    let x = rect.left() + (f - t.start as f32) / span * rect.width();
-                    p.circle_filled(egui::pos2(x, rect.center().y), 3.5, ACCENT);
-                }
-                let x = rect.left() + (self.frame() - t.start as f32) / span * rect.width();
-                p.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], (1.5, Color32::WHITE));
-            }
-        }
+        self.track_strip(ui, &scene);
         if self.show_console {
             ui.separator();
             ui.horizontal(|ui| {
@@ -1566,6 +1733,207 @@ impl EditorApp {
             });
         }
         ui.add_space(2.0);
+    }
+
+    /// Animated objects as rows of keyframe diamonds under a ruler you can scrub. Drag a
+    /// diamond to retime it, right-click it for its easing, double-click a row to add a key.
+    fn track_strip(&mut self, ui: &mut egui::Ui, scene: &Scene) {
+        let t = &scene.timeline;
+        let (t0, t1) = (t.start as f32, t.end.max(t.start + 1) as f32);
+        let mut rows = timeline_rows(scene);
+        let sel_root = self.selected().map(|s| root_of(scene, &s));
+        if let Some(r) = &sel_root
+            && !rows.iter().any(|row| &row.id == r)
+            && let Ok(e) = scene.get(r)
+        {
+            rows.insert(0, TrackRow { id: r.clone(), label: e.name.clone(), tracks: vec![], frames: vec![] });
+        }
+        let label_w = 130.0;
+        let row_h = 18.0;
+        let full = ui.available_width();
+        // ruler
+        let (ruler, ruler_resp) = ui.allocate_exact_size(Vec2::new(full, 18.0), Sense::click_and_drag());
+        let area = Rect::from_min_max(egui::pos2(ruler.left() + label_w, ruler.top()), ruler.max);
+        let x_of = |f: f32| area.left() + (f - t0) / (t1 - t0) * area.width();
+        let f_of = |x: f32| (t0 + (x - area.left()) / area.width() * (t1 - t0)).clamp(t0, t1).round();
+        let p = ui.painter_at(ruler);
+        p.rect_filled(ruler, 2.0, Color32::from_gray(30));
+        // shots as coloured bands
+        for (i, s) in t.shots.iter().enumerate() {
+            let r = Rect::from_min_max(
+                egui::pos2(x_of(s.start as f32), ruler.top()),
+                egui::pos2(x_of(s.end as f32 + 1.0).min(area.right()), ruler.top() + 4.0),
+            );
+            p.rect_filled(
+                r,
+                1.0,
+                [Color32::from_rgb(70, 150, 255), Color32::from_rgb(120, 200, 120), Color32::from_rgb(230, 170, 70)]
+                    [i % 3],
+            );
+        }
+        let fps = t.fps.max(1.0);
+        let secs = (t1 - t0) / fps;
+        let every = [0.5f32, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+            .into_iter()
+            .find(|s| secs / s <= area.width() / 60.0)
+            .unwrap_or(120.0);
+        let mut s = 0.0;
+        while s <= secs + 1e-3 {
+            let x = x_of(t0 + s * fps);
+            p.line_segment(
+                [egui::pos2(x, ruler.bottom() - 6.0), egui::pos2(x, ruler.bottom())],
+                (1.0, Color32::from_gray(110)),
+            );
+            p.text(
+                egui::pos2(x + 2.0, ruler.top() + 4.0),
+                egui::Align2::LEFT_TOP,
+                format!("{s}s"),
+                egui::FontId::proportional(10.0),
+                Color32::from_gray(150),
+            );
+            s += every;
+        }
+        p.text(
+            egui::pos2(ruler.left() + 4.0, ruler.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Timeline",
+            egui::FontId::proportional(11.0),
+            Color32::from_gray(170),
+        );
+        if (ruler_resp.dragged() || ruler_resp.clicked())
+            && let Some(pos) = ruler_resp.interact_pointer_pos()
+            && pos.x >= area.left()
+        {
+            self.playing = false;
+            self.hub.borrow_mut().frame = f_of(pos.x);
+        }
+        if ruler_resp.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+        let mut playhead_bottom = ruler.bottom();
+        egui::ScrollArea::vertical().id_salt("tracks").max_height(row_h * 5.0 + 2.0).auto_shrink([false, true]).show(ui, |ui| {
+            if rows.is_empty() {
+                ui.weak("No animation yet: select something and press ◆ Key, or use a preset under Animate on the right.");
+            }
+            for (ri, row) in rows.iter().enumerate() {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(full, row_h), Sense::click_and_drag());
+                playhead_bottom = rect.bottom();
+                let p = ui.painter_at(rect);
+                let selected = sel_root.as_deref() == Some(row.id.as_str());
+                p.rect_filled(rect, 0.0, if selected { Color32::from_rgb(34, 44, 60) } else if ri % 2 == 0 { Color32::from_gray(24) } else { Color32::from_gray(28) });
+                p.text(egui::pos2(rect.left() + 6.0, rect.center().y), egui::Align2::LEFT_CENTER, &row.label, egui::FontId::proportional(11.5), if selected { Color32::WHITE } else { Color32::from_gray(190) });
+                // segments between keys show their easing
+                for w in row.frames.windows(2) {
+                    let y = rect.center().y;
+                    p.line_segment([egui::pos2(x_of(w[0]), y), egui::pos2(x_of(w[1]), y)], (2.0, Color32::from_gray(60)));
+                }
+                let near = resp.hover_pos().and_then(|h| row.frames.iter().copied().find(|f| (x_of(*f) - h.x).abs() < 6.0));
+                for f in &row.frames {
+                    let c = egui::pos2(x_of(*f), rect.center().y);
+                    let hot = near == Some(*f) || self.key_drag.as_ref().is_some_and(|d| d.row == row.id && (d.frame - f).abs() < 0.5);
+                    let r = if hot { 6.0 } else { 4.5 };
+                    let pts = vec![c + Vec2::new(0.0, -r), c + Vec2::new(r, 0.0), c + Vec2::new(0.0, r), c + Vec2::new(-r, 0.0)];
+                    p.add(egui::Shape::convex_polygon(pts, if hot { Color32::WHITE } else { ACCENT }, (1.0, Color32::from_gray(20))));
+                }
+                if resp.hovered() && near.is_some() {
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                }
+                if resp.drag_started() && let Some(f) = near {
+                    let key = self.new_key("retime");
+                    self.key_drag = Some(KeyDrag { row: row.id.clone(), frame: f, key });
+                }
+                if resp.dragged()
+                    && let (Some(d), Some(pos)) = (self.key_drag.clone(), resp.interact_pointer_pos())
+                    && d.row == row.id
+                {
+                    let to = f_of(pos.x);
+                    if (to - d.frame).abs() >= 1.0 && !row.frames.iter().any(|f| (*f - to).abs() < 0.5) {
+                        for (id, prop) in &row.tracks {
+                            let has = scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - d.frame).abs() < 1e-3));
+                            if has {
+                                self.run_key(&d.key, "keyframe.move", json!({"id": id, "property": prop, "from": d.frame, "to": to}));
+                            }
+                        }
+                        self.key_drag = Some(KeyDrag { frame: to, ..d });
+                        self.hub.borrow_mut().frame = to;
+                    }
+                }
+                if resp.drag_stopped() {
+                    self.key_drag = None;
+                }
+                if resp.clicked() {
+                    self.select(Some(row.id.clone()));
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        self.hub.borrow_mut().frame = near.unwrap_or(f_of(pos.x));
+                        self.playing = false;
+                    }
+                }
+                if resp.double_clicked() && near.is_none() {
+                    self.key_selection();
+                }
+                if resp.secondary_clicked() {
+                    self.key_menu = near.map(|f| (row.id.clone(), f));
+                }
+                let menu_for = self.key_menu.clone().filter(|(r, _)| *r == row.id);
+                resp.context_menu(|ui| {
+                    let Some((_, f)) = menu_for.clone() else {
+                        ui.weak("Right-click a key diamond");
+                        return;
+                    };
+                    ui.weak(format!("Key at frame {f:.0}"));
+                    ui.label("Ease into the next key");
+                    for (label, interp) in [("Smooth (ease)", "ease"), ("Ease in", "easeIn"), ("Ease out", "easeOut"), ("Linear", "linear"), ("Overshoot", "overshoot"), ("Hold (step)", "step")] {
+                        if ui.button(label).clicked() {
+                            let steps: Vec<Value> = row.tracks.iter().filter(|(id, prop)| scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - f).abs() < 1e-3)))
+                                .map(|(id, prop)| json!({"command": "keyframe.setInterp", "params": {"id": id, "property": prop, "frame": f, "interp": interp}})).collect();
+                            let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Delete key").clicked() {
+                        let steps: Vec<Value> = row.tracks.iter().filter(|(id, prop)| scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - f).abs() < 1e-3)))
+                            .map(|(id, prop)| json!({"command": "keyframe.delete", "params": {"id": id, "property": prop, "frame": f}})).collect();
+                        let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
+                        ui.close();
+                    }
+                });
+            }
+        });
+        // playhead across the ruler and the rows
+        let x = x_of(self.frame());
+        ui.painter().line_segment(
+            [egui::pos2(x, ruler.top()), egui::pos2(x, playhead_bottom)],
+            (1.5, Color32::from_rgb(255, 120, 90)),
+        );
+    }
+
+    /// Keyframe the selection at the playhead (a whole person: every joint).
+    fn key_selection(&mut self) {
+        let Some(id) = self.selected() else { return };
+        let scene = self.scene();
+        let f = self.frame().round();
+        let mut steps = vec![];
+        let ids: Vec<String> = match rig::person_root(&scene, &id) {
+            Ok(root) if root == id => {
+                std::iter::once(root.clone()).chain(rig::JOINTS.iter().map(|j| format!("{root}_{j}"))).collect()
+            }
+            _ => vec![id.clone()],
+        };
+        for e in &ids {
+            steps.push(json!({"command": "keyframe.set", "params": {"id": e, "property": "transform", "frame": f}}));
+            if matches!(scene.get(e).map(|x| &x.kind), Ok(EntityKind::Camera(_))) {
+                steps.push(
+                    json!({"command": "keyframe.set", "params": {"id": e, "property": "focalLength", "frame": f}}),
+                );
+            }
+        }
+        match hub::dispatch(&self.hub, json!({"batch": steps})) {
+            Ok(_) => {
+                self.toast(format!("Keyed {} at frame {f:.0}", scene.get(&id).map(|e| e.name.clone()).unwrap_or(id)))
+            }
+            Err(e) => self.toast(format!("Could not key: {}", e.message)),
+        }
     }
 
     fn viewport(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -1696,6 +2064,43 @@ impl EditorApp {
                 .collect();
             Some((id.clone(), o, len, c, axes, rings, joint))
         });
+        // The motion path of the selection (its group, or the camera): a line through every frame
+        // and a dot per key you can drag.
+        let path = selected.as_ref().filter(|_| !clean).and_then(|s| {
+            let id = if matches!(scene.get(s).map(|e| &e.kind), Ok(EntityKind::Camera(_))) {
+                s.clone()
+            } else {
+                root_of(&scene, s)
+            };
+            let track = scene.timeline.track(&id, TrackProperty::Transform).filter(|t| t.keys.len() >= 2)?;
+            let (a, b) = (track.keys.first()?.frame, track.keys.last()?.frame);
+            let n = ((b - a).ceil() as usize).clamp(2, 400);
+            let line: Vec<Pos2> = (0..=n)
+                .filter_map(|i| {
+                    project(
+                        rect,
+                        &view,
+                        world_at(&scene, &id, a + (b - a) * i as f32 / n as f32).ok()?.w_axis.truncate(),
+                    )
+                })
+                .collect();
+            let keys: Vec<(f32, Pos2, Vec3)> = track
+                .keys
+                .iter()
+                .filter_map(|k| {
+                    let w = world_at(&scene, &id, k.frame).ok()?.w_axis.truncate();
+                    Some((k.frame, project(rect, &view, w)?, w))
+                })
+                .collect();
+            Some((id, line, keys))
+        });
+        let path_key_at = |p: Pos2| -> Option<(String, f32, Vec3)> {
+            let (id, _, keys) = path.as_ref()?;
+            keys.iter()
+                .filter(|(_, sp, _)| (*sp - p).length() < 8.0)
+                .min_by(|a, b| (a.1 - p).length().total_cmp(&(b.1 - p).length()))
+                .map(|(f, _, w)| (id.clone(), *f, *w))
+        };
         let handle_at = |p: Pos2| -> Option<Handle> {
             let (_, _, _, c, axes, rings, joint) = gizmo.as_ref()?;
             if !joint && (p - (*c + Vec2::new(30.0, -30.0))).length() < 8.0 {
@@ -1753,7 +2158,11 @@ impl EditorApp {
                     })
                     .and_then(|h| joint_at(&scene, h, hit_point, f))
                     .map(|j| drive_joint(&scene, &j));
-                self.drag = if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
+                self.drag = if let Some((id, frame, origin)) = path_key_at(start) {
+                    let key = self.new_key("path");
+                    self.hub.borrow_mut().frame = frame;
+                    Gesture::PathKey { id, frame, origin, key }
+                } else if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
                     let key = self.new_key("gizmo");
                     match h {
                         Handle::Axis(i) => {
@@ -1823,7 +2232,7 @@ impl EditorApp {
                         if let Some(t) = closest_on_line(base, Vec3::Y, o, d) {
                             let mut p =
                                 json!({"id": id, "position": (base + Vec3::Y * (t - t0)).to_array(), "frame": f});
-                            if is_animated(&scene, &id) {
+                            if self.keyed(&scene, &id) {
                                 p["keyframeAt"] = json!(f.round());
                             }
                             self.run_key(&key, "entity.moveTo", p);
@@ -1855,7 +2264,7 @@ impl EditorApp {
                             step = (step / self.snap_step).round() * self.snap_step;
                         }
                         let mut p = json!({"id": id, "position": (start + axis * step).to_array(), "frame": f});
-                        if is_animated(&scene, &id) {
+                        if self.keyed(&scene, &id) {
                             p["keyframeAt"] = json!(f.round());
                         }
                         self.run_key(&key, "entity.moveTo", p);
@@ -1889,11 +2298,42 @@ impl EditorApp {
                         let t = (grab - o).dot(n) / denom;
                         if t > 0.0 {
                             let mut p = json!({"id": joint, "target": (o + d * t).to_array(), "frame": f});
-                            if is_animated(&scene, &joint) {
+                            if self.keyed(&scene, &joint) {
                                 p["keyframeAt"] = json!(f.round());
                             }
                             self.run_key(&key, "pose.aim", p);
                         }
+                    }
+                }
+                Gesture::PathKey { id, frame, origin, key } if resp.dragged() => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    // slide on the horizontal plane through the key; Shift moves it up and down
+                    let to = if modifiers.shift {
+                        closest_on_line(origin, Vec3::Y, o, d).map(|_| {
+                            let t0 = closest_on_line(origin, Vec3::Y, o, d).unwrap_or(0.0);
+                            origin + Vec3::Y * t0
+                        })
+                    } else if d.y.abs() > 1e-4 {
+                        let t = (origin.y - o.y) / d.y;
+                        (t > 0.0).then(|| o + d * t)
+                    } else {
+                        None
+                    };
+                    if let Some(to) = to
+                        && let Some(k) = scene
+                            .timeline
+                            .track(&id, TrackProperty::Transform)
+                            .and_then(|tr| tr.keys.iter().find(|k| (k.frame - frame).abs() < 1e-3))
+                        && let shotstage_core::KeyValue::Transform(mut t) = k.value
+                    {
+                        let parent = scene
+                            .get(&id)
+                            .ok()
+                            .and_then(|e| e.parent.clone())
+                            .and_then(|p| world_at(&scene, &p, frame).ok())
+                            .unwrap_or(Mat4::IDENTITY);
+                        t.translation = parent.inverse().transform_point3(to).to_array();
+                        self.run_key(&key, "keyframe.set", json!({"id": id, "property": "transform", "frame": frame, "value": {"kind": "transform", "value": t}, "interp": k.interp}));
                     }
                 }
                 Gesture::Scale { id, key } if resp.dragged() => {
@@ -1902,7 +2342,7 @@ impl EditorApp {
                     if let Ok(t) = local_at(&scene, &id, f) {
                         let sc = (t.scale() * k).to_array();
                         let mut p = json!({"id": id, "scale": sc});
-                        if is_animated(&scene, &id) {
+                        if self.keyed(&scene, &id) {
                             p["keyframeAt"] = json!(f.round());
                         }
                         self.run_key(&key, "entity.setTransform", p);
@@ -2060,6 +2500,23 @@ impl EditorApp {
                 egui::FontId::monospace(12.0),
                 Color32::from_white_alpha(180),
             );
+        }
+        if let Some((id, line, keys)) = &path {
+            let cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));
+            let col = if cam { Color32::from_rgb(90, 170, 255) } else { Color32::from_rgb(255, 170, 80) };
+            painter.add(egui::Shape::line(line.clone(), (1.5, col.gamma_multiply(0.8))));
+            let hot = ui
+                .input(|i| i.pointer.hover_pos())
+                .and_then(|p| keys.iter().find(|(_, sp, _)| (*sp - p).length() < 8.0).map(|k| k.0));
+            for (f, sp, _) in keys {
+                let lit =
+                    hot == Some(*f) || matches!(&self.drag, Gesture::PathKey { frame, .. } if (frame - f).abs() < 1e-3);
+                painter.circle_filled(*sp, if lit { 6.0 } else { 4.0 }, if lit { Color32::WHITE } else { col });
+                painter.circle_stroke(*sp, if lit { 6.0 } else { 4.0 }, (1.0, Color32::from_gray(20)));
+            }
+            if hot.is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            }
         }
         if let Some((_, _, _, c, axes, rings, joint)) = &gizmo {
             let hot = self.hot_handle;

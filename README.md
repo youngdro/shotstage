@@ -67,6 +67,16 @@
 - 产品拍摄里的 **Softbox** 预制件本身就是一盏面光。
 - 命令：`entity.create`（`type: "light"`）、`light.set`、`light.preset`、`light.list`；灯沿自身 -Z 方向照射，可以用 `camera.lookAt` 对准目标。
 
+## 动画与运镜
+
+- **时间轴**（底部）：刻度尺可以直接拖动预览；每个有动画的物体一行，菱形是关键帧——拖动菱形改时间，右键选缓动（平滑、缓入、缓出、线性、回弹、定格）或删除，双击行在当前帧打关键帧。**◆ Key**（快捷键 K）给选中的物体打帧（人物会一次打全身关节），**Auto-key** 打开后所有移动、旋转、摆姿势都自动在当前帧记帧。**🎥 Preview shot** 从头透过镜头播放。←/→ 逐帧（Shift 十帧），Home/End 跳到首尾。
+- **运动路径**：选中有动画的物体或相机，视口里会画出它的运动轨迹，每个关键帧是一个点，可以直接拖动改位置（Shift 上下）。
+- **一键动画（右侧 Animate）**，都从当前帧开始，生成普通的可编辑关键帧，一步撤销：
+  - 运镜（选中相机，围绕最近选过的物体）：推 / 拉、推近、拉远揭示、横移、升降、摇、俯仰、左右环绕、摇臂升降、希区柯克变焦、变焦、甩镜、跟拍、手持晃动、无人机飞越、360° 环绕。
+  - 物体：转台旋转、弹跳、悬浮、落入、滑入、弹出、摇摆、英雄登场，以及沿路径移动（`points`）。
+  - 人物：走路、挥手、捡东西、左右张望、点头、坐下、站起。
+  - 可以调时长和强度，也可以搜索。命令：`motion.apply`、`motion.list`，以及 `keyframe.move`、`keyframe.setInterp`。
+
 ## 结构
 
 | crate | 作用 | 依赖 GPU / 浏览器 |
@@ -152,6 +162,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 图片 | `image.import` `image.set` `image.get` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
 | 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
+| 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.delete` |
 
 约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。

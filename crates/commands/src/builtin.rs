@@ -842,5 +842,6 @@ pub fn registry() -> Vec<Command> {
     .chain(crate::lights::commands())
     .chain(crate::model::commands())
     .chain(crate::images::commands())
+    .chain(crate::motion::commands())
     .collect()
 }

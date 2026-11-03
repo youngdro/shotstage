@@ -524,7 +524,7 @@ pub fn joint_near(scene: &Scene, mesh: &str, point: Vec3, frame: f32) -> Option<
 }
 
 /// Rest height of the pelvis, from the leg chain (works for any body size).
-fn pelvis_rest(scene: &Scene, root: &str) -> CmdResult<f32> {
+pub(crate) fn pelvis_rest(scene: &Scene, root: &str) -> CmdResult<f32> {
     let y = |j: &str| -> CmdResult<f32> { Ok(scene.get(&format!("{root}_{j}"))?.transform.translation[1]) };
     let knee = y("knee_l")?;
     let scale = (knee.abs() / 0.43).max(1e-3);
