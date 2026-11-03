@@ -744,7 +744,7 @@ pub struct EditorApp {
     /// restoring: (scene JSON, object count).
     autosaved: (u64, f64),
     autosave_warned: bool,
-    restore_offer: Option<(String, usize)>,
+    restore_offer: Option<(std::rc::Rc<Scene>, usize)>,
     /// Draw shadows in the view.
     shadows: bool,
     /// More selected objects (Shift+click), besides the hub's selection.
@@ -843,9 +843,9 @@ impl EditorApp {
             autosaved: (u64::MAX, 0.0),
             autosave_warned: false,
             restore_offer: crate::files::autosave_read().and_then(|j| {
-                let v: Value = serde_json::from_str(&j).ok()?;
-                let n = v["entities"].as_array().map(|a| a.iter().filter(|e| e["parent"].is_null()).count()).unwrap_or(0);
-                (n > 0).then_some((j, n))
+                let sc: Scene = serde_json::from_str(&j).ok()?;
+                let n = sc.entities.iter().filter(|e| e.parent.is_none()).count();
+                (n > 0).then(|| (std::rc::Rc::new(sc), n))
             }),
             ref_textures: Default::default(),
             auto_key: false,
@@ -991,7 +991,8 @@ impl EditorApp {
 
     /// Write the scene to the autosave a couple of seconds after it last changed (not while an
     /// autosave is waiting to be restored, so it is not overwritten).
-    fn autosave(&mut self, now: f64) {
+    fn autosave(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
         if self.restore_offer.is_some() {
             return;
         }
@@ -1001,7 +1002,12 @@ impl EditorApp {
             self.autosaved = (rev, now);
             return;
         }
-        if rev == self.autosaved.0 || now - self.autosaved.1 < 2.0 {
+        if rev == self.autosaved.0 {
+            return;
+        }
+        if now - self.autosaved.1 < 2.0 {
+            // egui only draws on input: come back when the save is due
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(2.0 - (now - self.autosaved.1) + 0.05));
             return;
         }
         let json = serde_json::to_string(&*self.scene()).unwrap_or_default();
@@ -1755,7 +1761,7 @@ impl eframe::App for EditorApp {
             }
         }
         crate::files::take_dropped(ui.ctx(), &self.incoming);
-        self.autosave(ui.input(|i| i.time));
+        self.autosave(ui.ctx());
         let saved = self.saved.borrow_mut().take();
         match saved {
             Some(Ok(w)) => self.toast(format!("Saved: {w}")),
@@ -4639,7 +4645,11 @@ impl EditorApp {
                 painter.galley(r.min + Vec2::new(5.0, 3.0), g, Color32::WHITE);
             }
         }
-        if let Some((json, n)) = self.restore_offer.clone() {
+        // nothing to offer when the scene already is the autosave (a page that builds its scene)
+        if self.restore_offer.as_ref().is_some_and(|(saved, _)| **saved == *scene) {
+            self.restore_offer = None;
+        }
+        if let Some(n) = self.restore_offer.as_ref().map(|o| o.1) {
             egui::Area::new(egui::Id::unique("restore_offer"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(full.center_top() + Vec2::new(-170.0, 104.0))
@@ -4649,15 +4659,15 @@ impl EditorApp {
                         ui.strong("Pick up where you left off?");
                         ui.weak(format!("Your last scene ({n} objects) was saved automatically."));
                         ui.horizontal(|ui| {
-                            if ui.button("Restore it").clicked() {
-                                if let Ok(scene) = serde_json::from_str::<Value>(&json) {
-                                    let _ = hub::dispatch(
-                                        &self.hub,
-                                        json!({"command": "scene.load", "params": {"scene": scene}}),
-                                    );
-                                    self.toast("Restored your last scene (Undo goes back)");
-                                }
-                                self.restore_offer = None;
+                            if ui.button("Restore it").clicked()
+                                && let Some((saved, _)) = self.restore_offer.take()
+                                && let Ok(scene) = serde_json::to_value(&*saved)
+                            {
+                                let _ = hub::dispatch(
+                                    &self.hub,
+                                    json!({"command": "scene.load", "params": {"scene": scene}}),
+                                );
+                                self.toast("Restored your last scene (Undo goes back)");
                             }
                             if ui.button("Start fresh").clicked() {
                                 self.restore_offer = None;
