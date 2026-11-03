@@ -16,6 +16,8 @@
 
 左侧素材都有实时渲染的缩略图。相机属性里可以一键切换画幅（16:9、9:16 竖屏、1:1、4:5、4:3、2.39:1），**Match current view** 把相机放到你当前的视角，**Safe areas** 在镜头视角里显示动作 / 字幕安全框；选中物体时会显示它的尺寸。
 
+**对照参考图**：相机属性里 **Reference → Load picture…** 可以把一张分镜或参考照片半透明地叠在镜头画面上，用来对齐构图（命令 `camera.setReference`）。透过镜头看时，左上角会实时显示景别、角度和焦段。顶栏 **History** 列出最近的操作，点哪一步就回到它之前。
+
 视口工具栏的 **📷 Save frame** 把当前帧透过镜头的画面存成 1920 宽的 PNG。
 
 ## 像搭积木一样搭场景
@@ -173,7 +175,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
 | 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
 | 模型 | `model.import` `model.export` |
-| 图片 | `image.import` `image.set` `image.get` |
+| 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
 | 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.setInterp` |

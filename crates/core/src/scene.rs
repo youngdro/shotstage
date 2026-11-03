@@ -135,6 +135,18 @@ pub struct Scene {
     /// Images used by image entities, by key.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub assets: std::collections::BTreeMap<String, Asset>,
+    /// Reference pictures laid over a camera's view to match a shot, by camera id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub references: std::collections::BTreeMap<String, CameraReference>,
+}
+
+/// A picture shown over a camera's view (a storyboard frame, a reference photo).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CameraReference {
+    /// Asset key.
+    pub asset: String,
+    /// 0..1.
+    pub opacity: f32,
 }
 
 impl Default for Scene {
@@ -145,6 +157,7 @@ impl Default for Scene {
             timeline: Timeline::default(),
             active_camera: None,
             assets: Default::default(),
+            references: Default::default(),
         }
     }
 }
@@ -202,6 +215,7 @@ impl Scene {
         self.entities.retain(|e| !doomed.contains(&e.id));
         self.timeline.tracks.retain(|t| !doomed.contains(&t.entity));
         self.timeline.shots.retain(|s| !doomed.contains(&s.camera));
+        self.references.retain(|cam, _| !doomed.contains(cam));
         if self.active_camera.as_ref().is_some_and(|c| doomed.contains(c)) {
             self.active_camera = None;
         }

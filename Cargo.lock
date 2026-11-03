@@ -2930,6 +2930,7 @@ dependencies = [
  "eframe",
  "egui",
  "glam",
+ "image",
  "js-sys",
  "log",
  "rfd",

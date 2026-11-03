@@ -247,8 +247,67 @@ struct GetParams {
     frame: Option<f32>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReferenceParams {
+    /// Camera whose view the picture is laid over. Default: the active camera.
+    camera: Option<String>,
+    /// A new picture (PNG / JPEG / WebP, base64).
+    data: Option<String>,
+    /// Or an existing asset key.
+    asset: Option<String>,
+    /// 0..1. Default 0.5.
+    opacity: Option<f32>,
+    /// Remove the reference.
+    clear: Option<bool>,
+}
+
+fn set_reference(scene: &mut Scene, p: ReferenceParams) -> CmdResult<Value> {
+    let cam = match p.camera {
+        Some(c) => {
+            scene.camera(&c)?;
+            c
+        }
+        None => {
+            scene.active_camera.clone().ok_or_else(|| CommandError::new("failed", "no active camera: give `camera`"))?
+        }
+    };
+    if p.clear.unwrap_or(false) {
+        scene.references.remove(&cam);
+        return Ok(json!({ "camera": cam, "cleared": true }));
+    }
+    let opacity = p.opacity.unwrap_or(0.5);
+    if !(opacity.is_finite() && (0.0..=1.0).contains(&opacity)) {
+        return Err(CommandError::invalid("opacity must be 0..=1"));
+    }
+    let asset = match (p.data, p.asset) {
+        (Some(d), None) => {
+            use base64::Engine as _;
+            let b64 = d.rsplit_once("base64,").map(|(_, x)| x).unwrap_or(&d);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| CommandError::invalid(format!("`data` is not base64: {e}")))?;
+            add_asset(scene, &bytes, "reference")?.0
+        }
+        (None, Some(a)) => {
+            if !scene.assets.contains_key(&a) {
+                return Err(CommandError::new("failed", format!("no image asset `{a}`")));
+            }
+            a
+        }
+        (None, None) => match scene.references.get(&cam) {
+            Some(r) => r.asset.clone(),
+            None => return Err(CommandError::invalid("give `data` or `asset`")),
+        },
+        _ => return Err(CommandError::invalid("give `data` or `asset`, not both")),
+    };
+    scene.references.insert(cam.clone(), shotstage_core::CameraReference { asset: asset.clone(), opacity });
+    Ok(json!({ "camera": cam, "asset": asset, "opacity": opacity }))
+}
+
 pub fn commands() -> Vec<Command> {
     vec![
+        command!("camera.setReference", "Lay a picture (storyboard frame, reference photo) over a camera's view to match its framing; set the opacity, or clear it.", mutates: true, ReferenceParams, set_reference),
         command!("image.import", "Put a picture (PNG, JPEG, WebP; base64) in the scene, keeping its aspect: a standing card, a billboard that always faces the camera (cut-out people, trees), a backdrop filling the camera's background, or a floor decal.", mutates: true, ImportParams, import),
         command!("image.set", "Change an image card: billboard on/off, height (aspect kept, bottom edge stays).", mutates: true, SetParams, set),
         command!("image.get", "An image asset's size and type (pass the asset key or an image entity id); add the asset data with scene.inspect.", mutates: false, GetParams,
@@ -312,6 +371,21 @@ mod tests {
         assert!(s.dispatch("image.import", json!({"data": "bm90IGFuIGltYWdl"})).is_err());
         let info = s.dispatch("image.get", json!({"id": "ref_1"})).unwrap().result;
         assert_eq!(info["width"], 200);
+    }
+
+    #[test]
+    fn camera_references() {
+        let mut s = crate::Session::default();
+        assert!(s.dispatch("camera.setReference", json!({"data": png(16, 9)})).is_err(), "no camera yet");
+        s.dispatch("entity.create", json!({"type": "camera", "id": "cam"})).unwrap();
+        let r = s.dispatch("camera.setReference", json!({"data": png(16, 9), "opacity": 0.3})).unwrap().result;
+        assert_eq!(r["camera"], "cam");
+        assert_eq!(s.scene().references["cam"].opacity, 0.3);
+        s.dispatch("camera.setReference", json!({"opacity": 0.8})).unwrap();
+        assert_eq!(s.scene().references["cam"].opacity, 0.8);
+        assert!(s.dispatch("camera.setReference", json!({"opacity": 2})).is_err());
+        s.dispatch("entity.delete", json!({"id": "cam"})).unwrap();
+        assert!(s.scene().references.is_empty(), "deleting the camera drops its reference");
     }
 
     #[test]

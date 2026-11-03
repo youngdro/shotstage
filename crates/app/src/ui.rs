@@ -95,6 +95,31 @@ fn drive_joint(scene: &Scene, joint: &str) -> String {
     }
 }
 
+/// A command id as words for the History menu.
+fn friendly(command: &str) -> String {
+    match command {
+        "entity.place" | "entity.moveTo" => "Move".into(),
+        "entity.rotate" => "Turn".into(),
+        "entity.setTransform" => "Edit transform".into(),
+        "entity.create" => "Add".into(),
+        "entity.delete" => "Delete".into(),
+        "entity.duplicate" => "Duplicate".into(),
+        "prefab.create" => "Add block".into(),
+        "pose.set" | "pose.aim" => "Pose".into(),
+        "motion.apply" => "Animate".into(),
+        "keyframe.set" => "Key".into(),
+        "keyframe.move" => "Retime key".into(),
+        "keyframe.delete" => "Delete key".into(),
+        "camera.frame" => "Frame shot".into(),
+        "model.import" => "Import model".into(),
+        "image.import" => "Add picture".into(),
+        "light.preset" => "Lighting preset".into(),
+        "scene.template" => "Template".into(),
+        "batch" => "Several changes".into(),
+        other => other.replace('.', " "),
+    }
+}
+
 /// What the thumbnail renderer creates for each palette block (with id `thumb`).
 fn thumb_items() -> Vec<(String, Value)> {
     let mut out = vec![];
@@ -378,6 +403,10 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// The camera the next picked picture becomes the reference of.
+    reference_for: Option<String>,
+    /// egui textures of reference pictures: asset key -> (identity of the pixels, texture).
+    ref_textures: std::collections::HashMap<String, (usize, egui::TextureHandle)>,
     /// Palette thumbnails (rendered in the background).
     thumbs: Option<crate::thumbs::Thumbs>,
     /// Draw action / title safe frames when looking through a camera.
@@ -444,6 +473,8 @@ impl EditorApp {
             saved: Default::default(),
             safe_areas: false,
             thumbs: None,
+            reference_for: None,
+            ref_textures: Default::default(),
             auto_key: false,
             key_drag: None,
             key_menu: None,
@@ -593,6 +624,20 @@ impl EditorApp {
                 .rsplit_once('.')
                 .map(|(s, e)| (s.to_string(), e.to_ascii_lowercase()))
                 .unwrap_or((name.clone(), String::new()));
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
+                && let Some(cam) = self.reference_for.take()
+            {
+                let req = json!({"command": "camera.setReference", "params": {"camera": cam, "data": encode(&bytes), "opacity": 0.5}});
+                match hub::dispatch(&self.hub, req) {
+                    Ok(_) => {
+                        self.look_through = true;
+                        self.hub.borrow_mut().look_through = true;
+                        self.toast(format!("{name} is laid over the camera view: line the shot up with it"));
+                    }
+                    Err(e) => self.toast(format!("Could not use {name}: {}", e.message)),
+                }
+                continue;
+            }
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
                 let key = self.new_key("import");
                 let mut params = json!({"data": encode(&bytes), "name": stem});
@@ -969,6 +1014,26 @@ impl EditorApp {
             if ui.button("Redo").on_hover_text("Cmd/Ctrl+Shift+Z").clicked() {
                 self.run("history.redo", json!({}));
             }
+            ui.menu_button("History", |ui| {
+                let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
+                let undo: Vec<String> = info["undo"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if undo.is_empty() {
+                    ui.weak("Nothing to undo yet");
+                } else {
+                    ui.weak("Click a step to go back to before it");
+                }
+                for (i, label) in undo.iter().take(20).enumerate() {
+                    if ui.button(format!("{}. {}", i + 1, friendly(label))).clicked() {
+                        for _ in 0..=i {
+                            self.run("history.undo", json!({}));
+                        }
+                        ui.close();
+                    }
+                }
+            });
             ui.separator();
             if ui
                 .button("Import…")
@@ -1512,6 +1577,36 @@ impl EditorApp {
                         }
                         ui.checkbox(&mut self.safe_areas, "Safe areas")
                             .on_hover_text("Action / title safe frames in the camera view");
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Reference");
+                        if ui
+                            .button("Load picture…")
+                            .on_hover_text(
+                                "Lay a storyboard frame or a reference photo over this camera's view to match it",
+                            )
+                            .clicked()
+                        {
+                            self.reference_for = Some(id.clone());
+                            crate::files::pick(&self.incoming, ui.ctx());
+                        }
+                        if let Some(r) = scene.references.get(&id) {
+                            let mut o = r.opacity;
+                            let resp = ui.add(egui::Slider::new(&mut o, 0.0..=1.0).show_value(false));
+                            if resp.drag_started() {
+                                self.gesture += 1;
+                            }
+                            if resp.changed() {
+                                self.run_merged(
+                                    &format!("ref:{id}"),
+                                    "camera.setReference",
+                                    json!({"camera": id, "opacity": o}),
+                                );
+                            }
+                            if ui.small_button("✕").on_hover_text("Remove the reference").clicked() {
+                                self.run("camera.setReference", json!({"camera": id, "clear": true}));
+                            }
+                        }
                     });
                     let mut focal = lens.focal_length_mm;
                     let focal_animated = scene.timeline.track(&id, TrackProperty::FocalLength).is_some();
@@ -2726,10 +2821,28 @@ impl EditorApp {
                 painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], s);
                 painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], s);
             }
+            if let Some(r) = scene.references.get(c).cloned()
+                && let Some(tex) = self.reference_texture(ui.ctx(), &scene, &r.asset)
+            {
+                // fit the picture inside the frame, keeping its aspect
+                let sz = tex.size_vec2();
+                let k = (rect.width() / sz.x).min(rect.height() / sz.y);
+                let img = Rect::from_center_size(rect.center(), sz * k);
+                let a = (r.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+                painter.image(
+                    tex.id(),
+                    img,
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::from_white_alpha(a),
+                );
+            }
+            let hud = shotstage_core::eval::describe_shot(&scene, c, f, None)
+                .map(|d| format!(" · {}", d.summary))
+                .unwrap_or_default();
             painter.text(
                 rect.left_top() + Vec2::new(8.0, 6.0),
                 egui::Align2::LEFT_TOP,
-                format!("{c} · frame {f:.0}"),
+                format!("{} · frame {f:.0}{hud}", scene.get(c).map(|e| e.name.as_str()).unwrap_or(c)),
                 egui::FontId::monospace(12.0),
                 Color32::from_white_alpha(180),
             );
@@ -2819,6 +2932,24 @@ impl EditorApp {
                 self.toast = None;
             }
         }
+    }
+
+    /// An egui texture of an image asset (decoded once).
+    fn reference_texture(&mut self, ctx: &egui::Context, scene: &Scene, key: &str) -> Option<egui::TextureHandle> {
+        use base64::Engine as _;
+        let asset = scene.assets.get(key)?;
+        let identity = asset.data.as_ptr() as usize ^ asset.data.len();
+        if let Some((id, t)) = self.ref_textures.get(key)
+            && *id == identity
+        {
+            return Some(t.clone());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(asset.data.as_bytes()).ok()?;
+        let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &img);
+        let tex = ctx.load_texture(format!("ref:{key}"), color, egui::TextureOptions::LINEAR);
+        self.ref_textures.insert(key.to_string(), (identity, tex.clone()));
+        Some(tex)
     }
 
     /// The empty-scene card: start from a template or drag blocks in.
