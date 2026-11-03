@@ -280,6 +280,12 @@ enum QuickAction {
     CameraHere,
     SaveFrame,
     ExportBoard,
+    Play,
+    Start,
+    CameraView,
+    Board,
+    Preview,
+    FitTimeline,
 }
 
 /// `holdBasket` → `Hold basket`, `tPose` → `T pose`.
@@ -1445,6 +1451,12 @@ impl EditorApp {
         out.push(act("Redo", "Cmd/Ctrl+Shift+Z", QuickAction::Redo));
         out.push(act("New scene", "clear everything (undoable)", QuickAction::New));
         out.push(act("Toggle shadows", "", QuickAction::Shadows));
+        out.push(act("Play / pause", "Space", QuickAction::Play));
+        out.push(act("Go to the start", "Home", QuickAction::Start));
+        out.push(act("Toggle camera view", "look through the shot camera", QuickAction::CameraView));
+        out.push(act("Toggle storyboard", "every shot as a picture", QuickAction::Board));
+        out.push(act("Toggle camera preview", "the small view in the corner", QuickAction::Preview));
+        out.push(act("Fit the timeline", "show all frames", QuickAction::FitTimeline));
         out.push(act("New camera from this view", "where you are looking from", QuickAction::CameraHere));
         if scene.active_camera.is_some() || !scene.timeline.shots.is_empty() {
             out.push(act("Save frame as PNG", "the shot camera at the playhead, 1920 px", QuickAction::SaveFrame));
@@ -1588,6 +1600,19 @@ impl EditorApp {
                 QuickAction::CameraHere => self.camera_from_view(),
                 QuickAction::SaveFrame => crate::files::save_frame(&self.hub, 1920, &self.saved),
                 QuickAction::ExportBoard => self.export_board(),
+                QuickAction::Play => self.playing = !self.playing,
+                QuickAction::Start => {
+                    self.playing = false;
+                    let start = self.scene().timeline.start as f32;
+                    self.hub.borrow_mut().frame = start;
+                }
+                QuickAction::CameraView => {
+                    self.look_through = !self.look_through;
+                    self.hub.borrow_mut().look_through = self.look_through;
+                }
+                QuickAction::Board => self.show_board = !self.show_board,
+                QuickAction::Preview => self.cam_preview = !self.cam_preview,
+                QuickAction::FitTimeline => self.tl_view = None,
             },
         }
     }
