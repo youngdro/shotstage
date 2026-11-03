@@ -2950,6 +2950,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "clap",
+ "glam",
  "serde_json",
  "shotstage-commands",
  "shotstage-core",

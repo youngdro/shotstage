@@ -1672,6 +1672,29 @@ impl EditorApp {
                         ui.checkbox(&mut self.safe_areas, "Safe areas")
                             .on_hover_text("Action / title safe frames in the camera view");
                     });
+                    // Dutch angle: roll the camera about its view axis
+                    let t = local_at(&scene, &id, frame).unwrap_or(e.transform);
+                    let mut e3 = t.euler_degrees();
+                    ui.horizontal(|ui| {
+                        ui.label("Roll");
+                        let r = ui
+                            .add(egui::Slider::new(&mut e3[2], -45.0..=45.0).suffix("°").max_decimals(0))
+                            .on_hover_text("Tilt the horizon (a Dutch angle)");
+                        if r.drag_started() {
+                            self.gesture += 1;
+                        }
+                        if r.changed() {
+                            let mut p = json!({"id": id, "rotationEuler": e3});
+                            if self.keyed(&scene, &id) {
+                                p["keyframeAt"] = json!(frame.round());
+                            }
+                            self.run_merged(&format!("roll:{id}"), "entity.setTransform", p);
+                        }
+                        if ui.small_button("Level").clicked() {
+                            e3[2] = 0.0;
+                            self.run("entity.setTransform", json!({"id": id, "rotationEuler": e3}));
+                        }
+                    });
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Reference");
                         if ui

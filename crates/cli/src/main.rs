@@ -10,6 +10,7 @@
 //! shotstage import chair.glb --scene shot.json --fit-height 0.9
 //! shotstage export set.fbx --scene shot.json     # glb, gltf, obj, stl; fbx through Blender
 //! shotstage storyboard --scene shot.json -o board/  # first / middle / last frame of every shot
+//! shotstage render --scene shot.json -o frames/ --pass clay,depth --video   # every frame
 //! ```
 
 mod mcp;
@@ -114,6 +115,29 @@ enum Cmd {
         #[arg(long)]
         up_axis: Option<String>,
     },
+    /// Render every frame through the shot cameras (following the shots, else the active camera)
+    /// as numbered PNGs per pass, plus camera.json; with --video also an MP4 per pass (ffmpeg).
+    Render {
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Output folder (created if missing).
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Passes: clay, depth, normal (comma separated).
+        #[arg(long, value_delimiter = ',', default_value = "clay")]
+        pass: Vec<String>,
+        #[arg(long, default_value_t = 1280)]
+        width: u32,
+        /// First frame. Default: the timeline start.
+        #[arg(long)]
+        start: Option<u32>,
+        /// Last frame. Default: the timeline end.
+        #[arg(long)]
+        end: Option<u32>,
+        /// Also encode clay.mp4 / depth.mp4 / normal.mp4 with ffmpeg (if it is installed).
+        #[arg(long)]
+        video: bool,
+    },
     /// Render the first, middle and last frame of every shot (clay and depth) into a folder,
     /// with storyboard.json (shot descriptions and camera data) and index.html to look at.
     Storyboard {
@@ -177,7 +201,8 @@ impl Gpu {
             SnapshotPass::Depth => Pass::Depth,
             SnapshotPass::Normal => Pass::Normal,
         };
-        let view = View { view: plan.view, proj: plan.proj, depth_near: 0.0, depth_far: 0.0 };
+        let [depth_near, depth_far] = plan.depth_range.unwrap_or([0.0, 0.0]);
+        let view = View { view: plan.view, proj: plan.proj, depth_near, depth_far };
         let png = gpu
             .png(scene, plan.frame, view, pass, &plan.camera, (plan.width, plan.height))
             .map_err(|e| CommandError::new("failed", e))?;
@@ -372,6 +397,109 @@ fn real_main() -> Result<ExitCode, String> {
                     Ok(ExitCode::from(1))
                 }
             }
+        }
+        Cmd::Render { scene, out, pass, width, start, end, video } => {
+            let session = scene.open()?;
+            let t = session.scene().timeline.clone();
+            let (a, b) = (start.unwrap_or(t.start), end.unwrap_or(t.end));
+            if b < a {
+                return Err("end must be >= start".into());
+            }
+            for p in &pass {
+                if !["clay", "depth", "normal"].contains(&p.as_str()) {
+                    return Err(format!("unknown pass `{p}`: use clay, depth or normal"));
+                }
+                std::fs::create_dir_all(out.join(p)).map_err(|e| e.to_string())?;
+            }
+            let mut gpu = Gpu::default();
+            // one depth range for the whole sequence (camera to the farthest corner of the scene)
+            let sc = session.scene();
+            let corners = sc
+                .entities
+                .iter()
+                .filter(|e| e.parent.is_none())
+                .filter_map(|e| shotstage_core::spatial::bounds(sc, &e.id, a as f32).ok().flatten())
+                .reduce(|x, y| shotstage_core::spatial::Aabb::union(Some(x), Some(y)).expect("both"));
+            let far = (a..=b)
+                .step_by(4)
+                .filter_map(|f| {
+                    let cam = shotstage_core::eval::camera_id_at(sc, f as f32)?;
+                    let eye = shotstage_core::eval::world_at(sc, &cam, f as f32).ok()?.w_axis.truncate();
+                    let bx = corners?;
+                    Some(
+                        (0..8)
+                            .map(|i| {
+                                let c = glam::Vec3::new(
+                                    if i & 1 == 0 { bx.min.x } else { bx.max.x },
+                                    if i & 2 == 0 { bx.min.y } else { bx.max.y },
+                                    if i & 4 == 0 { bx.min.z } else { bx.max.z },
+                                );
+                                (c - eye).length()
+                            })
+                            .fold(0.0f32, f32::max),
+                    )
+                })
+                .fold(0.0f32, f32::max)
+                .max(1.0);
+            let mut cams = vec![];
+            for f in a..=b {
+                let cam = shotstage_core::eval::camera_id_at(session.scene(), f as f32)
+                    .ok_or("no camera: add one (or a shot) first")?;
+                for p in &pass {
+                    let (_, png) = gpu
+                        .snapshot_png(
+                            session.scene(),
+                            json!({ "camera": cam, "frame": f, "pass": p, "width": width, "depthRange": [0.0, far] }),
+                        )
+                        .map_err(|e| e.message)?;
+                    std::fs::write(out.join(p).join(format!("{:05}.png", f - a)), png).map_err(|e| e.to_string())?;
+                }
+                cams.push(json!({ "frame": f, "camera": cam }));
+                if (f - a) % 24 == 0 {
+                    eprintln!("frame {f} / {b}");
+                }
+            }
+            // per-frame camera data for camera-conditioned models
+            let mut traj = vec![];
+            for c in cams.iter() {
+                let (f, cam) =
+                    (c["frame"].as_u64().unwrap_or(0) as u32, c["camera"].as_str().unwrap_or_default().to_string());
+                let lens =
+                    shotstage_core::eval::camera_data_at(session.scene(), &cam, f as f32).map_err(|e| e.to_string())?;
+                let h = (width as f32 / lens.aspect).round() as u32;
+                let one = shotstage_core::eval::camera_trajectory(session.scene(), &cam, f, f, width, h)
+                    .map_err(|e| e.to_string())?;
+                traj.push(json!({ "camera": cam, "data": one.first() }));
+            }
+            std::fs::write(
+                out.join("camera.json"),
+                serde_json::to_string_pretty(&json!({ "fps": t.fps, "frames": traj })).unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())?;
+            let mut videos = vec![];
+            if video {
+                for p in &pass {
+                    let mp4 = out.join(format!("{p}.mp4"));
+                    let status = std::process::Command::new("ffmpeg")
+                        .args(["-y", "-loglevel", "error", "-framerate", &t.fps.to_string(), "-i"])
+                        .arg(out.join(p).join("%05d.png"))
+                        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+                        .arg(&mp4)
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => videos.push(mp4.display().to_string()),
+                        Ok(_) => eprintln!("ffmpeg could not encode {p}.mp4"),
+                        Err(_) => {
+                            eprintln!("ffmpeg was not found: the PNG frames are there to encode yourself");
+                            break;
+                        }
+                    }
+                }
+            }
+            print_json(
+                &json!({ "ok": true, "result": { "folder": out.display().to_string(), "frames": b - a + 1, "passes": pass, "videos": videos } }),
+            );
+            Ok(ExitCode::SUCCESS)
         }
         Cmd::Storyboard { scene, out, width, depth } => {
             let mut session = scene.open()?;

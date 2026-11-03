@@ -27,7 +27,7 @@ pub enum SnapshotPass {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SnapshotParams {
     /// Camera to look through. Default: the camera in use at `frame`.
     pub camera: Option<String>,
@@ -37,6 +37,9 @@ pub struct SnapshotParams {
     /// Pixels, 16..=4096. Default 1024 wide; the other side follows the camera's aspect.
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Depth pass: `[near, far]` metres mapped to white..black. Default: fitted to each frame
+    /// (give a fixed range for a sequence, so the greys do not flicker).
+    pub depth_range: Option<[f32; 2]>,
 }
 
 /// Everything a GPU host needs to draw a snapshot.
@@ -49,6 +52,8 @@ pub struct SnapshotPlan {
     pub pass: SnapshotPass,
     pub view: Mat4,
     pub proj: Mat4,
+    /// Depth pass: metres mapped to white..black; `None` fits each frame.
+    pub depth_range: Option<[f32; 2]>,
 }
 
 fn side(v: u32, what: &str) -> CmdResult<u32> {
@@ -76,6 +81,11 @@ pub fn plan(scene: &Scene, params: Value, default_frame: Option<f32>) -> CmdResu
         pass: p.pass.unwrap_or_default(),
         view: world.inverse(),
         proj: lens.projection(width as f32 / height as f32),
+        depth_range: match p.depth_range {
+            Some([n, f]) if n.is_finite() && f.is_finite() && f > n && n >= 0.0 => Some([n, f]),
+            Some(_) => return Err(CommandError::invalid("depthRange must be [near, far] with 0 <= near < far")),
+            None => None,
+        },
     })
 }
 

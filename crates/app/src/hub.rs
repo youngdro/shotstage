@@ -52,7 +52,8 @@ impl Hub {
         let plan = shotstage_commands::snapshot::plan(self.session.scene(), params, Some(self.frame))?;
         let rs = self.gpu.clone().ok_or_else(|| CommandError::new("unsupported", "the editor has no GPU"))?;
         let renderer = self.snap_renderer.get_or_insert_with(|| Renderer::new(&rs.device));
-        let view = View { view: plan.view, proj: plan.proj, depth_near: 0.0, depth_far: 0.0 };
+        let [depth_near, depth_far] = plan.depth_range.unwrap_or([0.0, 0.0]);
+        let view = View { view: plan.view, proj: plan.proj, depth_near, depth_far };
         renderer.render(
             &rs.device,
             &rs.queue,
