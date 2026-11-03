@@ -6,6 +6,7 @@
 
 mod files;
 pub mod hub;
+mod storyboard;
 mod thumbs;
 mod ui;
 #[cfg(target_arch = "wasm32")]

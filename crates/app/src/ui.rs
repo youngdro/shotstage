@@ -682,6 +682,9 @@ pub struct EditorApp {
     /// The small shot-camera preview in the corner of the free view.
     pip: Option<Pip>,
     cam_preview: bool,
+    /// The storyboard strip above the timeline.
+    show_board: bool,
+    board: Option<crate::storyboard::Storyboard>,
     /// What scrolling does in the view, and whether the last wheel input looked like a trackpad.
     scroll_mode: ScrollMode,
     /// Scrolling not yet turned into a 15° turn of the dragged object.
@@ -775,6 +778,8 @@ impl EditorApp {
             texture: None,
             pip: None,
             cam_preview: true,
+            show_board: false,
+            board: None,
             scroll_mode: ScrollMode::Auto,
             turn_acc: 0.0,
             wheel_trackpad: false,
@@ -1639,6 +1644,9 @@ impl eframe::App for EditorApp {
         }
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("timeline").resizable(false).show(ui, |ui| self.bottom(ui));
+        if self.show_board {
+            egui::Panel::bottom("storyboard").resizable(false).show(ui, |ui| self.storyboard_strip(ui, frame));
+        }
         egui::Panel::left("outliner")
             .resizable(true)
             .default_size(252.0)
@@ -2982,6 +2990,8 @@ impl EditorApp {
             {
                 self.run("shot.create", json!({"camera": cam, "start": t.start, "end": t.end}));
             }
+            ui.toggle_value(&mut self.show_board, "Storyboard")
+                .on_hover_text("Every shot as a picture through its camera; click one to go there");
             ui.separator();
             ui.toggle_value(&mut self.show_console, "Console")
                 .on_hover_text("Type commands: the same API as window.shotstage, the CLI and MCP");
@@ -3402,6 +3412,85 @@ impl EditorApp {
             [egui::pos2(x, ruler.top()), egui::pos2(x, playhead_bottom)],
             (1.5, Color32::from_rgb(255, 120, 90)),
         );
+    }
+
+    /// One card per shot: its picture at the middle frame, number, name, length and camera.
+    /// Clicking a card puts the playhead at the shot's start and looks through its camera.
+    fn storyboard_strip(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        let scene = self.scene();
+        let shots = scene.timeline.shots.clone();
+        if let Some(rs) = frame.wgpu_render_state() {
+            let board = self.board.get_or_insert_with(|| crate::storyboard::Storyboard::new(&rs.device));
+            let look = crate::storyboard::Look {
+                revision: self.hub.borrow().session.revision(),
+                pass: self.pass,
+                studio_light: self.studio_light,
+                shadows: self.shadows,
+            };
+            if board.update(rs, &scene, &look, 2) {
+                ui.ctx().request_repaint();
+            }
+        }
+        ui.add_space(4.0);
+        if shots.is_empty() {
+            ui.weak("No shots yet: add one with + Shot, or right-click the Shots row on the timeline.");
+            ui.add_space(4.0);
+            return;
+        }
+        let now = self.frame();
+        let fps = scene.timeline.fps.max(1.0);
+        let card = Vec2::new(160.0, 90.0);
+        egui::ScrollArea::horizontal().id_salt("storyboard").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (i, sh) in shots.iter().enumerate() {
+                    let current = (sh.start as f32..=sh.end as f32 + 0.999).contains(&now);
+                    let (rect, resp) = ui.allocate_exact_size(card + Vec2::new(0.0, 18.0), Sense::click());
+                    let pic = Rect::from_min_size(rect.min, card);
+                    let p = ui.painter_at(rect);
+                    p.rect_filled(pic, 3.0, Color32::from_gray(16));
+                    if let Some((tex, uv, aspect)) = self.board.as_ref().and_then(|b| b.get(i)) {
+                        // keep the camera's aspect inside the card
+                        let mut size = card;
+                        if size.x / size.y > aspect {
+                            size.x = size.y * aspect;
+                        } else {
+                            size.y = size.x / aspect;
+                        }
+                        p.image(tex, Rect::from_center_size(pic.center(), size), uv, Color32::WHITE);
+                    }
+                    let stroke = if current {
+                        (2.0, ACCENT)
+                    } else if resp.hovered() {
+                        (1.0, Color32::from_gray(160))
+                    } else {
+                        (1.0, Color32::from_gray(60))
+                    };
+                    p.rect_stroke(pic, 3.0, stroke, egui::StrokeKind::Inside);
+                    let secs = (sh.end + 1 - sh.start) as f32 / fps;
+                    p.text(
+                        pic.left_bottom() + Vec2::new(2.0, 2.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{} · {} · {secs:.1}s", i + 1, sh.name),
+                        egui::FontId::proportional(11.0),
+                        if current { Color32::WHITE } else { Color32::from_gray(190) },
+                    );
+                    let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+                    if resp
+                        .on_hover_text(format!(
+                            "{}: frames {}–{} through {cam}. Click to go there.",
+                            sh.name, sh.start, sh.end
+                        ))
+                        .clicked()
+                    {
+                        self.hub.borrow_mut().frame = sh.start as f32;
+                        self.playing = false;
+                        self.look_through = true;
+                        self.hub.borrow_mut().look_through = true;
+                    }
+                }
+            });
+        });
+        ui.add_space(2.0);
     }
 
     /// Keyframe the selection at the playhead (a whole person: every joint).
