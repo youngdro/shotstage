@@ -3178,7 +3178,9 @@ impl EditorApp {
             if self.tl_view.is_some()
                 && ui
                     .small_button("Fit")
-                    .on_hover_text("Show the whole timeline (pinch or Cmd/Ctrl+scroll on it to zoom)")
+                    .on_hover_text(
+                        "Show the whole timeline (or double-click the ruler; pinch or Cmd/Ctrl+scroll on it to zoom)",
+                    )
                     .clicked()
             {
                 self.tl_view = None;
@@ -3304,6 +3306,9 @@ impl EditorApp {
             egui::FontId::proportional(11.0),
             Color32::from_gray(170),
         );
+        if ruler_resp.double_clicked() {
+            self.tl_view = None;
+        }
         if (ruler_resp.dragged() || ruler_resp.clicked())
             && let Some(pos) = ruler_resp.interact_pointer_pos()
             && pos.x >= area.left()
@@ -3740,15 +3745,13 @@ impl EditorApp {
                             ui.close();
                         }
                     });
-                    if resp
-                        .on_hover_text(format!(
-                            "{}: frames {}–{} through {cam}. Click to go there; right-click for more.",
-                            sh.name, sh.start, sh.end
-                        ))
-                        .clicked()
-                    {
+                    let resp = resp.on_hover_text(format!(
+                        "{}: frames {}–{} through {cam}. Click to go there, double-click to play it; right-click for more.",
+                        sh.name, sh.start, sh.end
+                    ));
+                    if resp.clicked() || resp.double_clicked() {
                         self.hub.borrow_mut().frame = sh.start as f32;
-                        self.playing = false;
+                        self.playing = resp.double_clicked();
                         self.look_through = true;
                         self.hub.borrow_mut().look_through = true;
                     }
