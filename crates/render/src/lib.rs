@@ -10,7 +10,7 @@ use glam::Mat4;
 use shotstage_core::Scene;
 use wgpu::util::DeviceExt as _;
 
-use geometry::{LineVertex, Vertex};
+use geometry::{ImageVertex, LineVertex, Vertex};
 pub use geometry::{Overlay, pick};
 
 /// Colour format of the offscreen target.
@@ -153,6 +153,41 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     return vec4<f32>(i.c * light, 1.0);
 }
 
+@group(1) @binding(0) var img_tex: texture_2d<f32>;
+@group(1) @binding(1) var img_smp: sampler;
+
+struct ImgIn { @location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) tint: vec3<f32> };
+struct ImgOut { @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) tint: vec3<f32>, @location(2) vz: f32, @location(3) n: vec3<f32> };
+
+@vertex fn vs_img(v: ImgIn) -> ImgOut {
+    var o: ImgOut;
+    o.clip = u.view_proj * vec4<f32>(v.pos, 1.0);
+    o.uv = v.uv;
+    o.tint = v.tint;
+    o.vz = -(u.view * vec4<f32>(v.pos, 1.0)).z;
+    o.n = v.normal;
+    return o;
+}
+
+@fragment fn fs_img(i: ImgOut) -> @location(0) vec4<f32> {
+    let c = textureSample(img_tex, img_smp, i.uv);
+    // transparent pixels of a cut-out are holes
+    if (c.a < 0.5) {
+        discard;
+    }
+    let pass_id = u32(u.params.x + 0.5);
+    if (pass_id == 1u) {
+        let d = clamp((i.vz - u.params.y) / max(u.params.z - u.params.y, 1e-4), 0.0, 1.0);
+        return vec4<f32>(vec3<f32>(1.0 - d), 1.0);
+    }
+    if (pass_id == 2u) {
+        let vn = normalize((u.view * vec4<f32>(normalize(i.n), 0.0)).xyz);
+        return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
+    }
+    // pictures are shown as they are, not shaded
+    return vec4<f32>(min(c.rgb * i.tint, vec3<f32>(1.0)), 1.0);
+}
+
 struct LineIn { @location(0) pos: vec3<f32>, @location(1) color: vec3<f32> };
 struct LineOut { @builtin(position) clip: vec4<f32>, @location(0) c: vec3<f32> };
 
@@ -187,6 +222,11 @@ struct Target {
 pub struct Renderer {
     mesh_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    image_pipeline: wgpu::RenderPipeline,
+    image_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// GPU textures of image assets: key -> (identity of the pixels, bind group).
+    textures: std::collections::HashMap<String, (usize, wgpu::BindGroup)>,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     target: Option<Target>,
@@ -286,7 +326,137 @@ impl Renderer {
             },
             None,
         );
-        Self { mesh_pipeline, line_pipeline, uniform, bind_group, target: None, target_generation: 0 }
+        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shotstage image"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let image_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shotstage image"),
+            bind_group_layouts: &[Some(&bgl), Some(&image_layout)],
+            immediate_size: 0,
+        });
+        let img_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3];
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vs_img"),
+            layout: Some(&image_pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_img"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ImageVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &img_attrs,
+                })],
+            },
+            // cards are seen from both sides
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_img"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shotstage image"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            mesh_pipeline,
+            line_pipeline,
+            image_pipeline,
+            image_layout,
+            sampler,
+            textures: Default::default(),
+            uniform,
+            bind_group,
+            target: None,
+            target_generation: 0,
+        }
+    }
+
+    /// Upload the textures of image assets that are new or changed.
+    fn sync_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, used: &[&str]) {
+        use base64::Engine as _;
+        for key in used {
+            let Some(asset) = scene.assets.get(*key) else { continue };
+            // the pixels are shared (`Arc`), so their address identifies them
+            let identity = asset.data.as_ptr() as usize ^ asset.data.len();
+            if self.textures.get(*key).is_some_and(|(id, _)| *id == identity) {
+                continue;
+            }
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(asset.data.as_bytes()) else { continue };
+            let Ok(img) = image::load_from_memory(&bytes) else { continue };
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width().clamp(1, 4096), rgba.height().clamp(1, 4096));
+            let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("shotstage image"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * rgba.width()), rows_per_image: None },
+                wgpu::Extent3d { width: rgba.width(), height: rgba.height(), depth_or_array_layers: 1 },
+            );
+            let view = tex.create_view(&Default::default());
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shotstage image"),
+                layout: &self.image_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.textures.insert(key.to_string(), (identity, bg));
+        }
+        self.textures.retain(|k, _| scene.assets.contains_key(k));
     }
 
     fn ensure_target(&mut self, device: &wgpu::Device, size: (u32, u32)) {
@@ -347,8 +517,13 @@ impl Renderer {
         size: (u32, u32),
     ) {
         self.ensure_target(device, size);
-        let Some(target) = &self.target else { return };
+        let mut overlay = overlay.clone();
+        overlay.eye = Some(view.view.inverse().w_axis.truncate().to_array());
+        let overlay = &overlay;
         let geo = geometry::build(scene, frame, overlay);
+        let used: Vec<&str> = geo.images.iter().map(|q| q.asset.as_str()).collect();
+        self.sync_textures(device, queue, scene, &used);
+        let Some(target) = &self.target else { return };
         let (near, far) = if view.depth_far > view.depth_near {
             (view.depth_near, view.depth_far)
         } else {
@@ -382,6 +557,14 @@ impl Renderer {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
+        let img_verts: Vec<ImageVertex> = geo.images.iter().flat_map(|q| q.vertices).collect();
+        let img_buf = (!img_verts.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shotstage images"),
+                contents: bytemuck::cast_slice(&img_verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
         let clear = match pass {
             Pass::Clay => wgpu::Color { r: 0.16, g: 0.165, b: 0.18, a: 1.0 },
             Pass::Depth => wgpu::Color::BLACK,
@@ -411,6 +594,16 @@ impl Renderer {
                 rp.set_pipeline(&self.mesh_pipeline);
                 rp.set_vertex_buffer(0, b.slice(..));
                 rp.draw(0..geo.triangles.len() as u32, 0..1);
+            }
+            if let Some(b) = &img_buf {
+                rp.set_pipeline(&self.image_pipeline);
+                rp.set_vertex_buffer(0, b.slice(..));
+                for (i, q) in geo.images.iter().enumerate() {
+                    if let Some((_, bg)) = self.textures.get(&q.asset) {
+                        rp.set_bind_group(1, bg, &[]);
+                        rp.draw(i as u32 * 6..i as u32 * 6 + 6, 0..1);
+                    }
+                }
             }
             if let Some(b) = &line_buf {
                 rp.set_pipeline(&self.line_pipeline);

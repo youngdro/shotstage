@@ -37,12 +37,44 @@ pub struct Overlay {
     pub footprint: Option<String>,
     /// Ignore the scene's lights and use the flat studio clay light.
     pub studio_light: bool,
+    /// Viewer position, so billboards can turn towards it (set by the renderer).
+    pub eye: Option<[f32; 3]>,
+}
+
+/// Vertex of a textured image card.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ImageVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    /// Multiplies the picture (selection / hover highlight).
+    pub tint: [f32; 3],
+}
+
+/// One image card to draw with its asset's texture.
+pub struct ImageQuad {
+    pub asset: String,
+    pub vertices: [ImageVertex; 6],
+}
+
+/// World matrix of an image card, turned to face `eye` about the vertical axis when it is a
+/// billboard.
+pub fn image_world(world: Mat4, billboard: bool, eye: Option<Vec3>) -> Mat4 {
+    let (Some(eye), true) = (eye, billboard) else { return world };
+    let (s, _, t) = world.to_scale_rotation_translation();
+    let to = Vec3::new(eye.x - t.x, 0.0, eye.z - t.z);
+    if to.length_squared() < 1e-8 {
+        return world;
+    }
+    Mat4::from_scale_rotation_translation(s, glam::Quat::from_rotation_y(to.x.atan2(to.z)), t)
 }
 
 #[derive(Default)]
 pub struct Geometry {
     pub triangles: Vec<Vertex>,
     pub lines: Vec<LineVertex>,
+    pub images: Vec<ImageQuad>,
 }
 
 const SELECT: [f32; 3] = [1.0, 0.62, 0.18];
@@ -85,6 +117,32 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                         color: c,
                         id: index as u32 + 1,
                     });
+                }
+            }
+            EntityKind::Image(img) => {
+                let w = image_world(world, img.billboard, overlay.eye.map(Vec3::from_array));
+                let (hw, hh) = (img.size[0] / 2.0, img.size[1] / 2.0);
+                let tint = if selected {
+                    [1.0, 0.82, 0.6]
+                } else if hovered {
+                    [1.12, 1.12, 1.12]
+                } else {
+                    [1.0; 3]
+                };
+                let n = w.transform_vector3(Vec3::Z).normalize_or_zero().to_array();
+                let v = |x: f32, y: f32, u: f32, vv: f32| ImageVertex {
+                    pos: w.transform_point3(Vec3::new(x, y, 0.0)).to_array(),
+                    normal: n,
+                    uv: [u, vv],
+                    tint,
+                };
+                let (a, b, c, d) =
+                    (v(-hw, -hh, 0.0, 1.0), v(hw, -hh, 1.0, 1.0), v(hw, hh, 1.0, 0.0), v(-hw, hh, 0.0, 0.0));
+                g.images.push(ImageQuad { asset: img.asset.clone(), vertices: [a, b, c, a, c, d] });
+                if selected && overlay.cameras {
+                    for (p, q) in [(a.pos, b.pos), (b.pos, c.pos), (c.pos, d.pos), (d.pos, a.pos)] {
+                        line(&mut g.lines, Vec3::from_array(p), Vec3::from_array(q), SELECT);
+                    }
                 }
             }
             EntityKind::Light(l) if overlay.cameras => {

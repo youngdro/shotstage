@@ -47,6 +47,17 @@
 - **导出**：顶栏 **Export** 可以导出 GLB（含相机和灯光）、glTF、OBJ+MTL、STL，以及经 Blender 转换的 FBX。导出的是当前帧摆好的姿势。
 - 命令：`model.import`、`model.export`；CLI：`shotstage import chair.glb -s shot.json --fit-height 0.9`、`shotstage export set.fbx -s shot.json`。
 
+## 图片
+
+把 PNG / JPEG / WebP 拖进视口，或者在左侧 **Images** 里选一种用法，图片会按原比例变成场景里的一张卡片：
+
+- **Card**：立着的图片（参考照片、海报、指示牌），落在下方的表面上；
+- **Cut-out**：始终转向镜头的公告板，适合抠好图的人物、树木（带透明背景的 PNG 默认就是这种，透明部分是镂空的）；
+- **Backdrop**：放在整个场景后面、正对当前镜头并铺满画面的背景图；
+- **Floor**：平铺在地面上（地毯、平面图、地贴）。
+
+右侧可以切换"始终朝向镜头"和调高度（宽度按比例变化）。图片原样显示、不受灯光影响，深度和法线 pass 里也会正确出现。命令：`image.import`、`image.set`、`image.get`；超过 2048 像素的图会自动缩小。
+
 ## 灯光
 
 灯光是可选的：场景里没有灯时，用的是现在这种均匀的白模光；一旦放了灯，Clay 画面和截图就由这些灯照亮（暂不计算阴影）。视口工具栏的 **Studio light** 可以随时切回白模光对比。
@@ -138,6 +149,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
 | 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
 | 模型 | `model.import` `model.export` |
+| 图片 | `image.import` `image.set` `image.get` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
 | 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.delete` |

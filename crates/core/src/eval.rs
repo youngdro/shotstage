@@ -234,8 +234,10 @@ pub fn describe_shot(scene: &Scene, camera: &str, frame: f32, subject: Option<&s
 /// An entity's mesh at `frame` in its own space, with modifiers applied. Skinned meshes are
 /// bent by their joints' animated transforms; everything else is the plain evaluated mesh.
 pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
-    let crate::EntityKind::Mesh { source, modifiers, .. } = &scene.get(id)?.kind else {
-        return Err(CoreError::WrongKind(id.into(), "mesh"));
+    let (source, modifiers) = match &scene.get(id)?.kind {
+        crate::EntityKind::Mesh { source, modifiers, .. } => (source, modifiers),
+        crate::EntityKind::Image(img) => return Ok(img.card()),
+        _ => return Err(CoreError::WrongKind(id.into(), "mesh")),
     };
     let crate::MeshSource::Skinned { mesh, skin } = source else {
         return crate::mesh::evaluate_mesh(source, modifiers);

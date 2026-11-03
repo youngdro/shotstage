@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::CameraData;
+use crate::image::{Asset, ImageData};
 use crate::light::LightData;
 use crate::mesh::{MeshSource, Modifier};
 use crate::timeline::Timeline;
@@ -78,6 +79,8 @@ pub enum EntityKind {
     Camera(CameraData),
     /// A light (optional: scenes without lights use the studio clay light).
     Light(LightData),
+    /// A picture on a card (reference, billboard, backdrop, decal).
+    Image(ImageData),
 }
 
 fn default_color() -> [f32; 3] {
@@ -91,6 +94,7 @@ impl EntityKind {
             EntityKind::Mesh { .. } => "mesh",
             EntityKind::Camera(_) => "camera",
             EntityKind::Light(_) => "light",
+            EntityKind::Image(_) => "image",
         }
     }
 }
@@ -128,11 +132,20 @@ pub struct Scene {
     /// The camera the viewport and exports look through, if any.
     #[serde(default)]
     pub active_camera: Option<String>,
+    /// Images used by image entities, by key.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub assets: std::collections::BTreeMap<String, Asset>,
 }
 
 impl Default for Scene {
     fn default() -> Self {
-        Self { version: SCENE_VERSION, entities: Vec::new(), timeline: Timeline::default(), active_camera: None }
+        Self {
+            version: SCENE_VERSION,
+            entities: Vec::new(),
+            timeline: Timeline::default(),
+            active_camera: None,
+            assets: Default::default(),
+        }
     }
 }
 

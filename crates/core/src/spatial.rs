@@ -85,7 +85,9 @@ pub fn subtree(scene: &Scene, id: &str) -> Vec<String> {
 /// World bounds of one entity's own geometry (meshes only).
 pub fn own_bounds(scene: &Scene, id: &str, frame: f32) -> Result<Option<Aabb>> {
     let e = scene.get(id)?;
-    let EntityKind::Mesh { .. } = &e.kind else { return Ok(None) };
+    if !matches!(e.kind, EntityKind::Mesh { .. } | EntityKind::Image(_)) {
+        return Ok(None);
+    }
     let world = world_at(scene, id, frame)?;
     let mesh = crate::eval::posed_mesh(scene, id, frame)?;
     Ok(Aabb::of_points(mesh.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p)))))
@@ -176,7 +178,9 @@ pub fn raycast(scene: &Scene, frame: f32, origin: Vec3, dir: Vec3, opts: &RayOpt
     let ignored: Vec<String> = opts.ignore.iter().flat_map(|i| subtree(scene, i)).collect();
     let mut best: Option<Hit> = None;
     for e in &scene.entities {
-        let EntityKind::Mesh { .. } = &e.kind else { continue };
+        if !matches!(e.kind, EntityKind::Mesh { .. } | EntityKind::Image(_)) {
+            continue;
+        }
         if ignored.contains(&e.id) || (!opts.only.is_empty() && !opts.only.contains(&e.id)) || is_hidden(scene, &e.id) {
             continue;
         }

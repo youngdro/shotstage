@@ -301,6 +301,8 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Mode for the next picked image (card, billboard, backdrop, floor).
+    image_mode: Option<&'static str>,
     /// Ignore scene lights (view option).
     studio_light: bool,
     /// The last object (group) selected: what lights and presets aim at.
@@ -347,6 +349,7 @@ impl EditorApp {
             frame_side: "front",
             block_filter: String::new(),
             show_console: false,
+            image_mode: None,
             studio_light: false,
             last_subject: None,
             toast: None,
@@ -446,6 +449,27 @@ impl EditorApp {
                 .rsplit_once('.')
                 .map(|(s, e)| (s.to_string(), e.to_ascii_lowercase()))
                 .unwrap_or((name.clone(), String::new()));
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                let key = self.new_key("import");
+                let mut params = json!({"data": encode(&bytes), "name": stem});
+                if let Some(mode) = self.image_mode.take() {
+                    params["mode"] = json!(mode);
+                }
+                let backdrop = params["mode"] == "backdrop";
+                match hub::dispatch(&self.hub, json!({"command": "image.import", "params": params, "merge": key})) {
+                    Ok(o) => {
+                        let id = o.result["id"].as_str().unwrap_or_default().to_string();
+                        if !backdrop && let Some((rect, view)) = self.last_view {
+                            let p = at.filter(|p| rect.contains(*p)).unwrap_or(rect.center());
+                            self.place_on_ray(&key, &id, ray_at(rect, &view, p), Vec3::ZERO, false);
+                        }
+                        self.select(Some(id));
+                        self.toast(format!("Added {name} ({} × {} px)", o.result["pixels"][0], o.result["pixels"][1]));
+                    }
+                    Err(e) => self.toast(format!("Could not add {name}: {}", e.message)),
+                }
+                continue;
+            }
             let Some(format) = ModelFormat::from_extension(&ext) else {
                 self.toast(format!("{name}: not a model shotstage can import (glb, gltf, obj, stl, fbx, blend)"));
                 continue;
@@ -727,6 +751,25 @@ impl EditorApp {
                     });
                 });
             }
+            egui::CollapsingHeader::new(egui::RichText::new("Images").strong())
+                .id_salt("images")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.weak("Pick a picture, or drop one on the view (a transparent PNG becomes a cut-out).");
+                    ui.horizontal_wrapped(|ui| {
+                        for (label, mode, tip) in [
+                            ("Card", "card", "A standing picture: reference photo, poster, sign"),
+                            ("Cut-out", "billboard", "Always faces the camera: cut-out people, trees"),
+                            ("Backdrop", "backdrop", "Fills the camera's background, behind everything"),
+                            ("Floor", "floor", "Lies flat: rug, floor plan, logo on the ground"),
+                        ] {
+                            if ui.add_sized([tile, 30.0], egui::Button::new(label)).on_hover_text(tip).clicked() {
+                                self.image_mode = Some(mode);
+                                crate::files::pick(&self.incoming, ui.ctx());
+                            }
+                        }
+                    });
+                });
             egui::CollapsingHeader::new(egui::RichText::new("Cameras & helpers").strong())
                 .id_salt("helpers")
                 .default_open(false)
@@ -810,6 +853,7 @@ impl EditorApp {
                     EntityKind::Mesh { .. } => "■",
                     EntityKind::Camera(_) => "◉",
                     EntityKind::Light(_) => "☀",
+                    EntityKind::Image(_) => "▨",
                     EntityKind::Empty if rig::is_joint(scene, &e.id) => "•",
                     EntityKind::Empty => "▣",
                 };
@@ -1143,6 +1187,33 @@ impl EditorApp {
                 });
             }
             EntityKind::Light(l) => self.light_section(ui, &id, l),
+            EntityKind::Image(img) => {
+                let img = img.clone();
+                section(ui, "Image", true, |ui| {
+                    let mut billboard = img.billboard;
+                    if ui
+                        .checkbox(&mut billboard, "Always face the camera (billboard)")
+                        .on_hover_text("For cut-out people, trees and signs")
+                        .changed()
+                    {
+                        self.run("image.set", json!({"id": id, "billboard": billboard}));
+                    }
+                    let mut h = img.size[1];
+                    ui.horizontal(|ui| {
+                        ui.label("Height");
+                        let r = ui.add(egui::DragValue::new(&mut h).range(0.01..=500.0).speed(0.01).suffix(" m"));
+                        if r.drag_started() {
+                            self.gesture += 1;
+                        }
+                        if r.changed() {
+                            self.run_merged(&format!("img:{id}"), "image.set", json!({"id": id, "height": h}));
+                        }
+                    });
+                    if let Some(a) = scene.assets.get(&img.asset) {
+                        ui.weak(format!("{} × {} px · {:.2} × {:.2} m", a.width, a.height, img.size[0], img.size[1]));
+                    }
+                });
+            }
             EntityKind::Empty => {}
         }
     }
@@ -1939,6 +2010,7 @@ impl EditorApp {
             hovered: if clean { None } else { self.hovered.clone() },
             footprint: dragged_id,
             studio_light: self.studio_light,
+            eye: None,
         };
         let pass = self.pass;
         let (Some(rs), Some(renderer)) = (frame.wgpu_render_state(), self.renderer.as_mut()) else {

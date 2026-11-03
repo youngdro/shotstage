@@ -15,7 +15,7 @@ shotstage-core = { path = "crates/core" }
 shotstage-commands = { path = "crates/commands" }
 shotstage-render = { path = "crates/render" }
 glam = { version = "0.30", features = ["serde", "bytemuck"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 schemars = "1"
 thiserror = "2"
