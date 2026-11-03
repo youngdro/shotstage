@@ -1229,6 +1229,22 @@ impl EditorApp {
         }
     }
 
+    /// Clear the scene (undoable) and start the view over: playhead at the start, whole
+    /// timeline, free view.
+    fn new_scene(&mut self) {
+        if self.run("scene.new", json!({})).is_some() {
+            self.also.clear();
+            self.select(None);
+            self.playing = false;
+            self.tl_view = None;
+            self.look_through = false;
+            let start = self.scene().timeline.start as f32;
+            let mut h = self.hub.borrow_mut();
+            h.frame = start;
+            h.look_through = false;
+        }
+    }
+
     /// Put the selection on the clipboard as a shotstage clip (and delete it for Cut).
     fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
         let ids = self.selection_roots();
@@ -1450,7 +1466,7 @@ impl EditorApp {
                 QuickAction::Open => crate::files::pick(&self.incoming, ctx),
                 QuickAction::Undo => _ = self.run("history.undo", json!({})),
                 QuickAction::Redo => _ = self.run("history.redo", json!({})),
-                QuickAction::New => _ = self.run("scene.new", json!({})),
+                QuickAction::New => self.new_scene(),
                 QuickAction::Shadows => self.shadows = !self.shadows,
                 QuickAction::Focus => self.focus_selection(),
                 QuickAction::Key => self.key_selection(),
@@ -1852,7 +1868,7 @@ impl EditorApp {
                 self.save_scene();
             }
             if ui.button("New").on_hover_text("Clear the scene (undoable)").clicked() {
-                self.run("scene.new", json!({}));
+                self.new_scene();
             }
             if ui.button("Undo").on_hover_text("Cmd/Ctrl+Z").clicked() {
                 self.run("history.undo", json!({}));
@@ -4627,7 +4643,7 @@ impl EditorApp {
                         }
                     });
                     ui.add_space(4.0);
-                    ui.weak("Tip: drop a .glb / .fbx model or a picture on the view to bring it in.");
+                    ui.weak("Tip: drop a .glb / .fbx model or a picture on the view to bring it in. Cmd/Ctrl+K searches every block, move and action.");
                 });
             });
     }
