@@ -3662,7 +3662,10 @@ impl EditorApp {
                 studio_light: self.studio_light,
                 shadows: self.shadows,
             };
-            if board.update(rs, &scene, &look, 2) {
+            // hold the pictures while something is being dragged (the scene changes every frame
+            // then); they catch up when the drag ends
+            let dragging = !matches!(self.drag, Gesture::Idle | Gesture::Cancelled) || self.palette.is_some();
+            if !dragging && board.update(rs, &scene, &look, 2) {
                 ui.ctx().request_repaint();
             }
         }
