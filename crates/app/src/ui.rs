@@ -387,6 +387,7 @@ fn friendly(command: &str) -> String {
         "keyframe.move" => "Retime key".into(),
         "keyframe.retime" => "Retime animation".into(),
         "entity.paste" => "Paste".into(),
+        "shot.cut" => "Cut".into(),
         "keyframe.delete" => "Delete key".into(),
         "camera.frame" => "Frame shot".into(),
         "model.import" => "Import model".into(),
@@ -3017,13 +3018,28 @@ impl EditorApp {
             if a.changed() || b.changed() || c.changed() {
                 self.run("timeline.set", json!({"fps": fps2, "start": start, "end": end}));
             }
-            if let Some(cam) = scene.active_camera.clone()
-                && ui
-                    .small_button("+ Shot")
-                    .on_hover_text("A shot through the active camera over the full range")
-                    .clicked()
-            {
-                self.run("shot.create", json!({"camera": cam, "start": t.start, "end": t.end}));
+            // the selected camera, else the active one
+            let sel_cam = self
+                .selected()
+                .filter(|id| matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_))))
+                .or(scene.active_camera.clone());
+            if let Some(cam) = sel_cam {
+                let name = scene.get(&cam).map(|e| e.name.clone()).unwrap_or(cam.clone());
+                let tip = if t.shots.is_empty() {
+                    format!("A shot through {name} over the whole timeline")
+                } else {
+                    format!("Cut to {name} at the playhead (select another camera to cut to it)")
+                };
+                if ui.small_button("+ Shot").on_hover_text(tip).clicked() {
+                    if t.shots.is_empty() {
+                        self.run("shot.create", json!({"camera": cam, "start": t.start, "end": t.end}));
+                    } else if let Some(r) = self.run(
+                        "shot.cut",
+                        json!({"camera": cam, "frame": self.frame().round().max(0.0) as u32, "name": name}),
+                    ) {
+                        self.toast(format!("Cut to {name} at frame {}", r["start"]));
+                    }
+                }
             }
             ui.toggle_value(&mut self.show_board, "Storyboard")
                 .on_hover_text("Every shot as a picture through its camera; click one to go there");

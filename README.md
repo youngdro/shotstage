@@ -28,6 +28,7 @@
 - **场景列表**：每行都有显示（👁）和锁定（🔒）开关；Shift+点击 多选；双击一行，或点右侧属性顶部的名字，可以改名；右键有 聚焦 / 改名 / 复制 / 隐藏 / 锁定 / 删除；物体多时会出现按名字筛选的搜索框。
 - **触控板**：Mac 触控板双指滑动 = 旋转视角（按住 Shift = 平移），双指捏合 = 缩放；鼠标滚轮仍是缩放。自动识别，也可以在视图工具栏的 **View ▾** 里固定成「Orbit」或「Zoom」。阴影、影棚光、镜头小窗的开关也都收在 **View ▾** 里。
 - **从当前视角建相机**：视图工具栏的 **+ Camera**（或快捷操作框里的「New camera from this view」）在你正看着的位置放一个 16:9 相机，对准视图中心，镜头焦距自动配成和当前画面一致的取景；场景里还没有活动相机时它就成为活动相机。相机属性里的 **Match current view** 现在也是一步撤销。
+- **切镜头**：时间轴的 **+ Shot** 在播放头处「切」到选中的相机（没选相机就用活动相机）：播放头落在某个镜头中间就把它一分为二，正好在镜头开头就换相机，落在空档就补到下一个镜头前。命令 `shot.cut`。
 - **故事板**：时间轴上的 **Storyboard** 打开一排镜头卡片，每个镜头用它的相机在中间帧渲染一张图，标着序号、名字和时长；当前镜头高亮，点卡片就跳到那个镜头并进入相机视角。改了场景后会逐张重新渲染。
 - **镜头小窗**：在自由视角里，右下角小窗实时显示镜头相机在当前帧看到的画面，摆东西时就能同时看构图；点它进入相机视角，视图工具栏的 **Cam preview** 可以关掉。只在场景、帧或显示设置变化时才重新渲染。
 
@@ -197,7 +198,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
 | 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
-| 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.set` `shot.delete` |
+| 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.cut` `shot.set` `shot.delete` |
 | 复制粘贴 | `entity.copy` `entity.paste` |
 
 约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。

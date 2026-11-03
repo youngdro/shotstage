@@ -85,6 +85,60 @@ struct ShotSetParams {
     end: Option<u32>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CutParams {
+    /// Camera to cut to.
+    camera: String,
+    /// Frame where the new shot starts.
+    frame: u32,
+    /// Name of the new shot (default: its id).
+    name: Option<String>,
+}
+
+/// Cut to `camera` at `frame`: split the shot playing there (the new shot keeps its end), switch
+/// the camera of a shot that starts exactly there, or fill the gap up to the next shot.
+fn cut(scene: &mut Scene, p: CutParams) -> CmdResult<Value> {
+    scene.camera(&p.camera)?;
+    let f = p.frame;
+    let t = &mut scene.timeline;
+    let fresh = |t: &shotstage_core::Timeline| {
+        (1..).map(|n| format!("shot_{n}")).find(|i| !t.shots.iter().any(|x| &x.id == i)).unwrap_or_default()
+    };
+    if let Some(sh) = t.shots.iter_mut().find(|sh| sh.start == f) {
+        sh.camera = p.camera;
+        if let Some(n) = p.name {
+            sh.name = n;
+        }
+        return Ok(json!({ "id": sh.id, "start": sh.start, "end": sh.end, "split": false }));
+    }
+    let id = fresh(t);
+    let end = match t.shots.iter_mut().find(|sh| sh.start < f && f <= sh.end) {
+        Some(sh) => {
+            let end = sh.end;
+            sh.end = f - 1;
+            end
+        }
+        None => {
+            let next = t.shots.iter().map(|sh| sh.start).filter(|s| *s > f).min();
+            // past the last shot: to the end of the timeline, or three seconds beyond it
+            next.map(|n| n - 1).unwrap_or(if f < t.end { t.end } else { f + (t.fps * 3.0).round() as u32 })
+        }
+    };
+    t.shots.push(shotstage_core::Shot {
+        id: id.clone(),
+        name: p.name.unwrap_or_else(|| id.clone()),
+        camera: p.camera,
+        start: f,
+        end,
+    });
+    t.shots.sort_by_key(|x| x.start);
+    if end > t.end {
+        t.end = end;
+    }
+    Ok(json!({ "id": id, "start": f, "end": end, "split": true }))
+}
+
 fn shot_set(scene: &mut Scene, p: ShotSetParams) -> CmdResult<Value> {
     if let Some(c) = &p.camera {
         scene.camera(c)?;
@@ -362,6 +416,7 @@ pub fn commands() -> Vec<Command> {
         command!("entity.align", "Line up entities' bounds on a world axis: min edges, centres or max edges.", mutates: true, AlignParams, align),
         command!("entity.distribute", "Space three or more entities evenly along a world axis (the outer two stay).", mutates: true, DistributeParams, distribute),
         command!("entity.attach", "Make a prop follow something: a person's hand (it moves with their poses and actions), or any entity; null detaches it. Hands snap the prop to the palm.", mutates: true, AttachParams, attach),
+        command!("shot.cut", "Cut to a camera at a frame: splits the shot playing there (or switches the camera of a shot starting there, or fills the gap to the next shot).", mutates: true, CutParams, cut),
         command!("shot.set", "Change a shot: its name, camera, first and last frame (retime it).", mutates: true, ShotSetParams, shot_set),
         command!("person.lookAt", "Turn a person's head and neck towards an entity (e.g. the camera) or a point.", mutates: true, LookParams, look),
     ]
@@ -416,6 +471,22 @@ mod tests {
         s.dispatch("entity.create", json!({"type": "camera", "id": "c2"})).unwrap();
         s.dispatch("shot.create", json!({"camera": "c1", "start": 0, "end": 47, "id": "s1"})).unwrap();
         s.dispatch("shot.set", json!({"id": "s1", "end": 200, "camera": "c2", "name": "wide"})).unwrap();
+        // cutting: split inside a shot, switch at its first frame, fill a gap
+        {
+            let mut c = crate::Session::default();
+            for cam in ["c1", "c2"] {
+                c.dispatch("entity.create", json!({"type": "camera", "id": cam})).unwrap();
+            }
+            c.dispatch("shot.create", json!({"camera": "c2", "start": 0, "end": 200, "id": "s1"})).unwrap();
+            c.dispatch("shot.cut", json!({"camera": "c1", "frame": 100})).unwrap();
+            let shots = &c.scene().timeline.shots;
+            assert_eq!((shots[0].end, shots[1].start, shots[1].end, shots[1].camera.as_str()), (99, 100, 200, "c1"));
+            let r = c.dispatch("shot.cut", json!({"camera": "c2", "frame": 100})).unwrap().result;
+            assert_eq!(r["split"], false);
+            assert_eq!(c.scene().timeline.shots[1].camera, "c2");
+            c.dispatch("shot.cut", json!({"camera": "c1", "frame": 250})).unwrap();
+            assert_eq!(c.scene().timeline.shots.len(), 3);
+        }
         let sh = &s.scene().timeline.shots[0];
         assert_eq!((sh.end, sh.camera.as_str(), sh.name.as_str()), (200, "c2", "wide"));
         assert!(s.scene().timeline.end >= 200, "the timeline grows");
