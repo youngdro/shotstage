@@ -20,6 +20,11 @@
 
 视口工具栏的 **📷 Save frame** 把当前帧透过镜头的画面存成 1920 宽的 PNG。
 
+
+### Saving your work
+
+**Save** (Cmd/Ctrl+S) writes the whole scene to a `.shotstage.json` file; **Open…** loads one back (it also imports models and pictures). The editor autosaves a couple of seconds after every change — in the browser's local storage on the web, in `~/.shotstage/autosave.json` on desktop — and offers to restore the last scene when it starts.
+
 ## 像搭积木一样搭场景
 
 - **从左侧素材栏拖进视口**：物体落在鼠标下的表面上，可能是地面、桌面或别的物体顶上；拖出视口松手或按 Esc 就取消。单击素材则放到画面中间。

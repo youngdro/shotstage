@@ -424,6 +424,10 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Autosave: the revision last written and when (seconds), and a found autosave offered for
+    /// restoring: (scene JSON, object count).
+    autosaved: (u64, f64),
+    restore_offer: Option<(String, usize)>,
     /// Draw shadows in the view.
     shadows: bool,
     /// More selected objects (Shift+click), besides the hub's selection.
@@ -502,6 +506,12 @@ impl EditorApp {
             reference_for: None,
             also: vec![],
             shadows: true,
+            autosaved: (u64::MAX, 0.0),
+            restore_offer: crate::files::autosave_read().and_then(|j| {
+                let v: Value = serde_json::from_str(&j).ok()?;
+                let n = v["entities"].as_array().map(|a| a.iter().filter(|e| e["parent"].is_null()).count()).unwrap_or(0);
+                (n > 0).then_some((j, n))
+            }),
             ref_textures: Default::default(),
             auto_key: false,
             key_drag: None,
@@ -639,6 +649,37 @@ impl EditorApp {
         }
     }
 
+    /// Write the scene to the autosave a couple of seconds after it last changed (not while an
+    /// autosave is waiting to be restored, so it is not overwritten).
+    fn autosave(&mut self, now: f64) {
+        if self.restore_offer.is_some() {
+            return;
+        }
+        let rev = self.hub.borrow().session.revision();
+        if self.autosaved.0 == u64::MAX {
+            // first frame: remember where we start; save after the next change
+            self.autosaved = (rev, now);
+            return;
+        }
+        if rev == self.autosaved.0 || now - self.autosaved.1 < 2.0 {
+            return;
+        }
+        let json = serde_json::to_string(&*self.scene()).unwrap_or_default();
+        if let Err(e) = crate::files::autosave_write(&json) {
+            log::warn!("autosave: {e}");
+        }
+        self.autosaved = (rev, now);
+    }
+
+    fn save_scene(&mut self) {
+        let json = serde_json::to_string_pretty(&*self.scene()).unwrap_or_default();
+        match crate::files::save("scene.shotstage.json", json.as_bytes(), "application/json") {
+            Ok(Some(w)) => self.toast(format!("Saved the scene: {w}")),
+            Ok(None) => {}
+            Err(e) => self.toast(format!("Could not save: {e}")),
+        }
+    }
+
     /// Show a short status message at the bottom of the view.
     fn toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), f64::NAN));
@@ -653,6 +694,18 @@ impl EditorApp {
                 .rsplit_once('.')
                 .map(|(s, e)| (s.to_string(), e.to_ascii_lowercase()))
                 .unwrap_or((name.clone(), String::new()));
+            if ext == "json" {
+                // a saved scene
+                let opened = serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string()).and_then(|scene| {
+                    hub::dispatch(&self.hub, json!({"command": "scene.load", "params": {"scene": scene}}))
+                        .map_err(|e| e.message)
+                });
+                match opened {
+                    Ok(_) => self.toast(format!("Opened {name} (Undo goes back to the previous scene)")),
+                    Err(e) => self.toast(format!("{name} is not a shotstage scene: {e}")),
+                }
+                continue;
+            }
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
                 && let Some(cam) = self.reference_for.take()
             {
@@ -907,6 +960,7 @@ impl eframe::App for EditorApp {
             }
         }
         crate::files::take_dropped(ui.ctx(), &self.incoming);
+        self.autosave(ui.input(|i| i.time));
         let saved = self.saved.borrow_mut().take();
         match saved {
             Some(Ok(w)) => self.toast(format!("Saved the frame: {w}")),
@@ -1016,6 +1070,9 @@ impl EditorApp {
         if space {
             self.playing = !self.playing;
         }
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            self.save_scene();
+        }
         if ui.input(|i| i.key_pressed(egui::Key::F)) {
             self.focus_selection();
         }
@@ -1071,6 +1128,12 @@ impl EditorApp {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("shotstage").strong().color(ACCENT));
             ui.separator();
+            if ui.button("Open…").on_hover_text("Open a saved scene (.json), or import models and pictures").clicked() {
+                crate::files::pick(&self.incoming, ui.ctx());
+            }
+            if ui.button("Save").on_hover_text("Save the scene as a .shotstage.json file (Cmd/Ctrl+S)").clicked() {
+                self.save_scene();
+            }
             if ui.button("New").on_hover_text("Clear the scene (undoable)").clicked() {
                 self.run("scene.new", json!({}));
             }
@@ -3318,7 +3381,33 @@ impl EditorApp {
                 painter.galley(r.min + Vec2::new(5.0, 3.0), g, Color32::WHITE);
             }
         }
-        if scene.entities.is_empty() && self.palette.is_none() {
+        if let Some((json, n)) = self.restore_offer.clone() {
+            egui::Area::new(egui::Id::unique("restore_offer"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(full.center_top() + Vec2::new(-170.0, 104.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                        ui.set_width(340.0);
+                        ui.strong("Pick up where you left off?");
+                        ui.weak(format!("Your last scene ({n} objects) was saved automatically."));
+                        ui.horizontal(|ui| {
+                            if ui.button("Restore it").clicked() {
+                                if let Ok(scene) = serde_json::from_str::<Value>(&json) {
+                                    let _ = hub::dispatch(
+                                        &self.hub,
+                                        json!({"command": "scene.load", "params": {"scene": scene}}),
+                                    );
+                                    self.toast("Restored your last scene (Undo goes back)");
+                                }
+                                self.restore_offer = None;
+                            }
+                            if ui.button("Start fresh").clicked() {
+                                self.restore_offer = None;
+                            }
+                        });
+                    });
+                });
+        } else if scene.entities.is_empty() && self.palette.is_none() {
             self.welcome(ui, full);
         }
         // files dragged over the window

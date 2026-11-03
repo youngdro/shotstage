@@ -11,7 +11,7 @@ use egui::Pos2;
 pub type Inbox = Rc<RefCell<Vec<(String, Vec<u8>, Option<Pos2>)>>>;
 
 /// File extensions the editor can import.
-pub const IMPORTABLE: &[&str] = &["glb", "gltf", "obj", "stl", "fbx", "blend", "png", "jpg", "jpeg", "webp"];
+pub const IMPORTABLE: &[&str] = &["glb", "gltf", "obj", "stl", "fbx", "blend", "png", "jpg", "jpeg", "webp", "json"];
 
 /// Ask for files to import.
 pub fn pick(inbox: &Inbox, ctx: &egui::Context) {
@@ -160,5 +160,35 @@ pub fn save_frame(hub: &crate::hub::SharedHub, width: u32, done: &Outbox) {
             }
         });
         let _ = rs.device.poll(wgpu::PollType::Poll);
+    }
+}
+
+/// Where the autosave lives: browser storage on the web, a file in the home folder on desktop.
+pub fn autosave_write(json: &str) -> Result<(), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let dir = std::env::var_os("HOME").map(std::path::PathBuf::from).ok_or("no home folder")?.join(".shotstage");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let tmp = dir.join("autosave.json.tmp");
+        std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, dir.join("autosave.json")).map_err(|e| e.to_string())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let store = web_sys::window().and_then(|w| w.local_storage().ok().flatten()).ok_or("no local storage")?;
+        store.set_item("shotstage.autosave", json).map_err(|_| "the scene is too big for browser storage".to_string())
+    }
+}
+
+/// The last autosaved scene, if any.
+pub fn autosave_read() -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let p = std::path::PathBuf::from(std::env::var_os("HOME")?).join(".shotstage").join("autosave.json");
+        std::fs::read_to_string(p).ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()?.local_storage().ok()??.get_item("shotstage.autosave").ok()?
     }
 }
