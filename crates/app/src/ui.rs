@@ -684,6 +684,8 @@ pub struct EditorApp {
     /// The small shot-camera preview in the corner of the free view.
     pip: Option<Pip>,
     cam_preview: bool,
+    /// The frames the timeline shows when zoomed in (None: all of it).
+    tl_view: Option<(f32, f32)>,
     /// The storyboard strip above the timeline.
     show_board: bool,
     board: Option<crate::storyboard::Storyboard>,
@@ -781,6 +783,7 @@ impl EditorApp {
             pip: None,
             cam_preview: true,
             show_board: false,
+            tl_view: None,
             board: None,
             scroll_mode: ScrollMode::Auto,
             turn_acc: 0.0,
@@ -3041,6 +3044,14 @@ impl EditorApp {
                     }
                 }
             }
+            if self.tl_view.is_some()
+                && ui
+                    .small_button("Fit")
+                    .on_hover_text("Show the whole timeline (pinch or Cmd/Ctrl+scroll on it to zoom)")
+                    .clicked()
+            {
+                self.tl_view = None;
+            }
             ui.toggle_value(&mut self.show_board, "Storyboard")
                 .on_hover_text("Every shot as a picture through its camera; click one to go there");
             ui.separator();
@@ -3087,7 +3098,7 @@ impl EditorApp {
     /// diamond to retime it, right-click it for its easing, double-click a row to add a key.
     fn track_strip(&mut self, ui: &mut egui::Ui, scene: &Scene) {
         let t = &scene.timeline;
-        let (t0, t1) = (t.start as f32, t.end.max(t.start + 1) as f32);
+        let (full0, full1) = (t.start as f32, t.end.max(t.start + 1) as f32);
         let mut rows = timeline_rows(scene);
         let sel_root = self.selected().map(|s| root_of(scene, &s));
         if let Some(r) = &sel_root
@@ -3102,19 +3113,46 @@ impl EditorApp {
         // ruler
         let (ruler, ruler_resp) = ui.allocate_exact_size(Vec2::new(full, 18.0), Sense::click_and_drag());
         let area = Rect::from_min_max(egui::pos2(ruler.left() + label_w, ruler.top()), ruler.max);
+        // the visible frames: zoom with a pinch or Cmd/Ctrl+scroll over the timeline, pan with a
+        // sideways scroll; it follows the playhead while playing
+        let clamp_view = |(a, b): (f32, f32)| {
+            let span = (b - a).clamp(12.0_f32.min(full1 - full0), full1 - full0);
+            let a = a.clamp(full0, full1 - span);
+            (a, a + span)
+        };
+        let (mut t0, mut t1) = self.tl_view.map(clamp_view).unwrap_or((full0, full1));
+        if let Some(h) =
+            ui.input(|i| i.pointer.hover_pos()).filter(|h| h.x >= area.left() && ui.max_rect().contains(*h))
+        {
+            let (zoom, dx) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.x));
+            let at = t0 + (h.x - area.left()) / area.width() * (t1 - t0);
+            if zoom != 1.0 && zoom.is_finite() && zoom > 0.0 {
+                (t0, t1) = clamp_view((at - (at - t0) / zoom, at + (t1 - at) / zoom));
+            }
+            if dx != 0.0 && (t1 - t0) < full1 - full0 {
+                let df = -dx / area.width() * (t1 - t0);
+                (t0, t1) = clamp_view((t0 + df, t1 + df));
+            }
+        }
+        let now = self.frame();
+        if self.playing && (now > t1 || now < t0) {
+            (t0, t1) = clamp_view((now, now + (t1 - t0)));
+        }
+        self.tl_view = ((t1 - t0) < full1 - full0 - 0.5).then_some((t0, t1));
         let x_of = |f: f32| area.left() + (f - t0) / (t1 - t0) * area.width();
         let f_of = |x: f32| (t0 + (x - area.left()) / area.width() * (t1 - t0)).clamp(t0, t1).round();
         let p = ui.painter_at(ruler);
         p.rect_filled(ruler, 2.0, Color32::from_gray(30));
         let fps = t.fps.max(1.0);
         let secs = (t1 - t0) / fps;
-        let every = [0.5f32, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+        let every = [0.25f32, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
             .into_iter()
             .find(|s| secs / s <= area.width() / 60.0)
             .unwrap_or(120.0);
-        let mut s = 0.0;
-        while s <= secs + 1e-3 {
-            let x = x_of(t0 + s * fps);
+        // seconds from the timeline start; ticks from the first one in view
+        let mut s = (((t0 - full0) / fps) / every).ceil() * every;
+        while s <= (t1 - full0) / fps + 1e-3 {
+            let x = x_of(full0 + s * fps);
             p.line_segment(
                 [egui::pos2(x, ruler.bottom() - 6.0), egui::pos2(x, ruler.bottom())],
                 (1.0, Color32::from_gray(110)),
@@ -3199,6 +3237,9 @@ impl EditorApp {
                     egui::pos2(x_of(sh.start as f32).max(area.left()), srow.top() + 2.0),
                     egui::pos2(x_of(sh.end as f32 + 1.0).min(area.right()), srow.bottom() - 2.0),
                 );
+                if r.width() <= 0.0 {
+                    continue; // scrolled out of view
+                }
                 let active = self.shot_drag.as_ref().is_some_and(|d| d.id == sh.id);
                 p.rect_filled(r, 3.0, if active { colors[i % 4].gamma_multiply(1.3) } else { colors[i % 4] });
                 let cam = scene.get(&sh.camera).map(|e| e.name.as_str()).unwrap_or(&sh.camera);
@@ -3339,10 +3380,13 @@ impl EditorApp {
                 // segments between keys show their easing
                 for w in row.frames.windows(2) {
                     let y = rect.center().y;
-                    p.line_segment([egui::pos2(x_of(w[0]), y), egui::pos2(x_of(w[1]), y)], (2.0, Color32::from_gray(60)));
+                    let (a, b) = (x_of(w[0]).max(area.left()), x_of(w[1]).min(area.right()));
+                    if a < b {
+                        p.line_segment([egui::pos2(a, y), egui::pos2(b, y)], (2.0, Color32::from_gray(60)));
+                    }
                 }
                 let near = resp.hover_pos().and_then(|h| row.frames.iter().copied().find(|f| (x_of(*f) - h.x).abs() < 6.0));
-                for f in &row.frames {
+                for f in row.frames.iter().filter(|f| (t0 - 0.5..=t1 + 0.5).contains(*f)) {
                     let c = egui::pos2(x_of(*f), rect.center().y);
                     let hot = near == Some(*f) || self.key_drag.as_ref().is_some_and(|d| d.row == row.id && (d.frame - f).abs() < 0.5);
                     let r = if hot { 6.0 } else { 4.5 };
