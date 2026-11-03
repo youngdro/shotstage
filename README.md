@@ -20,22 +20,12 @@
 
 视口工具栏的 **📷 Save frame** 把当前帧透过镜头的画面存成 1920 宽的 PNG。
 
+## 顺手的操作
 
-### Camera preview
-
-While you work in the free view, a small inset in the bottom-right corner shows what the shot camera sees at the playhead, so you can arrange things and watch the framing at the same time. Click it to look through the camera; switch it off with **Cam preview** in the view toolbar. It only re-renders when the scene, the frame or the view settings change, at most about 20 times a second while you drag.
-
-### Scene list
-
-Every row has show/hide (👁) and lock (🔒) toggles. Shift+click adds a row to the selection; double-click a row, or click the name at the top of the properties, to rename it. Right-click for Focus, Rename, Duplicate, Hide, Lock and Delete. With more than a handful of objects, a filter box narrows the list by name.
-
-### Quick actions
-
-**Cmd/Ctrl+K** (or `/`, or the **Actions** button) opens one search box over everything: blocks to add, lighting presets, templates, and, for the selection, its poses, character actions, object motion or camera moves, plus editor actions (save, undo, focus, duplicate…). Type a few letters, use ↑↓, and press Enter. Each pick is one ordinary undo step.
-
-### Saving your work
-
-**Save** (Cmd/Ctrl+S) writes the whole scene to a `.shotstage.json` file; **Open…** loads one back (it also imports models and pictures). The editor autosaves a couple of seconds after every change — in the browser's local storage on the web, in `~/.shotstage/autosave.json` on desktop — and offers to restore the last scene when it starts.
+- **保存 / 打开**：**Save**（Cmd/Ctrl+S）把整个场景存成 `.shotstage.json`；**Open…** 打开它（也能导入模型和图片），打开算一步，可撤销。每次改动约 2 秒后自动保存（网页存在浏览器本地，桌面版存在 `~/.shotstage/autosave.json`），下次启动会询问是否恢复上次的场景。
+- **快捷操作框**：**Cmd/Ctrl+K**（或 `/`，或工具栏的 **Actions**）打开一个搜索框，能搜到所有积木、灯光预设、模板、编辑操作（保存、撤销、聚焦、复制……），以及当前选中对象能用的姿势、人物动作、物体运动或运镜。输入几个字母，↑↓ 选择，回车执行；每次都是普通的一步撤销。
+- **场景列表**：每行都有显示（👁）和锁定（🔒）开关；Shift+点击 多选；双击一行，或点右侧属性顶部的名字，可以改名；右键有 聚焦 / 改名 / 复制 / 隐藏 / 锁定 / 删除；物体多时会出现按名字筛选的搜索框。
+- **镜头小窗**：在自由视角里，右下角小窗实时显示镜头相机在当前帧看到的画面，摆东西时就能同时看构图；点它进入相机视角，视图工具栏的 **Cam preview** 可以关掉。只在场景、帧或显示设置变化时才重新渲染。
 
 ## 像搭积木一样搭场景
 
@@ -107,6 +97,7 @@ Every row has show/hide (👁) and lock (🔒) toggles. Shift+click adds a row t
   - 物体：转台旋转、弹跳、悬浮、落入、滑入、弹出、摇摆、英雄登场，以及沿路径移动（`points`）。
   - 人物：走路、挥手、捡东西、左右张望、点头、坐下、站起。
   - 可以调时长和强度，也可以搜索。命令：`motion.apply`、`motion.list`，以及 `keyframe.move`、`keyframe.setInterp`。
+- **整段调时间**：在时间轴上拖动一行关键帧之间的横条，整段动画一起平移；右键这一行可以 从播放头开始 / 变快 / 变慢。都是一步撤销。命令 `keyframe.retime`（`offset` 平移、`scale` 变速、`from`/`to` 限定范围）。
 
 ## 导出动画和分镜
 

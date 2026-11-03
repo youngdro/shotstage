@@ -924,6 +924,71 @@ struct KeyInterpParams {
     interp: Interp,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RetimeParams {
+    /// Entities whose keys move (every animated property of each; list a person's joints too).
+    ids: Vec<String>,
+    /// Only keys at or after this frame (default: all).
+    #[serde(default)]
+    from: Option<f32>,
+    /// Only keys at or before this frame (default: all).
+    #[serde(default)]
+    to: Option<f32>,
+    /// Frames to shift by (after scaling).
+    #[serde(default)]
+    offset: f32,
+    /// Speed change: 0.5 plays twice as fast, 2 half as fast (around `pivot`).
+    #[serde(default = "one")]
+    scale: f32,
+    /// Frame that stays put when scaling (default: the first key moved).
+    #[serde(default)]
+    pivot: Option<f32>,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+/// Shift and/or stretch every key of `ids` in a frame range, in one step. A moved key replaces
+/// one already sitting where it lands.
+fn retime(s: &mut Scene, p: RetimeParams) -> CmdResult<Value> {
+    if !(p.scale.is_finite() && p.scale > 0.01 && p.scale < 100.0) {
+        return Err(CommandError::invalid("`scale` must be between 0.01 and 100"));
+    }
+    if !p.offset.is_finite() {
+        return Err(CommandError::invalid("`offset` must be a number"));
+    }
+    let (lo, hi) = (p.from.unwrap_or(f32::NEG_INFINITY), p.to.unwrap_or(f32::INFINITY));
+    let within = |f: f32| f >= lo - 1e-3 && f <= hi + 1e-3;
+    let tracks: Vec<usize> =
+        (0..s.timeline.tracks.len()).filter(|&i| p.ids.contains(&s.timeline.tracks[i].entity)).collect();
+    let first = tracks
+        .iter()
+        .flat_map(|&i| s.timeline.tracks[i].keys.iter().map(|k| k.frame))
+        .filter(|f| within(*f))
+        .min_by(f32::total_cmp)
+        .ok_or_else(|| CommandError::new("failed", "no keys to retime"))?;
+    let pivot = p.pivot.unwrap_or(first);
+    let map = |f: f32| ((pivot + (f - pivot) * p.scale + p.offset) * 1000.0).round() / 1000.0;
+    if map(first) < 0.0 {
+        return Err(CommandError::invalid(format!("that would move keys before frame 0 (to {:.1})", map(first))));
+    }
+    let (mut moved, mut last) = (0, f32::NEG_INFINITY);
+    for i in tracks {
+        let t = &mut s.timeline.tracks[i];
+        let (inside, outside): (Vec<_>, Vec<_>) = t.keys.drain(..).partition(|k| within(k.frame));
+        t.keys = outside;
+        for mut k in inside {
+            k.frame = map(k.frame);
+            last = last.max(k.frame);
+            moved += 1;
+            t.set_key(k);
+        }
+    }
+    Ok(json!({ "keys": moved, "first": map(first), "last": last }))
+}
+
 fn track_of<'a>(scene: &'a mut Scene, id: &str, property: TrackProperty) -> CmdResult<&'a mut shotstage_core::Track> {
     scene
         .timeline
@@ -954,6 +1019,8 @@ pub fn commands() -> Vec<Command> {
             t.set_key(key);
             Ok(json!({ "frame": p.to }))
         }),
+        command!("keyframe.retime", "Shift and/or speed up / slow down all keys of some entities in a frame range in one step: new = pivot + (frame - pivot) * scale + offset.", mutates: true, RetimeParams,
+            |s, p| retime(s, p)),
         command!("keyframe.setInterp", "Set how a keyframe eases into the next one: step, linear, ease, easeIn, easeOut, overshoot.", mutates: true, KeyInterpParams,
         |s, p| {
             let t = track_of(s, &p.id, p.property)?;
@@ -1049,5 +1116,40 @@ mod tests {
             .unwrap();
         let p = world_at(s.scene(), "w", 60.0).unwrap().w_axis.truncate();
         assert!((p - p1).length() < 1e-4);
+    }
+
+    #[test]
+    fn retime_shifts_and_stretches() {
+        let mut s = scene();
+        s.dispatch(
+            "entity.create",
+            json!({"type": "mesh", "id": "box", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        s.dispatch("motion.apply", json!({"preset": "bounce", "target": "box", "start": 10, "duration": 2})).unwrap();
+        let frames = |s: &crate::Session| -> Vec<f64> {
+            let t = s.scene().timeline.tracks.iter().find(|t| t.entity == "box").unwrap();
+            t.keys.iter().map(|k| k.frame as f64).collect()
+        };
+        let before = frames(&s);
+        let mid = world_at(s.scene(), "box", before[1] as f32).unwrap().w_axis.truncate();
+        // twice as slow, starting 5 frames later: one undo step
+        let r = s.dispatch("keyframe.retime", json!({"ids": ["box"], "scale": 2, "offset": 5})).unwrap().result;
+        assert_eq!(r["first"], 15.0);
+        let after = frames(&s);
+        assert_eq!(after.len(), before.len());
+        for (a, b) in before.iter().zip(&after) {
+            assert!((10.0 + (a - 10.0) * 2.0 + 5.0 - b).abs() < 1e-3, "{a} -> {b}");
+        }
+        let moved = world_at(s.scene(), "box", after[1] as f32).unwrap().w_axis.truncate();
+        assert!((moved - mid).length() < 1e-4, "same pose at the matching key");
+        s.dispatch("history.undo", json!({})).unwrap();
+        assert_eq!(frames(&s), before);
+        // a range: only the later keys move; nothing may go below frame 0
+        assert!(s.dispatch("keyframe.retime", json!({"ids": ["box"], "offset": -100})).is_err());
+        s.dispatch("keyframe.retime", json!({"ids": ["box"], "from": before[1], "offset": 3})).unwrap();
+        let ranged = frames(&s);
+        assert_eq!(ranged[0], before[0]);
+        assert!((ranged[1] - before[1] - 3.0).abs() < 1e-3);
     }
 }

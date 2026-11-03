@@ -354,6 +354,7 @@ fn friendly(command: &str) -> String {
         "motion.apply" => "Animate".into(),
         "keyframe.set" => "Key".into(),
         "keyframe.move" => "Retime key".into(),
+        "keyframe.retime" => "Retime animation".into(),
         "keyframe.delete" => "Delete key".into(),
         "camera.frame" => "Frame shot".into(),
         "model.import" => "Import model".into(),
@@ -575,12 +576,14 @@ struct TrackRow {
     frames: Vec<f32>,
 }
 
-/// A keyframe diamond being dragged along the track strip.
+/// A keyframe diamond (or, with `all`, a row's whole animation by its bar) being dragged along
+/// the track strip.
 #[derive(Clone)]
 struct KeyDrag {
     row: String,
     frame: f32,
     key: String,
+    all: bool,
 }
 
 /// A shot bar being dragged on the timeline: what part, where it was grabbed.
@@ -3118,14 +3121,42 @@ impl EditorApp {
                     let pts = vec![c + Vec2::new(0.0, -r), c + Vec2::new(r, 0.0), c + Vec2::new(0.0, r), c + Vec2::new(-r, 0.0)];
                     p.add(egui::Shape::convex_polygon(pts, if hot { Color32::WHITE } else { ACCENT }, (1.0, Color32::from_gray(20))));
                 }
+                // the bar between the first and last key: drag it to slide the whole animation
+                let span = row.frames.first().zip(row.frames.last()).filter(|(a, b)| b > a).map(|(a, b)| (*a, *b));
+                let on_bar = |x: f32| span.is_some_and(|(a, b)| x > x_of(a) + 6.0 && x < x_of(b) - 6.0);
                 if resp.hovered() && near.is_some() {
                     ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                } else if resp.hover_pos().is_some_and(|h| on_bar(h.x)) {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
                 }
-                if resp.drag_started() && let Some(f) = near {
-                    let key = self.new_key("retime");
-                    self.key_drag = Some(KeyDrag { row: row.id.clone(), frame: f, key });
+                let ids: Vec<String> = {
+                    let mut v: Vec<String> = row.tracks.iter().map(|(id, _)| id.clone()).collect();
+                    v.dedup();
+                    v
+                };
+                if resp.drag_started() {
+                    let grab = ui.input(|i| i.pointer.press_origin());
+                    if let Some(f) = near {
+                        let key = self.new_key("retime");
+                        self.key_drag = Some(KeyDrag { row: row.id.clone(), frame: f, key, all: false });
+                    } else if let Some(g) = grab.filter(|g| on_bar(g.x)) {
+                        let key = self.new_key("slide");
+                        self.key_drag = Some(KeyDrag { row: row.id.clone(), frame: f_of(g.x), key, all: true });
+                    }
                 }
                 if (resp.dragged() || resp.drag_stopped())
+                    && let (Some(d), Some(pos)) = (self.key_drag.clone(), ui.input(|i| i.pointer.latest_pos()))
+                    && d.row == row.id
+                    && d.all
+                {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    let first = row.frames.first().copied().unwrap_or(0.0);
+                    let delta = (f_of(pos.x) - d.frame).max(-first);
+                    if delta.abs() >= 1.0 {
+                        self.run_key(&d.key, "keyframe.retime", json!({"ids": ids, "offset": delta}));
+                        self.key_drag = Some(KeyDrag { frame: d.frame + delta, ..d });
+                    }
+                } else if (resp.dragged() || resp.drag_stopped())
                     && let (Some(d), Some(pos)) = (self.key_drag.clone(), ui.input(|i| i.pointer.latest_pos()))
                     && d.row == row.id
                 {
@@ -3160,7 +3191,22 @@ impl EditorApp {
                 let menu_for = self.key_menu.clone().filter(|(r, _)| *r == row.id);
                 resp.context_menu(|ui| {
                     let Some((_, f)) = menu_for.clone() else {
-                        ui.weak("Right-click a key diamond");
+                        // the whole row
+                        let Some((first, last)) = row.frames.first().zip(row.frames.last()).map(|(a, b)| (*a, *b)) else { return };
+                        ui.weak(format!("{}: frames {first:.0}–{last:.0}", row.label));
+                        let now = self.frame().round();
+                        let go = |ui: &mut egui::Ui, label: &str, tip: &str, params: Value| {
+                            if ui.button(label).on_hover_text(tip).clicked() {
+                                let mut params = params;
+                                params["ids"] = json!(ids);
+                                let _ = hub::dispatch(&self.hub, json!({"command": "keyframe.retime", "params": params}));
+                                ui.close();
+                            }
+                        };
+                        go(ui, "Start at the playhead", "Slide every key so the animation begins here", json!({"offset": now - first}));
+                        go(ui, "Faster", "Play it in two thirds of the time", json!({"scale": 2.0 / 3.0}));
+                        go(ui, "Slower", "Take half as long again", json!({"scale": 1.5}));
+                        ui.weak("Tip: drag the bar between the keys to slide it all.");
                         return;
                     };
                     ui.weak(format!("Key at frame {f:.0}"));
