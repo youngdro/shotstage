@@ -344,7 +344,7 @@ Shift+drag: lift · Alt+drag: copy · R / Shift+R or wheel while dragging: turn 
 People: click a body part to select its joint, then drag the part to bend it, or turn the coloured rings.\n\
 View: drag empty space to orbit · right-drag or Shift+drag to pan · pinch or mouse wheel to zoom · trackpad two-finger scroll orbits (Shift: pan) · double-click or F to focus.\n\
 Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+C / X / V copy, cut, paste (also between scenes) · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus · Cmd/Ctrl+S save.\n\
-Several objects: Shift+click to add · Cmd/Ctrl+G group · Cmd/Ctrl+Shift+G ungroup.";
+Several objects: Shift+click to add · Cmd/Ctrl+drag on empty space to box-select · Cmd/Ctrl+G group · Cmd/Ctrl+Shift+G ungroup.";
 
 /// A collapsible properties section.
 fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
@@ -509,6 +509,10 @@ struct PaletteDrag {
 enum Gesture {
     Idle,
     Navigate,
+    /// Cmd/Ctrl+drag on empty space: select what falls inside a rectangle.
+    Marquee {
+        start: Pos2,
+    },
     /// Slide an object over surfaces (Shift: lift it straight up).
     Move {
         id: String,
@@ -711,6 +715,8 @@ pub struct EditorApp {
     board: Option<crate::storyboard::Storyboard>,
     /// What scrolling does in the view, and whether the last wheel input looked like a trackpad.
     scroll_mode: ScrollMode,
+    /// The selection rectangle being dragged, in screen points.
+    marquee: Option<Rect>,
     /// Scrolling not yet turned into a 15° turn of the dragged object.
     turn_acc: f32,
     wheel_trackpad: bool,
@@ -807,6 +813,7 @@ impl EditorApp {
             board: None,
             scroll_mode: ScrollMode::Auto,
             turn_acc: 0.0,
+            marquee: None,
             wheel_trackpad: false,
             orbit: Orbit { target: Vec3::new(0.0, 0.5, 0.0), yaw: 0.6, pitch: 0.35, distance: 9.0 },
             look_through: false,
@@ -1339,6 +1346,33 @@ impl EditorApp {
             }
             Err(e) => self.toast(format!("Could not duplicate: {}", e.message)),
         }
+    }
+
+    /// Select every visible, unlocked top-level object whose middle shows inside `r` (screen).
+    fn select_in_rect(&mut self, r: Rect, view_rect: Rect, view: &View, f: f32) {
+        let scene = self.scene();
+        let mut hits: Vec<String> = scene
+            .entities
+            .iter()
+            .filter(|e| e.parent.is_none() && e.visible && !e.locked)
+            .filter(|e| {
+                let mid = spatial::bounds(&scene, &e.id, f)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.center())
+                    .or_else(|| world_at(&scene, &e.id, f).ok().map(|w| w.w_axis.truncate()));
+                mid.and_then(|m| project(view_rect, view, m)).is_some_and(|p| r.contains(p))
+            })
+            .map(|e| e.id.clone())
+            .collect();
+        if hits.is_empty() {
+            self.also.clear();
+            self.select(None);
+            return;
+        }
+        let first = hits.remove(0);
+        self.select(Some(first));
+        self.also = hits;
     }
 
     /// Delete everything selected (with Shift+clicked extras) as one undo step.
@@ -4016,11 +4050,16 @@ impl EditorApp {
                     let centre = spatial::bounds(&scene, &target, f).ok().flatten().map(|b| b.center()).unwrap_or(grab);
                     let offset = Vec3::new(centre.x - grab.x, 0.0, centre.z - grab.z);
                     Gesture::Move { id: target, grab, offset, key, lift: None }
+                } else if cam.is_none() && modifiers.command {
+                    Gesture::Marquee { start }
                 } else if cam.is_none() {
                     Gesture::Navigate
                 } else {
                     Gesture::Idle
                 };
+            }
+            if esc && matches!(self.drag, Gesture::Marquee { .. }) {
+                self.drag = Gesture::Cancelled;
             }
             if esc && !matches!(self.drag, Gesture::Idle | Gesture::Navigate | Gesture::Cancelled) {
                 self.run("history.undo", json!({}));
@@ -4170,6 +4209,18 @@ impl EditorApp {
                     self.orbit.pitch = (self.orbit.pitch + d.y * 0.008).clamp(-1.5, 1.5);
                 }
                 _ => {}
+            }
+            // the selection rectangle: drawn while dragging, applied on release
+            self.marquee = None;
+            if let Gesture::Marquee { start } = self.drag
+                && let Some(now) = ui.input(|i| i.pointer.latest_pos())
+            {
+                let r = Rect::from_two_pos(start, now).intersect(rect);
+                if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                    self.select_in_rect(r, rect, &view, f);
+                } else {
+                    self.marquee = Some(r);
+                }
             }
             if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
                 self.drag = Gesture::Idle;
@@ -4423,6 +4474,9 @@ impl EditorApp {
         painter.rect_filled(full, 0.0, Color32::from_gray(10));
         if let Some((id, _)) = self.texture {
             painter.image(id, rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        if let Some(m) = self.marquee {
+            painter.rect(m, 0.0, ACCENT.gamma_multiply(0.12), (1.0, ACCENT), egui::StrokeKind::Inside);
         }
         if let Some(c) = &cam {
             painter.rect_stroke(rect, 0.0, (1.0, Color32::from_rgb(90, 150, 255)), egui::StrokeKind::Inside);
