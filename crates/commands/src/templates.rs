@@ -20,6 +20,16 @@ pub const TEMPLATES: &[(&str, &str, &str)] = &[
         "Infinity cove, stepped podium, hero bottle and jar with leaves and pebbles, softbox lighting; a low close-up with a 360 spin",
     ),
     (
+        "packshot",
+        "White packshot",
+        "White cove, a drinks can on a plinth with ice, a tube on an acrylic riser, softbox and reflector; a hero arc then a detail push-in",
+    ),
+    (
+        "flatLay",
+        "Flat lay",
+        "A breakfast table seen from straight above: tray, coffee, jar, citrus, flowers and a carton under a soft side light",
+    ),
+    (
         "interview",
         "Interview",
         "Two people sitting face to face with a lamp and a wall behind; three-point light; two over-the-shoulder cameras and a wide",
@@ -36,7 +46,7 @@ pub const TEMPLATES: &[(&str, &str, &str)] = &[
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TemplateParams {
-    /// groceryAisle, productTabletop, interview, streetCorner, cafe or studio.
+    /// groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, cafe or studio.
     name: String,
     /// Clear the scene first. Default true.
     replace: Option<bool>,
@@ -117,6 +127,45 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
             frame("cam_hero", "podium", "full", "front", "low", 85.0),
             motion("productSpin", "cam_hero", Some("podium"), 0, 6.0),
             shot("cam_hero", "hero spin", 0, 143),
+        ],
+        "packshot" => vec![
+            p("infinityCove", "cove", [0.0, 0.0, 0.0], 0.0),
+            p("podium", "plinth", [0.0, 0.0, 0.35], 0.0),
+            p("can", "hero", [0.0, 1.0, 0.35], 0.0),
+            p("iceCubes", "ice", [0.2, 0.0, 0.6], 0.0),
+            p("acrylicStand", "riser", [-0.38, 0.0, 0.5], 15.0),
+            p("tube", "tube", [-0.38, 1.0, 0.5], 15.0),
+            p("softbox", "softbox", [1.3, 0.0, 1.7], -140.0),
+            p("reflector", "reflector", [-1.1, 0.0, 1.3], 140.0),
+            ("light.set", json!({"id": "softbox_light", "intensity": 0.9})),
+            timeline(143),
+            cam("cam_hero", "Hero"),
+            frame("cam_hero", "hero", "wide", "front", "high", 85.0),
+            motion("orbitLeft", "cam_hero", Some("plinth"), 0, 3.0),
+            shot("cam_hero", "hero arc", 0, 71),
+            cam("cam_detail", "Detail"),
+            frame("cam_detail", "hero", "full", "frontRight", "eyeLevel", 100.0),
+            ("motion.apply", json!({"preset": "pushIn", "target": "cam_detail", "subject": "hero", "start": 72, "duration": 3.0, "intensity": 0.5})),
+            shot("cam_detail", "detail", 72, 143),
+        ],
+        "flatLay" => vec![
+            floor,
+            p("table", "table", [0.0, 0.0, 0.0], 0.0),
+            p("tray", "tray", [0.05, 1.2, 0.02], 8.0),
+            p("cup", "coffee", [0.3, 1.2, -0.18], 0.0),
+            p("jar", "jar", [-0.32, 1.2, 0.14], 0.0),
+            p("citrusSlice", "orange", [0.0, 1.2, 0.25], 0.0),
+            p("citrusSlice", "orange_2", [0.1, 1.2, 0.29], 40.0),
+            p("flower", "flower", [-0.4, 1.2, -0.22], 30.0),
+            p("leafBranch", "leaves", [0.42, 1.2, 0.24], -40.0),
+            p("carton", "carton", [-0.08, 1.2, -0.22], -12.0),
+            p("softbox", "softbox", [1.7, 0.0, 0.9], -115.0),
+            ("light.set", json!({"id": "softbox_light", "intensity": 0.8})),
+            timeline(119),
+            cam("cam_top", "Top"),
+            frame("cam_top", "table", "full", "front", "birdsEye", 50.0),
+            motion("topDown", "cam_top", Some("table"), 0, 4.0),
+            shot("cam_top", "flat lay", 0, 119),
         ],
         "interview" => vec![
             floor,
