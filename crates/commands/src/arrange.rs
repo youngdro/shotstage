@@ -92,7 +92,7 @@ struct CutParams {
     camera: String,
     /// Frame where the new shot starts.
     frame: u32,
-    /// Name of the new shot (default: its id).
+    /// Name of a new shot (default: its id); a shot whose camera is switched keeps its name.
     name: Option<String>,
 }
 
@@ -106,10 +106,8 @@ fn cut(scene: &mut Scene, p: CutParams) -> CmdResult<Value> {
         (1..).map(|n| format!("shot_{n}")).find(|i| !t.shots.iter().any(|x| &x.id == i)).unwrap_or_default()
     };
     if let Some(sh) = t.shots.iter_mut().find(|sh| sh.start == f) {
+        // switching keeps the shot's name
         sh.camera = p.camera;
-        if let Some(n) = p.name {
-            sh.name = n;
-        }
         return Ok(json!({ "id": sh.id, "start": sh.start, "end": sh.end, "split": false }));
     }
     let id = fresh(t);
