@@ -620,9 +620,14 @@ struct ExportParams {
     frame: Option<f32>,
     /// File name without extension. Default `scene`.
     name: Option<String>,
+    /// glb / gltf / fbx: include the animation (camera moves, object motion, poses) sampled at
+    /// every frame of the timeline. Default: when the scene has keyframes.
+    animation: Option<bool>,
 }
 
 struct Baked {
+    /// Entity the mesh belongs to.
+    id: String,
     name: String,
     color: [f32; 3],
     /// World-space triangles.
@@ -631,7 +636,9 @@ struct Baked {
     indices: Vec<u32>,
 }
 
-fn bake(scene: &Scene, ids: &Option<Vec<String>>, frame: f32) -> CmdResult<Vec<Baked>> {
+/// Meshes posed at `frame`: in world space, or in each entity's own space when `local` (the
+/// animated export moves them with node transforms).
+fn bake(scene: &Scene, ids: &Option<Vec<String>>, frame: f32, local: bool) -> CmdResult<Vec<Baked>> {
     let wanted: Option<Vec<String>> = match ids {
         Some(ids) => {
             let mut all = vec![];
@@ -649,12 +656,13 @@ fn bake(scene: &Scene, ids: &Option<Vec<String>>, frame: f32) -> CmdResult<Vec<B
         if wanted.as_ref().is_some_and(|w| !w.contains(&e.id)) || spatial::is_hidden(scene, &e.id) {
             continue;
         }
-        let world = world_at(scene, &e.id, frame)?;
+        let world = if local { Mat4::IDENTITY } else { world_at(scene, &e.id, frame)? };
         let tri = posed_mesh(scene, &e.id, frame)?.transformed(world).triangulate(false);
         if tri.indices.is_empty() {
             continue;
         }
         out.push(Baked {
+            id: e.id.clone(),
             name: e.name.clone(),
             color: *color,
             positions: tri.positions,
@@ -665,15 +673,32 @@ fn bake(scene: &Scene, ids: &Option<Vec<String>>, frame: f32) -> CmdResult<Vec<B
     Ok(out)
 }
 
-/// glTF JSON + binary buffer for baked meshes, cameras and lights.
-fn build_gltf(scene: &Scene, meshes: &[Baked], frame: f32, with_extras: bool) -> (Value, Vec<u8>) {
+/// Frames an animated export samples: (start, end, fps).
+type AnimRange = (f32, f32, f32);
+
+/// glTF JSON + binary buffer for baked meshes, cameras and lights; with `anim`, the meshes are
+/// local and every node that moves gets translation / rotation / scale channels.
+fn build_gltf(
+    scene: &Scene,
+    meshes: &[Baked],
+    frame: f32,
+    with_extras: bool,
+    anim: Option<AnimRange>,
+) -> (Value, Vec<u8>) {
+    // entity behind each node (for animation)
+    let mut node_ids: Vec<Option<String>> = vec![];
     let mut bin: Vec<u8> = Vec::new();
     let (mut views, mut accessors, mut gmeshes, mut materials, mut nodes) = (vec![], vec![], vec![], vec![], vec![]);
     let mut push = |bin: &mut Vec<u8>, bytes: &[u8], target: u32| -> usize {
         while !bin.len().is_multiple_of(4) {
             bin.push(0);
         }
-        views.push(json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len(), "target": target }));
+        let mut v = json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len() });
+        // animation data is not a vertex or index buffer: no target
+        if target != 0 {
+            v["target"] = json!(target);
+        }
+        views.push(v);
         bin.extend_from_slice(bytes);
         views.len() - 1
     };
@@ -697,7 +722,17 @@ fn build_gltf(scene: &Scene, meshes: &[Baked], frame: f32, with_extras: bool) ->
         accessors.push(json!({ "bufferView": vi, "componentType": 5125, "count": m.indices.len(), "type": "SCALAR" }));
         materials.push(json!({ "name": m.name, "pbrMetallicRoughness": { "baseColorFactor": [m.color[0], m.color[1], m.color[2], 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.8 } }));
         gmeshes.push(json!({ "name": m.name, "primitives": [{ "attributes": { "POSITION": a, "NORMAL": a + 1 }, "indices": a + 2, "material": materials.len() - 1 }] }));
-        nodes.push(json!({ "name": m.name, "mesh": gmeshes.len() - 1 }));
+        let mut node = json!({ "name": m.name, "mesh": gmeshes.len() - 1 });
+        if anim.is_some()
+            && let Ok(w) = world_at(scene, &m.id, frame)
+        {
+            let (sc, r, t) = w.to_scale_rotation_translation();
+            node["translation"] = json!(t.to_array());
+            node["rotation"] = json!(r.to_array());
+            node["scale"] = json!(sc.to_array());
+        }
+        nodes.push(node);
+        node_ids.push(Some(m.id.clone()));
     }
     let mut cameras = vec![];
     let mut lights = vec![];
@@ -713,6 +748,7 @@ fn build_gltf(scene: &Scene, meshes: &[Baked], frame: f32, with_extras: bool) ->
                     let Ok(c) = camera_data_at(scene, &e.id, frame) else { continue };
                     cameras.push(json!({ "name": e.name, "type": "perspective", "perspective": { "yfov": c.vfov(), "aspectRatio": c.aspect, "znear": c.near, "zfar": c.far } }));
                     nodes.push(json!({ "name": e.name, "camera": cameras.len() - 1, "translation": t.to_array(), "rotation": r.to_array() }));
+                    node_ids.push(Some(e.id.clone()));
                 }
                 EntityKind::Light(l) => {
                     let mut j = json!({ "name": e.name, "color": l.color, "intensity": l.intensity * 10.0 });
@@ -727,9 +763,67 @@ fn build_gltf(scene: &Scene, meshes: &[Baked], frame: f32, with_extras: bool) ->
                     }
                     lights.push(j);
                     nodes.push(json!({ "name": e.name, "translation": t.to_array(), "rotation": r.to_array(), "extensions": { "KHR_lights_punctual": { "light": lights.len() - 1 } } }));
+                    node_ids.push(Some(e.id.clone()));
                 }
                 _ => {}
             }
+        }
+    }
+    let mut animations = vec![];
+    if let Some((start, end, fps)) = anim {
+        // sample every frame (at most 2000) and keep the nodes that actually move
+        let n = ((end - start).max(0.0).round() as usize).min(2000);
+        let frames: Vec<f32> = (0..=n).map(|i| start + (end - start) * i as f32 / n.max(1) as f32).collect();
+        let times: Vec<f32> = frames.iter().map(|f| (f - start) / fps.max(1.0)).collect();
+        let mut channels = vec![];
+        let mut samplers = vec![];
+        let mut input = None;
+        for (ni, id) in node_ids.iter().enumerate() {
+            let Some(id) = id else { continue };
+            let Ok(trs) = frames
+                .iter()
+                .map(|f| world_at(scene, id, *f).map(|w| w.to_scale_rotation_translation()))
+                .collect::<shotstage_core::Result<Vec<_>>>()
+            else {
+                continue;
+            };
+            let (s0, r0, t0) = trs[0];
+            let moves = trs
+                .iter()
+                .any(|(s, r, t)| (*t - t0).length() > 1e-5 || r.angle_between(r0) > 1e-4 || (*s - s0).length() > 1e-5);
+            if !moves {
+                continue;
+            }
+            let input = *input.get_or_insert_with(|| {
+                let bytes: Vec<u8> = times.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let v = push(&mut bin, &bytes, 0);
+                accessors.push(json!({ "bufferView": v, "componentType": 5126, "count": times.len(), "type": "SCALAR", "min": [times[0]], "max": [*times.last().unwrap_or(&0.0)] }));
+                accessors.len() - 1
+            });
+            // keep quaternions continuous so interpolation takes the short way
+            let mut prev = r0;
+            let rots: Vec<Quat> = trs
+                .iter()
+                .map(|(_, r, _)| {
+                    let r = if r.dot(prev) < 0.0 { -*r } else { *r };
+                    prev = r;
+                    r
+                })
+                .collect();
+            for (path, data, kind) in [
+                ("translation", trs.iter().flat_map(|(_, _, t)| t.to_array()).collect::<Vec<f32>>(), "VEC3"),
+                ("rotation", rots.iter().flat_map(|r| r.to_array()).collect(), "VEC4"),
+                ("scale", trs.iter().flat_map(|(s, _, _)| s.to_array()).collect(), "VEC3"),
+            ] {
+                let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let v = push(&mut bin, &bytes, 0);
+                accessors.push(json!({ "bufferView": v, "componentType": 5126, "count": times.len(), "type": kind }));
+                samplers.push(json!({ "input": input, "output": accessors.len() - 1, "interpolation": "LINEAR" }));
+                channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": ni, "path": path } }));
+            }
+        }
+        if !channels.is_empty() {
+            animations.push(json!({ "name": "shotstage", "channels": channels, "samplers": samplers }));
         }
     }
     let mut doc = json!({
@@ -745,6 +839,9 @@ fn build_gltf(scene: &Scene, meshes: &[Baked], frame: f32, with_extras: bool) ->
     });
     if !cameras.is_empty() {
         doc["cameras"] = json!(cameras);
+    }
+    if !animations.is_empty() {
+        doc["animations"] = json!(animations);
     }
     if !lights.is_empty() {
         doc["extensionsUsed"] = json!(["KHR_lights_punctual"]);
@@ -779,21 +876,25 @@ fn glb(doc: &Value, bin: &[u8]) -> Vec<u8> {
 fn export(scene: &mut Scene, p: ExportParams) -> CmdResult<Value> {
     let frame = frame_ok(p.frame.unwrap_or(scene.timeline.start as f32))?;
     let format = p.format.unwrap_or(ModelFormat::Glb);
-    let meshes = bake(scene, &p.ids, frame)?;
+    let animated = matches!(format, ModelFormat::Glb | ModelFormat::Gltf | ModelFormat::Fbx)
+        && p.animation.unwrap_or(scene.timeline.tracks.iter().any(|t| !t.keys.is_empty()));
+    let anim = animated.then_some((scene.timeline.start as f32, scene.timeline.end as f32, scene.timeline.fps));
+    let frame = if animated { scene.timeline.start as f32 } else { frame };
+    let meshes = bake(scene, &p.ids, frame, animated)?;
     if meshes.is_empty() {
         return Err(CommandError::new("failed", "nothing to export: no visible meshes"));
     }
     let name = sanitize(p.name.as_deref().unwrap_or("scene"));
     let tris: usize = meshes.iter().map(|m| m.indices.len() / 3).sum();
     let file = format!("{name}.{}", format.extension());
-    let mut out = json!({ "format": format.extension(), "fileName": file, "mimeType": format.mime(), "meshes": meshes.len(), "triangles": tris });
+    let mut out = json!({ "format": format.extension(), "fileName": file, "mimeType": format.mime(), "meshes": meshes.len(), "triangles": tris, "animated": animated });
     match format {
         ModelFormat::Glb => {
-            let (doc, bin) = build_gltf(scene, &meshes, frame, true);
+            let (doc, bin) = build_gltf(scene, &meshes, frame, true, anim);
             out["data"] = json!(encode(&glb(&doc, &bin)));
         }
         ModelFormat::Gltf => {
-            let (mut doc, bin) = build_gltf(scene, &meshes, frame, true);
+            let (mut doc, bin) = build_gltf(scene, &meshes, frame, true, anim);
             doc["buffers"][0]["uri"] = json!(format!("data:application/octet-stream;base64,{}", encode(&bin)));
             out["text"] = json!(serde_json::to_string_pretty(&doc).unwrap_or_default());
         }
@@ -834,7 +935,7 @@ fn export(scene: &mut Scene, p: ExportParams) -> CmdResult<Value> {
             out["data"] = json!(encode(&b));
         }
         ModelFormat::Fbx => {
-            let (doc, bin) = build_gltf(scene, &meshes, frame, true);
+            let (doc, bin) = build_gltf(scene, &meshes, frame, true, anim);
             out["data"] = json!(encode(&blender_convert(&glb(&doc, &bin), "glb", "fbx")?));
         }
         ModelFormat::Blend => return Err(bad("blend is import only; export glb, fbx, obj or stl")),
@@ -900,6 +1001,23 @@ mod tests {
         // one undo removes the whole import
         s.dispatch("history.undo", json!({})).unwrap();
         assert!(!s.scene().contains("copy"));
+    }
+
+    #[test]
+    fn animated_export_has_channels_for_what_moves() {
+        let mut s = session_with_box();
+        s.dispatch("entity.create", json!({"type": "camera", "id": "cam", "position": [0, 1.5, 5]})).unwrap();
+        s.dispatch("motion.apply", json!({"preset": "dollyIn", "target": "cam", "duration": 2})).unwrap();
+        s.dispatch("motion.apply", json!({"preset": "turntable", "target": "t", "duration": 2})).unwrap();
+        let out = s.dispatch("model.export", json!({"format": "glb"})).unwrap().result;
+        assert_eq!(out["animated"], true);
+        let bytes = base64::engine::general_purpose::STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let g = gltf::Gltf::from_slice(&bytes).unwrap();
+        let anim = g.document.animations().next().expect("an animation");
+        // the camera and the table's five parts move; 3 channels each
+        assert_eq!(anim.channels().count(), 6 * 3);
+        let still = s.dispatch("model.export", json!({"format": "glb", "animation": false})).unwrap().result;
+        assert_eq!(still["animated"], false);
     }
 
     #[test]

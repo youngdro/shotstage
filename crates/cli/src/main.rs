@@ -9,6 +9,7 @@
 //! shotstage snapshot --scene shot.json -o frame.png --pass depth
 //! shotstage import chair.glb --scene shot.json --fit-height 0.9
 //! shotstage export set.fbx --scene shot.json     # glb, gltf, obj, stl; fbx through Blender
+//! shotstage storyboard --scene shot.json -o board/  # first / middle / last frame of every shot
 //! ```
 
 mod mcp;
@@ -113,6 +114,21 @@ enum Cmd {
         #[arg(long)]
         up_axis: Option<String>,
     },
+    /// Render the first, middle and last frame of every shot (clay and depth) into a folder,
+    /// with storyboard.json (shot descriptions and camera data) and index.html to look at.
+    Storyboard {
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Output folder (created if missing).
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Image width in pixels.
+        #[arg(long, default_value_t = 960)]
+        width: u32,
+        /// Also render the depth pass of every frame.
+        #[arg(long)]
+        depth: bool,
+    },
     /// Export the scene (or some entities) to a model file; the format comes from the extension.
     Export {
         file: PathBuf,
@@ -124,6 +140,13 @@ enum Cmd {
         #[arg(long)]
         frame: Option<f32>,
     },
+}
+
+/// A shot name usable in a file name.
+fn compact_name(name: &str) -> String {
+    let s: String =
+        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(32).collect();
+    if s.is_empty() { "shot".into() } else { s }
 }
 
 fn format_of(path: &Path) -> Result<String, String> {
@@ -349,6 +372,67 @@ fn real_main() -> Result<ExitCode, String> {
                     Ok(ExitCode::from(1))
                 }
             }
+        }
+        Cmd::Storyboard { scene, out, width, depth } => {
+            let mut session = scene.open()?;
+            std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
+            let t = session.scene().timeline.clone();
+            // every shot, or the whole timeline through the active camera
+            let shots: Vec<(String, String, u32, u32)> = if t.shots.is_empty() {
+                match session.scene().active_camera.clone() {
+                    Some(c) => vec![("shot".into(), c, t.start, t.end)],
+                    None => return Err("the scene has no shots and no active camera".into()),
+                }
+            } else {
+                t.shots.iter().map(|s| (s.name.clone(), s.camera.clone(), s.start, s.end)).collect()
+            };
+            let mut gpu = Gpu::default();
+            let mut board = vec![];
+            let mut html = String::from(
+                "<!doctype html><meta charset=utf-8><title>Storyboard</title><style>body{font:14px system-ui;background:#16171a;color:#ddd;margin:24px}h2{margin:28px 0 6px}.row{display:flex;gap:12px}figure{margin:0}img{width:100%;border-radius:6px;display:block}figcaption{color:#999;font-size:12px;margin-top:4px}</style><h1>Storyboard</h1>",
+            );
+            for (i, (name, cam, a, b)) in shots.iter().enumerate() {
+                let mid = (a + b) / 2;
+                let mut frames = vec![];
+                html.push_str(&format!("<h2>{} · {name}</h2><div class=row>", i + 1));
+                for (label, f) in [("first", *a), ("middle", mid), ("last", *b)] {
+                    let mut files = vec![];
+                    for pass in if depth { vec!["clay", "depth"] } else { vec!["clay"] } {
+                        let file = format!("{:02}_{}_{label}_{pass}.png", i + 1, compact_name(name));
+                        let (_, png) = gpu
+                            .snapshot_png(
+                                session.scene(),
+                                json!({ "camera": cam, "frame": f, "pass": pass, "width": width }),
+                            )
+                            .map_err(|e| e.message)?;
+                        std::fs::write(out.join(&file), png).map_err(|e| e.to_string())?;
+                        files.push(file);
+                    }
+                    let d = session
+                        .dispatch("camera.describe", json!({ "id": cam, "frame": f }))
+                        .map(|o| o.result)
+                        .unwrap_or(Value::Null);
+                    let summary = d["summary"].as_str().unwrap_or_default().to_string();
+                    html.push_str(&format!(
+                        "<figure><img src=\"{}\"><figcaption>{label} · frame {f} · {summary}</figcaption></figure>",
+                        files[0]
+                    ));
+                    frames.push(json!({ "position": label, "frame": f, "images": files, "describe": d }));
+                }
+                html.push_str("</div>");
+                let traj = session
+                    .dispatch("camera.trajectory", json!({ "id": cam, "start": a, "end": b }))
+                    .map(|o| o.result["frames"].clone())
+                    .unwrap_or(Value::Null);
+                board.push(json!({ "shot": name, "camera": cam, "start": a, "end": b,
+                    "seconds": (b - a + 1) as f32 / t.fps, "frames": frames, "trajectory": traj }));
+            }
+            let doc = json!({ "fps": t.fps, "shots": board });
+            std::fs::write(out.join("storyboard.json"), serde_json::to_string_pretty(&doc).unwrap_or_default())
+                .map_err(|e| e.to_string())?;
+            std::fs::write(out.join("index.html"), html).map_err(|e| e.to_string())?;
+            print_json(&json!({ "ok": true, "result": { "folder": out.display().to_string(), "shots": shots.len() } }));
+            Ok(ExitCode::SUCCESS)
         }
         Cmd::Snapshot { scene, out, camera, frame, pass, width, height } => {
             let session = scene.open()?;
