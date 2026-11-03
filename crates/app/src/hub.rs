@@ -25,6 +25,8 @@ pub struct Hub {
     pub pass: shotstage_render::Pass,
     /// Viewport shows the shot camera instead of the free orbit view.
     pub look_through: bool,
+    /// The scene as of a revision, shared by the UI until it changes (no copy per call).
+    pub(crate) scene_cache: Option<(u64, Rc<shotstage_core::Scene>)>,
     /// GPU of the editor window, used for snapshots.
     pub(crate) gpu: Option<eframe::egui_wgpu::RenderState>,
     /// Offscreen renderer for snapshots (separate from the viewport's).

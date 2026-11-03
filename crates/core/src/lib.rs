@@ -8,6 +8,7 @@ pub mod eval;
 pub mod image;
 pub mod light;
 pub mod mesh;
+pub mod meshcache;
 pub mod scene;
 pub mod spatial;
 pub mod timeline;

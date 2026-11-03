@@ -834,8 +834,18 @@ impl EditorApp {
         self.auto_key || is_animated(scene, id)
     }
 
-    fn scene(&self) -> Scene {
-        self.hub.borrow().session.scene().clone()
+    /// The current scene, shared (copied once per change, not per call).
+    fn scene(&self) -> std::rc::Rc<Scene> {
+        let mut h = self.hub.borrow_mut();
+        let rev = h.session.revision();
+        if let Some((r, s)) = &h.scene_cache
+            && *r == rev
+        {
+            return s.clone();
+        }
+        let s = std::rc::Rc::new(h.session.scene().clone());
+        h.scene_cache = Some((rev, s.clone()));
+        s
     }
     fn frame(&self) -> f32 {
         self.hub.borrow().frame
@@ -1023,7 +1033,7 @@ impl EditorApp {
                 step * if i.modifiers.shift { 10.0 } else { 1.0 },
             )
         });
-        let t = self.scene().timeline;
+        let t = self.scene().timeline.clone();
         if key {
             self.key_selection();
         }

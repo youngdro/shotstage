@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use shotstage_core::eval::{camera_data_at, posed_mesh, world_at};
+use shotstage_core::eval::{camera_data_at, posed_tris, world_at};
 use shotstage_core::spatial::{self, RayOptions, is_hidden};
 use shotstage_core::{EntityKind, Scene};
 
@@ -93,8 +93,7 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         let hovered = !selected && hovered_set.contains(&e.id);
         match &e.kind {
             EntityKind::Mesh { color, .. } => {
-                let Ok(mesh) = posed_mesh(scene, &e.id, frame) else { continue };
-                let tri = mesh.triangulate(false);
+                let Ok(tri) = posed_tris(scene, &e.id, frame) else { continue };
                 let normal_m = world.inverse().transpose();
                 let c = if selected {
                     mix(*color, SELECT, 0.45)

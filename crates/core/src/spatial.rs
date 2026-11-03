@@ -89,8 +89,8 @@ pub fn own_bounds(scene: &Scene, id: &str, frame: f32) -> Result<Option<Aabb>> {
         return Ok(None);
     }
     let world = world_at(scene, id, frame)?;
-    let mesh = crate::eval::posed_mesh(scene, id, frame)?;
-    Ok(Aabb::of_points(mesh.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p)))))
+    let tri = crate::eval::posed_tris(scene, id, frame)?;
+    Ok(Aabb::of_points(tri.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p)))))
 }
 
 /// World bounds of an entity together with its children (what moves when it moves).
@@ -186,38 +186,35 @@ pub fn raycast(scene: &Scene, frame: f32, origin: Vec3, dir: Vec3, opts: &RayOpt
         if ignored.contains(&e.id) || (!opts.only.is_empty() && !opts.only.contains(&e.id)) || is_hidden(scene, &e.id) {
             continue;
         }
-        let (Ok(world), Ok(mesh)) = (world_at(scene, &e.id, frame), crate::eval::posed_mesh(scene, &e.id, frame))
-        else {
+        let (Ok(world), Ok(tri)) = (world_at(scene, &e.id, frame), crate::eval::posed_tris(scene, &e.id, frame)) else {
             continue;
         };
         let world = match &e.kind {
             EntityKind::Image(img) => crate::image::card_world(world, img.billboard, opts.eye),
             _ => world,
         };
-        // cheap reject: the ray against the mesh's local bounding box
-        let Some(local) = Aabb::of_points(mesh.positions.iter().map(|p| Vec3::from_array(*p))) else { continue };
+        // test in the mesh's own space: no per-vertex transform, and a cheap box reject first
+        let Some(local) = Aabb::of_points(tri.positions.iter().map(|p| Vec3::from_array(*p))) else { continue };
         let inv = world.inverse();
-        if !ray_hits_box(inv.transform_point3(origin), inv.transform_vector3(dir), &local) {
+        let (lo, ld) = (inv.transform_point3(origin), inv.transform_vector3(dir));
+        if !ray_hits_box(lo, ld, &local) {
             continue;
         }
-        let tri = mesh.triangulate(false);
-        let pts: Vec<Vec3> = tri.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p))).collect();
+        let normal_m = inv.transpose();
         for t in tri.indices.chunks(3) {
-            let (a, b, c) = (pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]);
-            let Some(dist) = ray_triangle(origin, dir, a, b, c) else { continue };
+            let v = |k: usize| Vec3::from_array(tri.positions[t[k] as usize]);
+            let (a, b, c) = (v(0), v(1), v(2));
+            let Some(s) = ray_triangle(lo, ld, a, b, c) else { continue };
+            let point = world.transform_point3(lo + ld * s);
+            let dist = (point - origin).length();
             if best.as_ref().is_some_and(|h| h.distance <= dist) {
                 continue;
             }
-            let mut n = (b - a).cross(c - a).normalize_or_zero();
+            let mut n = normal_m.transform_vector3((b - a).cross(c - a)).normalize_or_zero();
             if n.dot(dir) > 0.0 {
                 n = -n;
             }
-            best = Some(Hit {
-                id: Some(e.id.clone()),
-                point: (origin + dir * dist).to_array(),
-                normal: n.to_array(),
-                distance: dist,
-            });
+            best = Some(Hit { id: Some(e.id.clone()), point: point.to_array(), normal: n.to_array(), distance: dist });
         }
     }
     if best.is_none() && opts.ground && dir.y.abs() > 1e-6 {
