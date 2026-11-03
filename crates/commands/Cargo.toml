@@ -12,3 +12,5 @@ serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
+gltf = { version = "1", default-features = false, features = ["utils", "names", "KHR_lights_punctual"] }
+base64 = "0.22"

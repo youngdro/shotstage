@@ -231,6 +231,84 @@ pub fn describe_shot(scene: &Scene, camera: &str, frame: f32, subject: Option<&s
     })
 }
 
+/// An entity's mesh at `frame` in its own space, with modifiers applied. Skinned meshes are
+/// bent by their joints' animated transforms; everything else is the plain evaluated mesh.
+pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
+    let crate::EntityKind::Mesh { source, modifiers, .. } = &scene.get(id)?.kind else {
+        return Err(CoreError::WrongKind(id.into(), "mesh"));
+    };
+    let crate::MeshSource::Skinned { mesh, skin } = source else {
+        return crate::mesh::evaluate_mesh(source, modifiers);
+    };
+    skin.validate(mesh.positions.len())?;
+    let to_local = world_at(scene, id, frame)?.inverse();
+    // A joint that was deleted stays in its bind pose.
+    let mats: Vec<Mat4> = skin
+        .joints
+        .iter()
+        .zip(&skin.inverse_bind)
+        .map(|(j, ib)| {
+            let ib = Mat4::from_cols_array(ib);
+            match world_at(scene, j, frame) {
+                Ok(w) => to_local * w * ib,
+                Err(_) => to_local * ib.inverse() * ib,
+            }
+        })
+        .collect();
+    let mut posed = mesh.clone();
+    for (i, p) in posed.positions.iter_mut().enumerate() {
+        let (js, ws) = (skin.vertex_joints[i], skin.vertex_weights[i]);
+        let total: f32 = ws.iter().sum();
+        if total <= 1e-6 {
+            continue;
+        }
+        let v = Vec3::from_array(*p);
+        let mut out = Vec3::ZERO;
+        for k in 0..4 {
+            if ws[k] > 0.0 {
+                out += mats[js[k] as usize].transform_point3(v) * (ws[k] / total);
+            }
+        }
+        *p = out.to_array();
+    }
+    let mut m = posed;
+    for md in modifiers {
+        m = md.apply(&m)?;
+    }
+    Ok(m)
+}
+
+/// Visible lights at `frame`, in world space.
+pub fn lights_at(scene: &Scene, frame: f32) -> Vec<crate::light::WorldLight> {
+    scene
+        .entities
+        .iter()
+        .filter_map(|e| {
+            let crate::EntityKind::Light(l) = &e.kind else { return None };
+            if crate::spatial::is_hidden(scene, &e.id) || l.intensity <= 0.0 {
+                return None;
+            }
+            let w = world_at(scene, &e.id, frame).ok()?;
+            let dir = w.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
+            let half = (l.cone_degrees.to_radians() / 2.0).clamp(0.01, 1.56);
+            let (inner, outer) = match l.kind {
+                crate::LightKind::Spot => (half * (1.0 - l.softness.clamp(0.0, 1.0)), half),
+                // a panel spreads its light over a wide, soft hemisphere
+                crate::LightKind::Area => (0.35, 1.5),
+                _ => (std::f32::consts::PI, std::f32::consts::PI),
+            };
+            Some(crate::light::WorldLight {
+                kind: l.kind,
+                position: w.w_axis.truncate().to_array(),
+                direction: (if dir == Vec3::ZERO { Vec3::NEG_Y } else { dir }).to_array(),
+                radiance: l.color.map(|c| c * l.intensity),
+                cos_inner: inner.cos(),
+                cos_outer: outer.cos(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {

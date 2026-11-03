@@ -5,6 +5,7 @@
 
 pub mod camera;
 pub mod eval;
+pub mod light;
 pub mod mesh;
 pub mod scene;
 pub mod spatial;
@@ -12,7 +13,8 @@ pub mod timeline;
 
 pub use camera::{CameraData, Intrinsics};
 pub use eval::{EvaluatedEntity, EvaluatedScene, evaluate};
-pub use mesh::{Mesh, MeshSource, Modifier, Primitive, TriMesh};
+pub use light::{LightData, LightKind};
+pub use mesh::{Mesh, MeshSource, Modifier, Primitive, Skin, TriMesh};
 pub use scene::{Entity, EntityKind, Scene, Transform};
 pub use timeline::{Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
 

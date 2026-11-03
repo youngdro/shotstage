@@ -47,14 +47,52 @@ struct Uniforms {
     view: [f32; 16],
     /// x = pass, y = depth near, z = depth far, w = 1 when overlays dim with depth
     params: [f32; 4],
+    /// x = number of scene lights (0 = studio light), y = ambient
+    light_params: [f32; 4],
+    lights: [GpuLight; MAX_LIGHTS],
+}
+
+/// Most lights the clay pass shades with (the brightest are kept).
+pub const MAX_LIGHTS: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuLight {
+    /// xyz = position, w = kind (0 sun, 1 point, 2 spot, 3 area)
+    pos: [f32; 4],
+    /// xyz = direction it shines, w = cos of the outer cone half angle
+    dir: [f32; 4],
+    /// rgb = colour × intensity, w = cos of the inner cone half angle
+    rad: [f32; 4],
+}
+
+fn gpu_lights(scene: &Scene, frame: f32) -> (usize, [GpuLight; MAX_LIGHTS]) {
+    use shotstage_core::LightKind;
+    let mut ls = shotstage_core::eval::lights_at(scene, frame);
+    ls.sort_by(|a, b| b.radiance.iter().sum::<f32>().total_cmp(&a.radiance.iter().sum::<f32>()));
+    let mut out = [GpuLight::default(); MAX_LIGHTS];
+    for (o, l) in out.iter_mut().zip(&ls) {
+        let kind = match l.kind {
+            LightKind::Sun => 0.0,
+            LightKind::Point => 1.0,
+            LightKind::Spot => 2.0,
+            LightKind::Area => 3.0,
+        };
+        let [px, py, pz] = l.position;
+        let [dx, dy, dz] = l.direction;
+        let [r, g, b] = l.radiance;
+        *o = GpuLight { pos: [px, py, pz, kind], dir: [dx, dy, dz, l.cos_outer], rad: [r, g, b, l.cos_inner] };
+    }
+    (ls.len().min(MAX_LIGHTS), out)
 }
 
 const SHADER: &str = r#"
-struct U { view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32> };
+struct L { pos: vec4<f32>, dir: vec4<f32>, rad: vec4<f32> };
+struct U { view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, light_params: vec4<f32>, lights: array<L, 8> };
 @group(0) @binding(0) var<uniform> u: U;
 
 struct MeshIn { @location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) color: vec3<f32>, @location(3) id: u32 };
-struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec3<f32>, @location(2) vz: f32 };
+struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec3<f32>, @location(2) vz: f32, @location(3) wp: vec3<f32> };
 
 @vertex fn vs_mesh(v: MeshIn) -> MeshOut {
     var o: MeshOut;
@@ -62,6 +100,7 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     o.n = v.normal;
     o.c = v.color;
     o.vz = -(u.view * vec4<f32>(v.pos, 1.0)).z;
+    o.wp = v.pos;
     return o;
 }
 
@@ -76,6 +115,37 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     if (pass_id == 2u) {
         let vn = normalize((u.view * vec4<f32>(n, 0.0)).xyz);
         return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
+    }
+    let count = u32(u.light_params.x + 0.5);
+    if (count > 0u) {
+        // scene lights: soft sky ambient plus each light's Lambert term (no shadows)
+        var col = i.c * (u.light_params.y * (0.75 + 0.25 * n.y));
+        for (var k = 0u; k < count; k = k + 1u) {
+            let l = u.lights[k];
+            let kind = u32(l.pos.w + 0.5);
+            var ldir = -l.dir.xyz;
+            var att = 1.0;
+            if (kind != 0u) {
+                let d = l.pos.xyz - i.wp;
+                let dist2 = max(dot(d, d), 0.01);
+                ldir = d * inverseSqrt(dist2);
+                // brightness 1 at 2 m, falling off with the square of the distance
+                att = 4.0 / dist2;
+                if (kind >= 2u) {
+                    att = att * smoothstep(l.dir.w, l.rad.w, dot(-ldir, l.dir.xyz));
+                }
+            }
+            var ndl = max(dot(n, ldir), 0.0);
+            if (kind == 3u) {
+                ndl = max((dot(n, ldir) + 0.35) / 1.35, 0.0);
+            }
+            col = col + i.c * l.rad.rgb * ndl * att;
+        }
+        // roll highlights off softly instead of clipping to white
+        let knee = vec3<f32>(0.75);
+        let over = max(col - knee, vec3<f32>(0.0));
+        col = min(col, knee) + over / (vec3<f32>(1.0) + over * 4.0);
+        return vec4<f32>(col, 1.0);
     }
     let key = normalize(vec3<f32>(0.45, 0.8, 0.4));
     let fill = normalize(vec3<f32>(-0.6, 0.25, -0.5));
@@ -288,7 +358,15 @@ impl Renderer {
             view_proj: (view.proj * view.view).to_cols_array(),
             view: view.view.to_cols_array(),
             params: [pass as u32 as f32, near, far, 0.0],
+            light_params: [0.0, 0.0, 0.0, 0.0],
+            lights: [GpuLight::default(); MAX_LIGHTS],
         };
+        let mut u = u;
+        if !overlay.studio_light {
+            let (n, lights) = gpu_lights(scene, frame);
+            u.light_params = [n as f32, 0.12, 0.0, 0.0];
+            u.lights = lights;
+        }
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
         let tri_buf = (!geo.triangles.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

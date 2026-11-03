@@ -233,7 +233,11 @@ pub const PREFABS: &[PrefabInfo] = &[
     ),
     info!(
         Softbox,
-        "softbox", "softbox", "Softbox", Product, "Softbox on a light stand, head at 1.8 m, aimed forward (+Z)"
+        "softbox",
+        "softbox",
+        "Softbox",
+        Product,
+        "Softbox on a light stand, head at 1.8 m, aimed forward (+Z); it is a real area light"
     ),
     info!(Reflector, "reflector", "reflector", "Reflector", Product, "Round reflector card 80 cm on a stand"),
     info!(LeafBranch, "leafBranch", "branch", "Leaves", Product, "Small branch with leaves, 35 cm"),
@@ -264,10 +268,22 @@ pub struct Part {
     pub scale: [f32; 3],
     pub color: [f32; 3],
     pub modifiers: Vec<Modifier>,
+    /// Makes the part a light (`prim` is then ignored).
+    pub light: Option<shotstage_core::LightData>,
 }
 
 pub fn part(name: &'static str, prim: Primitive, pos: [f32; 3], color: [f32; 3]) -> Part {
-    Part { name, parent: None, prim: Some(prim), pos, rot: [0.0; 3], scale: [1.0; 3], color, modifiers: vec![] }
+    Part {
+        name,
+        parent: None,
+        prim: Some(prim),
+        pos,
+        rot: [0.0; 3],
+        scale: [1.0; 3],
+        color,
+        modifiers: vec![],
+        light: None,
+    }
 }
 
 fn cube(x: f32, y: f32, z: f32) -> Primitive {
@@ -776,6 +792,16 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
                 ..part("box", Primitive::Cone { radius: 0.42, height: 0.35, segments: 4 }, [0.0, 1.8, 0.1], DARK)
             });
             v.push(part("diffuser", cube(0.58, 0.58, 0.01), [0.0, 1.8, 0.28], WHITE));
+            // the panel lights the scene: an area light facing the front (+Z)
+            v.push(Part {
+                rot: [0.0, 180.0, 0.0],
+                light: Some(shotstage_core::LightData {
+                    kind: shotstage_core::LightKind::Area,
+                    size: [0.58, 0.58],
+                    ..Default::default()
+                }),
+                ..part("light", cube(0.1, 0.1, 0.1), [0.0, 1.8, 0.3], WHITE)
+            });
             v
         }
         Reflector => {

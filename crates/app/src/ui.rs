@@ -18,25 +18,29 @@ enum Block {
     Shape(&'static str, Value, [f32; 3]),
     /// prefab kind, label, description
     Prefab(&'static str, &'static str, &'static str),
+    /// light kind, label, description
+    Light(&'static str, &'static str, &'static str),
+    /// lighting preset, label, description (click only)
+    LightPreset(&'static str, &'static str, &'static str),
 }
 
 impl Block {
     fn label(&self) -> &'static str {
         match self {
-            Block::Shape(l, ..) | Block::Prefab(_, l, _) => l,
+            Block::Shape(l, ..) | Block::Prefab(_, l, _) | Block::Light(_, l, _) | Block::LightPreset(_, l, _) => l,
         }
     }
     fn description(&self) -> &'static str {
         match self {
             Block::Shape(..) => "Basic shape (edit its size in Mesh / with mesh.setPrimitive)",
-            Block::Prefab(_, _, d) => d,
+            Block::Prefab(_, _, d) | Block::Light(_, _, d) | Block::LightPreset(_, _, d) => d,
         }
     }
     fn matches(&self, filter: &str) -> bool {
         filter.is_empty() || {
             let key = match self {
                 Block::Shape(..) => "",
-                Block::Prefab(k, ..) => k,
+                Block::Prefab(k, ..) | Block::Light(k, ..) | Block::LightPreset(k, ..) => k,
             };
             self.label().to_lowercase().contains(filter)
                 || key.to_lowercase().contains(filter)
@@ -58,6 +62,18 @@ Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete
 /// A collapsible properties section.
 fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
     egui::CollapsingHeader::new(egui::RichText::new(title).strong()).id_salt(title).default_open(open).show(ui, add);
+}
+
+/// The joint a click on `hit` (at `point`) means: a person's body part's joint, or the nearest
+/// bone of an imported skeleton.
+fn joint_at(scene: &Scene, hit: &str, point: Vec3, frame: f32) -> Option<String> {
+    rig::joint_of(scene, hit).or_else(|| rig::joint_near(scene, hit, point, frame))
+}
+
+/// Mesh under a ray, with the point hit.
+fn pick_point(scene: &Scene, frame: f32, o: Vec3, d: Vec3) -> Option<(String, Vec3)> {
+    let h = raycast(scene, frame, o, d, &RayOptions::default())?;
+    Some((h.id?, Vec3::from_array(h.point)))
 }
 
 /// The joint a drag on `joint`'s body part should turn: hands swing the forearm, feet the shin.
@@ -99,6 +115,31 @@ fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
         ("Fresh retail", true, of(Category::Retail)),
         ("Product shoot", true, of(Category::Product)),
         ("Furniture & set", false, of(Category::Furniture)),
+        (
+            "Lights",
+            false,
+            vec![
+                Block::Light("sun", "Sun", "Parallel sunlight; aim it to set the time of day"),
+                Block::Light("point", "Point", "A bare bulb: light in every direction"),
+                Block::Light("spot", "Spot", "A cone of light (stage light, rim light)"),
+                Block::Light("area", "Area", "A soft panel: softbox, window"),
+                Block::LightPreset(
+                    "threePoint",
+                    "3-point",
+                    "Key, fill and rim around the selection (or the whole scene)",
+                ),
+                Block::LightPreset("rembrandt", "Rembrandt", "One high side key light, moody"),
+                Block::LightPreset(
+                    "productSoftbox",
+                    "Product",
+                    "Two side softboxes and one overhead: even product light",
+                ),
+                Block::LightPreset("backlight", "Backlight", "Rim light from behind"),
+                Block::LightPreset("goldenHour", "Golden hr", "Warm low sun from the side"),
+                Block::LightPreset("daylight", "Daylight", "High neutral sun"),
+                Block::LightPreset("clear", "No lights", "Remove all lights: back to the flat studio light"),
+            ],
+        ),
         ("Shapes", false, shapes),
     ]
 }
@@ -260,6 +301,14 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Ignore scene lights (view option).
+    studio_light: bool,
+    /// The last object (group) selected: what lights and presets aim at.
+    last_subject: Option<String>,
+    /// A short status message and when it appeared.
+    toast: Option<(String, f64)>,
+    /// Files picked or dropped, waiting to be imported: (name, bytes, drop position).
+    incoming: crate::files::Inbox,
 }
 
 impl EditorApp {
@@ -298,6 +347,10 @@ impl EditorApp {
             frame_side: "front",
             block_filter: String::new(),
             show_console: false,
+            studio_light: false,
+            last_subject: None,
+            toast: None,
+            incoming: Default::default(),
         }
     }
 
@@ -342,6 +395,12 @@ impl EditorApp {
                 json!({"type": "mesh", "primitive": prim, "color": color, "name": name.to_lowercase(), "locked": *name == "Floor"}),
             )?,
             Block::Prefab(kind, ..) => self.run_key(key, "prefab.create", json!({"kind": kind, "drop": false}))?,
+            Block::Light(kind, label, _) => self.run_key(
+                key,
+                "entity.create",
+                json!({"type": "light", "name": label.to_lowercase(), "light": {"kind": kind}, "position": [0, 2.2, 0]}),
+            )?,
+            Block::LightPreset(..) => return None,
         };
         r["id"].as_str().map(str::to_string)
     }
@@ -350,6 +409,18 @@ impl EditorApp {
     fn place_on_ray(&self, key: &str, id: &str, ray: (Vec3, Vec3), offset: Vec3, ctrl: bool) {
         let scene = self.scene();
         let f = self.frame();
+        if matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Light(_))) {
+            // a light hangs above where it is dropped, a little towards the viewer, aimed at it
+            let opts = RayOptions { ignore: &[id.to_string()], ground: true, ..Default::default() };
+            if let Some(h) = raycast(&scene, f, ray.0, ray.1, &opts) {
+                let at = Vec3::from_array(h.point);
+                let back = Vec3::new(-ray.1.x, 0.0, -ray.1.z).normalize_or_zero();
+                let pos = at + Vec3::Y * 2.0 + back * 1.2;
+                self.run_key(key, "entity.moveTo", json!({"id": id, "position": pos.to_array(), "frame": f}));
+                self.run_key(key, "camera.lookAt", json!({"id": id, "target": (at + Vec3::Y * 0.5).to_array()}));
+            }
+            return;
+        }
         let mut p = json!({"id": id, "ray": {"origin": ray.0.to_array(), "direction": ray.1.to_array()},
             "offset": offset.to_array(), "snap": self.snap_value(ctrl), "frame": f});
         if is_animated(&scene, id) {
@@ -359,6 +430,76 @@ impl EditorApp {
             p.as_object_mut().map(|o| o.remove("snap"));
         }
         self.run_key(key, "entity.place", p);
+    }
+
+    /// Show a short status message at the bottom of the view.
+    fn toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), f64::NAN));
+    }
+
+    /// Import the files that were picked or dropped.
+    fn import_incoming(&mut self) {
+        use shotstage_commands::model::{ModelFormat, encode};
+        let items: Vec<_> = self.incoming.borrow_mut().drain(..).collect();
+        for (name, bytes, at) in items {
+            let (stem, ext) = name
+                .rsplit_once('.')
+                .map(|(s, e)| (s.to_string(), e.to_ascii_lowercase()))
+                .unwrap_or((name.clone(), String::new()));
+            let Some(format) = ModelFormat::from_extension(&ext) else {
+                self.toast(format!("{name}: not a model shotstage can import (glb, gltf, obj, stl, fbx, blend)"));
+                continue;
+            };
+            let key = self.new_key("import");
+            let params = json!({"format": format.extension(), "data": encode(&bytes), "name": stem});
+            match hub::dispatch(&self.hub, json!({"command": "model.import", "params": params, "merge": key})) {
+                Ok(o) => {
+                    let id = o.result["id"].as_str().unwrap_or_default().to_string();
+                    if let Some((rect, view)) = self.last_view {
+                        let p = at.filter(|p| rect.contains(*p)).unwrap_or(rect.center());
+                        self.place_on_ray(&key, &id, ray_at(rect, &view, p), Vec3::ZERO, false);
+                    }
+                    self.select(Some(id));
+                    let skins = o.result["skins"].as_u64().unwrap_or(0);
+                    let mut msg = format!("Imported {name}: {} parts", o.result["entities"]);
+                    if skins > 0 {
+                        msg.push_str(" with a skeleton (click it, then a part, to pose)");
+                    }
+                    if let Some(w) = o.result["warnings"].as_array().and_then(|w| w.first()).and_then(Value::as_str) {
+                        msg.push_str(&format!(" · {w}"));
+                    }
+                    self.toast(msg);
+                }
+                Err(e) => self.toast(format!("Could not import {name}: {}", e.message)),
+            }
+        }
+    }
+
+    fn export_model(&mut self, format: &str) {
+        use base64::Engine as _;
+        let req = json!({"command": "model.export", "params": {"format": format, "frame": self.frame()}});
+        let r = match hub::dispatch(&self.hub, req) {
+            Ok(o) => o.result,
+            Err(e) => return self.toast(format!("Export failed: {}", e.message)),
+        };
+        let name = r["fileName"].as_str().unwrap_or("scene.glb").to_string();
+        let bytes = match (r["data"].as_str(), r["text"].as_str()) {
+            (Some(d), _) => base64::engine::general_purpose::STANDARD.decode(d).unwrap_or_default(),
+            (None, Some(t)) => t.as_bytes().to_vec(),
+            _ => return self.toast("Export failed: no data"),
+        };
+        let mime = r["mimeType"].as_str().unwrap_or("application/octet-stream").to_string();
+        match crate::files::save(&name, &bytes, &mime) {
+            Ok(Some(where_)) => {
+                if let Some(mtl) = r["mtl"].as_str() {
+                    let mtl_name = name.replace(".obj", ".mtl");
+                    let _ = crate::files::save(&mtl_name, mtl.as_bytes(), "text/plain");
+                }
+                self.toast(format!("Exported {} meshes, {} triangles: {where_}", r["meshes"], r["triangles"]));
+            }
+            Ok(None) => {}
+            Err(e) => self.toast(format!("Export failed: {e}")),
+        }
     }
 
     fn scene(&self) -> Scene {
@@ -397,6 +538,16 @@ impl eframe::App for EditorApp {
             let mut h = self.hub.borrow_mut();
             if h.selected.as_ref().is_some_and(|s| !h.session.scene().contains(s)) {
                 h.selected = None;
+            }
+        }
+        crate::files::take_dropped(ui.ctx(), &self.incoming);
+        if !self.incoming.borrow().is_empty() {
+            self.import_incoming();
+        }
+        if let Some(sel) = self.selected() {
+            let scene = self.scene();
+            if matches!(scene.get(&sel).map(|e| &e.kind), Ok(EntityKind::Mesh { .. } | EntityKind::Empty)) {
+                self.last_subject = Some(root_of(&scene, &sel));
             }
         }
         if self.playing {
@@ -500,6 +651,29 @@ impl EditorApp {
             if ui.button("Redo").on_hover_text("Cmd/Ctrl+Shift+Z").clicked() {
                 self.run("history.redo", json!({}));
             }
+            ui.separator();
+            if ui
+                .button("Import…")
+                .on_hover_text("glTF / GLB, OBJ, STL, FBX and .blend (FBX / .blend on the desktop, through Blender). You can also drop files on the view.")
+                .clicked()
+            {
+                crate::files::pick(&self.incoming, ui.ctx());
+            }
+            ui.menu_button("Export", |ui| {
+                ui.weak("The scene posed at the current frame");
+                for (label, format, tip) in [
+                    ("GLB (glTF binary)", "glb", "Meshes, colours, cameras and lights: Blender, Unreal, Unity, three.js"),
+                    ("glTF (text)", "gltf", "The same as GLB, as one JSON file"),
+                    ("OBJ + MTL", "obj", "Meshes and colours, for almost any 3D tool"),
+                    ("STL", "stl", "Geometry only, for 3D printing and CAD"),
+                    ("FBX (via Blender)", "fbx", "Needs Blender on this computer (desktop editor)"),
+                ] {
+                    if ui.button(label).on_hover_text(tip).clicked() {
+                        self.export_model(format);
+                        ui.close();
+                    }
+                }
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak("3D previs for AI images and video");
             });
@@ -534,7 +708,9 @@ impl EditorApp {
             let cols = ((ui.available_width() + gap) / (74.0 + gap)).floor().max(2.0);
             let tile = ((ui.available_width() + gap) / cols - gap).floor();
             for (title, open, blocks) in palette() {
-                let shown: Vec<Block> = blocks.into_iter().filter(|b| b.matches(&filter)).collect();
+                // searching a section's name shows all of it
+                let whole = !filter.is_empty() && title.to_lowercase().contains(&filter);
+                let shown: Vec<Block> = blocks.into_iter().filter(|b| whole || b.matches(&filter)).collect();
                 if shown.is_empty() {
                     continue;
                 }
@@ -591,6 +767,18 @@ impl EditorApp {
             )
             .on_hover_cursor(CursorIcon::Grab)
             .on_hover_text(b.description());
+        if let Block::LightPreset(preset, ..) = b {
+            if r.clicked() {
+                let mut p = json!({"preset": preset});
+                if let Some(s) = self.last_subject.clone().filter(|s| self.scene().contains(s)) {
+                    p["subject"] = json!(s);
+                }
+                if self.run("light.preset", p).is_some() {
+                    self.toast(format!("Lighting: {}", b.label()));
+                }
+            }
+            return;
+        }
         if r.drag_started() {
             let key = self.new_key("new");
             self.palette = Some(PaletteDrag { block: b.clone(), spawned: None, key });
@@ -621,7 +809,8 @@ impl EditorApp {
                 let icon = match e.kind {
                     EntityKind::Mesh { .. } => "■",
                     EntityKind::Camera(_) => "◉",
-                    EntityKind::Empty if rig::joint_name(scene, &e.id).is_some() => "•",
+                    EntityKind::Light(_) => "☀",
+                    EntityKind::Empty if rig::is_joint(scene, &e.id) => "•",
                     EntityKind::Empty => "▣",
                 };
                 let active = if scene.active_camera.as_deref() == Some(&e.id) { " ★" } else { "" };
@@ -721,11 +910,15 @@ impl EditorApp {
             self.joint_section(ui, &scene, &id, j, frame);
             return;
         }
+        if rig::is_joint(&scene, &id) {
+            self.bone_section(ui, &scene, &id, frame);
+            return;
+        }
         if let Some(root) = &person {
             self.person_section(ui, &scene, root, frame);
         }
 
-        if !matches!(e.kind, EntityKind::Camera(_)) {
+        if !matches!(e.kind, EntityKind::Camera(_) | EntityKind::Light(_)) {
             section(ui, "Place", true, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Drop to surface").on_hover_text("entity.place").clicked() {
@@ -949,8 +1142,127 @@ impl EditorApp {
                     }
                 });
             }
+            EntityKind::Light(l) => self.light_section(ui, &id, l),
             EntityKind::Empty => {}
         }
+    }
+
+    /// A bone of an imported skeleton: plain rotation sliders.
+    fn bone_section(&mut self, ui: &mut egui::Ui, scene: &Scene, id: &str, frame: f32) {
+        let animated = is_animated(scene, id);
+        section(ui, "Bone", true, |ui| {
+            ui.weak("Drag the model's surface in the view to bend this bone, or turn the coloured rings.");
+            let mut r = local_at(scene, id, frame).map(|t| t.euler_degrees()).unwrap_or_default();
+            let (mut changed, mut started) = (false, false);
+            egui::Grid::new("bone_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                for (i, label) in ["X", "Y", "Z"].iter().enumerate() {
+                    ui.label(*label);
+                    let resp = ui.add(egui::Slider::new(&mut r[i], -180.0..=180.0).suffix("°").max_decimals(0));
+                    changed |= resp.changed();
+                    started |= resp.drag_started();
+                    ui.end_row();
+                }
+            });
+            if started {
+                self.gesture += 1;
+            }
+            if changed {
+                let mut p = json!({"id": id, "rotationEuler": r});
+                if animated {
+                    p["keyframeAt"] = json!(frame.round());
+                }
+                self.run_merged(&format!("bone:{id}"), "entity.setTransform", p);
+            }
+            if ui.button("Select model").clicked() {
+                self.select(Some(root_of(scene, id)));
+            }
+        });
+    }
+
+    fn light_section(&mut self, ui: &mut egui::Ui, id: &str, l: &shotstage_core::LightData) {
+        use shotstage_core::LightKind;
+        section(ui, "Light", true, |ui| {
+            let mut n = *l;
+            let mut started = false;
+            egui::Grid::new("light_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                ui.label("Kind");
+                ui.horizontal(|ui| {
+                    for (k, label) in [
+                        (LightKind::Sun, "Sun"),
+                        (LightKind::Point, "Point"),
+                        (LightKind::Spot, "Spot"),
+                        (LightKind::Area, "Area"),
+                    ] {
+                        ui.selectable_value(&mut n.kind, k, label);
+                    }
+                });
+                ui.end_row();
+                ui.label("Colour");
+                ui.horizontal(|ui| {
+                    started |= ui.color_edit_button_rgb(&mut n.color).clicked();
+                    for (label, c) in
+                        [("Warm", [1.0, 0.8, 0.6]), ("Neutral", [1.0, 1.0, 1.0]), ("Cool", [0.75, 0.85, 1.0])]
+                    {
+                        if ui.small_button(label).clicked() {
+                            n.color = c;
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label("Intensity");
+                let r = ui.add(egui::Slider::new(&mut n.intensity, 0.0..=20.0).logarithmic(true).max_decimals(2));
+                started |= r.drag_started();
+                ui.end_row();
+                if n.kind == LightKind::Spot {
+                    ui.label("Cone");
+                    started |= ui.add(egui::Slider::new(&mut n.cone_degrees, 5.0..=170.0).suffix("°")).drag_started();
+                    ui.end_row();
+                }
+                if matches!(n.kind, LightKind::Spot | LightKind::Area) {
+                    ui.label("Softness");
+                    started |= ui.add(egui::Slider::new(&mut n.softness, 0.0..=1.0)).drag_started();
+                    ui.end_row();
+                }
+                if n.kind == LightKind::Area {
+                    ui.label("Size");
+                    ui.horizontal(|ui| {
+                        for v in n.size.iter_mut() {
+                            started |= ui
+                                .add(egui::DragValue::new(v).range(0.05..=20.0).speed(0.01).suffix(" m"))
+                                .drag_started();
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            if started {
+                self.gesture += 1;
+            }
+            if n != *l {
+                self.run_merged(
+                    &format!("light:{id}"),
+                    "light.set",
+                    json!({"id": id, "kind": n.kind, "color": n.color, "intensity": n.intensity,
+                        "coneDegrees": n.cone_degrees, "softness": n.softness, "size": n.size}),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if let Some(target) = self.light_target()
+                    && ui.button("Aim at selection's group").on_hover_text("camera.lookAt").clicked()
+                {
+                    self.run("camera.lookAt", json!({"id": id, "target": target}));
+                }
+                if ui.button("Aim at origin").clicked() {
+                    self.run("camera.lookAt", json!({"id": id, "target": [0, 0.8, 0]}));
+                }
+            });
+            ui.weak("A light shines along its -Z. Scenes with lights are lit by them; toggle Studio light in the view toolbar to compare.");
+        });
+    }
+
+    /// What a light should aim at: the subject last framed, else nothing.
+    fn light_target(&self) -> Option<Value> {
+        self.last_subject.as_ref().filter(|s| self.scene().contains(s)).map(|s| json!(s))
     }
 
     fn person_section(&mut self, ui: &mut egui::Ui, scene: &Scene, root: &str, frame: f32) {
@@ -1284,7 +1596,7 @@ impl EditorApp {
         // rotation rings.
         let gizmo = selected.as_ref().filter(|s| !clean && !scene.get(s).is_ok_and(|e| e.locked)).and_then(|id| {
             let o = world_at(&scene, id, f).ok()?.w_axis.truncate();
-            let joint = rig::joint_name(&scene, id).is_some();
+            let joint = rig::is_joint(&scene, id);
             let len = (eye - o).length().max(0.1) * if joint { 0.09 } else { 0.14 };
             let c = project(rect, &view, o)?;
             let axes: Vec<Option<Pos2>> = if joint {
@@ -1345,7 +1657,11 @@ impl EditorApp {
                 let root = root_of(&scene, &hit);
                 let in_group =
                     selected.as_ref().is_some_and(|s| *s != root && spatial::subtree(&scene, &root).contains(s));
-                Some(if in_group { rig::joint_of(&scene, &hit).unwrap_or(hit) } else { root })
+                if !in_group {
+                    return Some(root);
+                }
+                let point = pick_point(&scene, f, o, d).map(|p| p.1).unwrap_or(o);
+                Some(joint_at(&scene, &hit, point, f).unwrap_or(hit))
             });
         }
 
@@ -1356,14 +1672,15 @@ impl EditorApp {
                 let (o, d) = ray_at(rect, &view, start);
                 let hit = pick_grabbable(&scene, f, o, d);
                 // with a joint of this person selected, dragging a body part bends it
+                let hit_point = pick_point(&scene, f, o, d).map(|p| p.1).unwrap_or(o);
                 let pose_joint = hit
                     .as_ref()
                     .filter(|h| {
-                        selected.as_ref().is_some_and(|s| {
-                            rig::joint_name(&scene, s).is_some() && root_of(&scene, s) == root_of(&scene, h)
-                        })
+                        selected
+                            .as_ref()
+                            .is_some_and(|s| rig::is_joint(&scene, s) && root_of(&scene, s) == root_of(&scene, h))
                     })
-                    .and_then(|h| rig::joint_of(&scene, h))
+                    .and_then(|h| joint_at(&scene, h, hit_point, f))
                     .map(|j| drive_joint(&scene, &j));
                 self.drag = if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
                     let key = self.new_key("gizmo");
@@ -1567,15 +1884,34 @@ impl EditorApp {
             && let Some(pos) = resp.interact_pointer_pos().filter(|p| rect.contains(*p))
         {
             let (o, d) = ray_at(rect, &view, pos);
-            let sel = pick(&scene, f, o, d).map(|hit| {
-                let root = root_of(&scene, &hit);
-                // first click takes the whole group; clicking inside a selected group picks the part
-                match &selected {
-                    Some(s) if spatial::subtree(&scene, &root).contains(s) => {
-                        rig::joint_of(&scene, &hit).unwrap_or(hit)
+            // lights and cameras are small: pick them by their icon on screen first
+            let icon = (!clean)
+                .then(|| {
+                    scene
+                        .entities
+                        .iter()
+                        .filter(|e| matches!(e.kind, EntityKind::Light(_) | EntityKind::Camera(_)))
+                        .filter(|e| cam.as_deref() != Some(e.id.as_str()))
+                        .filter_map(|e| {
+                            let p = project(rect, &view, world_at(&scene, &e.id, f).ok()?.w_axis.truncate())?;
+                            let dist = (p - pos).length();
+                            (dist < 14.0).then(|| (dist, e.id.clone()))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, id)| id)
+                })
+                .flatten();
+            let sel = icon.or_else(|| {
+                pick_point(&scene, f, o, d).map(|(hit, point)| {
+                    let root = root_of(&scene, &hit);
+                    // first click takes the whole group; clicking inside a selected group picks the part
+                    match &selected {
+                        Some(s) if spatial::subtree(&scene, &root).contains(s) => {
+                            joint_at(&scene, &hit, point, f).unwrap_or(hit)
+                        }
+                        _ => root,
                     }
-                    _ => root,
-                }
+                })
             });
             self.select(sel);
         }
@@ -1602,6 +1938,7 @@ impl EditorApp {
             looking_through: cam.clone(),
             hovered: if clean { None } else { self.hovered.clone() },
             footprint: dragged_id,
+            studio_light: self.studio_light,
         };
         let pass = self.pass;
         let (Some(rs), Some(renderer)) = (frame.wgpu_render_state(), self.renderer.as_mut()) else {
@@ -1685,6 +2022,38 @@ impl EditorApp {
             }
         }
         self.toolbar(ui, full, cam.is_some() || camera_id_at(&scene, f).is_some());
+        // files dragged over the window
+        if ui.input(|i| !i.raw.hovered_files.is_empty()) {
+            painter.rect_filled(full.shrink(6.0), 8.0, Color32::from_rgba_unmultiplied(40, 98, 170, 60));
+            painter.text(
+                full.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop to import (glb, gltf, obj, stl, fbx, blend)",
+                egui::FontId::proportional(18.0),
+                Color32::WHITE,
+            );
+        }
+        let now = ui.input(|i| i.time);
+        if let Some((msg, t0)) = &mut self.toast {
+            if t0.is_nan() {
+                *t0 = now;
+            }
+            let age = now - *t0;
+            if age < 5.0 {
+                let alpha = ((5.0 - age).min(1.0) * 230.0) as u8;
+                let font = egui::FontId::proportional(13.0);
+                let galley = painter.layout(msg.clone(), font, Color32::from_white_alpha(alpha), full.width() - 80.0);
+                let r = Rect::from_center_size(
+                    egui::pos2(full.center().x, full.bottom() - 30.0 - galley.size().y / 2.0),
+                    galley.size() + Vec2::new(24.0, 14.0),
+                );
+                painter.rect_filled(r, 6.0, Color32::from_rgba_unmultiplied(28, 30, 36, alpha));
+                painter.galley(r.min + Vec2::new(12.0, 7.0), galley, Color32::WHITE);
+                ui.ctx().request_repaint();
+            } else {
+                self.toast = None;
+            }
+        }
     }
 
     /// Floating view options at the top-left of the viewport.
@@ -1714,6 +2083,10 @@ impl EditorApp {
                         if !has_cam {
                             self.look_through = false;
                         }
+                        ui.separator();
+                        ui.toggle_value(&mut self.studio_light, "Studio light").on_hover_text(
+                            "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
+                        );
                         ui.separator();
                         ui.label(egui::RichText::new(" ? ").strong()).on_hover_text(HELP);
                     });

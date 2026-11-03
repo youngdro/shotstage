@@ -4,7 +4,11 @@
 //! [`Session::dispatch`] / [`Session::batch`], so they can do exactly the same things.
 //! Parameters are untrusted: bad input returns a [`CommandError`], never a panic.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod blender;
 mod builtin;
+pub mod lights;
+pub mod model;
 mod placement;
 pub mod prefabs;
 pub mod rig;

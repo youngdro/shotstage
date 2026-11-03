@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::CameraData;
+use crate::light::LightData;
 use crate::mesh::{MeshSource, Modifier};
 use crate::timeline::Timeline;
 use crate::{CoreError, Result};
@@ -75,6 +76,8 @@ pub enum EntityKind {
     },
     /// A shot camera.
     Camera(CameraData),
+    /// A light (optional: scenes without lights use the studio clay light).
+    Light(LightData),
 }
 
 fn default_color() -> [f32; 3] {
@@ -87,6 +90,7 @@ impl EntityKind {
             EntityKind::Empty => "empty",
             EntityKind::Mesh { .. } => "mesh",
             EntityKind::Camera(_) => "camera",
+            EntityKind::Light(_) => "light",
         }
     }
 }

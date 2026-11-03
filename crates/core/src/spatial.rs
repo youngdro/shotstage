@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::{CameraData, look_rotation};
 use crate::eval::world_at;
-use crate::mesh::evaluate_mesh;
 use crate::scene::{EntityKind, Scene};
 use crate::{CoreError, Result};
 
@@ -42,7 +41,7 @@ impl Aabb {
         }
         Some(Self { min, max })
     }
-    fn union(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+    pub fn union(a: Option<Self>, b: Option<Self>) -> Option<Self> {
         match (a, b) {
             (Some(a), Some(b)) => Some(Self { min: a.min.min(b.min), max: a.max.max(b.max) }),
             (a, b) => a.or(b),
@@ -86,9 +85,9 @@ pub fn subtree(scene: &Scene, id: &str) -> Vec<String> {
 /// World bounds of one entity's own geometry (meshes only).
 pub fn own_bounds(scene: &Scene, id: &str, frame: f32) -> Result<Option<Aabb>> {
     let e = scene.get(id)?;
-    let EntityKind::Mesh { source, modifiers, .. } = &e.kind else { return Ok(None) };
+    let EntityKind::Mesh { .. } = &e.kind else { return Ok(None) };
     let world = world_at(scene, id, frame)?;
-    let mesh = evaluate_mesh(source, modifiers)?;
+    let mesh = crate::eval::posed_mesh(scene, id, frame)?;
     Ok(Aabb::of_points(mesh.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p)))))
 }
 
@@ -177,11 +176,14 @@ pub fn raycast(scene: &Scene, frame: f32, origin: Vec3, dir: Vec3, opts: &RayOpt
     let ignored: Vec<String> = opts.ignore.iter().flat_map(|i| subtree(scene, i)).collect();
     let mut best: Option<Hit> = None;
     for e in &scene.entities {
-        let EntityKind::Mesh { source, modifiers, .. } = &e.kind else { continue };
+        let EntityKind::Mesh { .. } = &e.kind else { continue };
         if ignored.contains(&e.id) || (!opts.only.is_empty() && !opts.only.contains(&e.id)) || is_hidden(scene, &e.id) {
             continue;
         }
-        let (Ok(world), Ok(mesh)) = (world_at(scene, &e.id, frame), evaluate_mesh(source, modifiers)) else { continue };
+        let (Ok(world), Ok(mesh)) = (world_at(scene, &e.id, frame), crate::eval::posed_mesh(scene, &e.id, frame))
+        else {
+            continue;
+        };
         // cheap reject: the ray against the mesh's local bounding box
         let Some(local) = Aabb::of_points(mesh.positions.iter().map(|p| Vec3::from_array(*p))) else { continue };
         let inv = world.inverse();

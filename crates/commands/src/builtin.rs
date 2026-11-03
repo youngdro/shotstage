@@ -105,6 +105,7 @@ enum CreateType {
     Mesh,
     Camera,
     Empty,
+    Light,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -119,6 +120,9 @@ struct CreateParams {
     mesh: Option<Mesh>,
     /// For cameras: lens settings.
     camera: Option<CameraData>,
+    /// For lights: kind (sun, point, spot, area), colour, intensity, cone, size. A light shines
+    /// along its -Z: aim it with `camera.lookAt`.
+    light: Option<shotstage_core::LightData>,
     /// Id to use (1-64 of A-Za-z0-9_-). Default: generated from the name or type.
     id: Option<String>,
     name: Option<String>,
@@ -419,6 +423,11 @@ fn create(scene: &mut Scene, p: CreateParams) -> CmdResult<Value> {
             EntityKind::Camera(c)
         }
         CreateType::Empty => EntityKind::Empty,
+        CreateType::Light => {
+            let l = p.light.unwrap_or_default();
+            l.validate()?;
+            EntityKind::Light(l)
+        }
     };
     let stem = match (&p.name, &kind) {
         (Some(n), _) => n.to_lowercase(),
@@ -830,5 +839,7 @@ pub fn registry() -> Vec<Command> {
     .into_iter()
     .chain(crate::placement::commands())
     .chain(crate::rig::commands())
+    .chain(crate::lights::commands())
+    .chain(crate::model::commands())
     .collect()
 }

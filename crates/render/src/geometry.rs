@@ -2,8 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use shotstage_core::eval::{camera_data_at, world_at};
-use shotstage_core::mesh::evaluate_mesh;
+use shotstage_core::eval::{camera_data_at, posed_mesh, world_at};
 use shotstage_core::spatial::{self, RayOptions, is_hidden};
 use shotstage_core::{EntityKind, Scene};
 
@@ -36,6 +35,8 @@ pub struct Overlay {
     pub hovered: Option<String>,
     /// Entity being dragged: its footprint and a drop line to the ground are drawn.
     pub footprint: Option<String>,
+    /// Ignore the scene's lights and use the flat studio clay light.
+    pub studio_light: bool,
 }
 
 #[derive(Default)]
@@ -62,8 +63,8 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         let selected = selected_set.contains(&e.id);
         let hovered = !selected && hovered_set.contains(&e.id);
         match &e.kind {
-            EntityKind::Mesh { source, modifiers, color } => {
-                let Ok(mesh) = evaluate_mesh(source, modifiers) else { continue };
+            EntityKind::Mesh { color, .. } => {
+                let Ok(mesh) = posed_mesh(scene, &e.id, frame) else { continue };
                 let tri = mesh.triangulate(false);
                 let normal_m = world.inverse().transpose();
                 let c = if selected {
@@ -85,6 +86,10 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                         id: index as u32 + 1,
                     });
                 }
+            }
+            EntityKind::Light(l) if overlay.cameras => {
+                let warm = [l.color[0] * 0.6 + 0.4, l.color[1] * 0.6 + 0.35, l.color[2] * 0.4 + 0.15];
+                light_icon(&mut g.lines, world, l, if selected { SELECT } else { warm });
             }
             EntityKind::Camera(_) if overlay.cameras && overlay.looking_through.as_deref() != Some(e.id.as_str()) => {
                 if let Ok(lens) = camera_data_at(scene, &e.id, frame) {
@@ -120,6 +125,52 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         line(&mut g.lines, mid - Vec3::Z * s, mid + Vec3::Z * s, SELECT);
     }
     g
+}
+
+/// Wire icon of a light: a small star at the light, plus its beam (sun arrow, spot cone, area
+/// panel) along its -Z.
+fn light_icon(out: &mut Vec<LineVertex>, world: Mat4, l: &shotstage_core::LightData, c: [f32; 3]) {
+    use shotstage_core::LightKind;
+    let p = |x: f32, y: f32, z: f32| world.transform_point3(Vec3::new(x, y, z));
+    let r = 0.08;
+    for (a, b) in
+        [(p(-r, 0.0, 0.0), p(r, 0.0, 0.0)), (p(0.0, -r, 0.0), p(0.0, r, 0.0)), (p(0.0, 0.0, -r), p(0.0, 0.0, r))]
+    {
+        line(out, a, b, c);
+    }
+    let ring = |out: &mut Vec<LineVertex>, rad: f32, z: f32| {
+        for i in 0..16 {
+            let (a0, a1) = (i as f32 / 16.0 * std::f32::consts::TAU, (i + 1) as f32 / 16.0 * std::f32::consts::TAU);
+            line(out, p(a0.cos() * rad, a0.sin() * rad, z), p(a1.cos() * rad, a1.sin() * rad, z), c);
+        }
+    };
+    match l.kind {
+        LightKind::Point => ring(out, r * 1.6, 0.0),
+        LightKind::Sun => {
+            ring(out, r * 1.6, 0.0);
+            line(out, p(0.0, 0.0, 0.0), p(0.0, 0.0, -0.8), c);
+            line(out, p(0.0, 0.0, -0.8), p(0.05, 0.0, -0.68), c);
+            line(out, p(0.0, 0.0, -0.8), p(-0.05, 0.0, -0.68), c);
+        }
+        LightKind::Spot => {
+            let len = 0.6;
+            let rad = (l.cone_degrees.to_radians() / 2.0).tan().min(4.0) * len;
+            for a in [0.0f32, 90.0, 180.0, 270.0] {
+                let a = a.to_radians();
+                line(out, p(0.0, 0.0, 0.0), p(a.cos() * rad, a.sin() * rad, -len), c);
+            }
+            ring(out, rad, -len);
+        }
+        LightKind::Area => {
+            let (w, h) = (l.size[0] / 2.0, l.size[1] / 2.0);
+            let q = [p(-w, -h, 0.0), p(w, -h, 0.0), p(w, h, 0.0), p(-w, h, 0.0)];
+            for i in 0..4 {
+                line(out, q[i], q[(i + 1) % 4], c);
+            }
+            line(out, q[0], q[2], c);
+            line(out, p(0.0, 0.0, 0.0), p(0.0, 0.0, -0.4), c);
+        }
+    }
 }
 
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {

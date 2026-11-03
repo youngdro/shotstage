@@ -73,6 +73,42 @@ pub enum MeshSource {
     Primitive { primitive: Primitive },
     /// Explicit geometry (imported, applied modifiers, merged, or edited).
     Data { mesh: Mesh },
+    /// Imported geometry bound to a skeleton: `mesh` is the rest pose, and every vertex follows
+    /// up to four joint entities (see [`crate::eval::posed_mesh`]).
+    Skinned { mesh: Mesh, skin: Skin },
+}
+
+/// How a skinned mesh follows its joints (glTF skinning).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Skin {
+    /// Joint entity ids.
+    pub joints: Vec<String>,
+    /// One column-major inverse bind matrix per joint.
+    pub inverse_bind: Vec<[f32; 16]>,
+    /// Per vertex: four indices into `joints`.
+    pub vertex_joints: Vec<[u16; 4]>,
+    /// Per vertex: the four weights (they are normalised when used).
+    pub vertex_weights: Vec<[f32; 4]>,
+}
+
+impl Skin {
+    pub fn validate(&self, vertices: usize) -> Result<()> {
+        if self.joints.is_empty() || self.joints.len() != self.inverse_bind.len() {
+            return Err(CoreError::Invalid("a skin needs one inverse bind matrix per joint".into()));
+        }
+        if self.vertex_joints.len() != vertices || self.vertex_weights.len() != vertices {
+            return Err(CoreError::Invalid("a skin needs joints and weights for every vertex".into()));
+        }
+        let n = self.joints.len() as u16;
+        if self.vertex_joints.iter().flatten().any(|j| *j >= n) {
+            return Err(CoreError::Invalid("a skin weight refers to a joint that does not exist".into()));
+        }
+        if self.inverse_bind.iter().flatten().chain(self.vertex_weights.iter().flatten()).any(|v| !v.is_finite()) {
+            return Err(CoreError::Invalid("skin data must be finite".into()));
+        }
+        Ok(())
+    }
 }
 
 /// Non-destructive modifiers, evaluated top to bottom.
@@ -303,6 +339,11 @@ impl MeshSource {
             MeshSource::Primitive { primitive } => primitive.build(),
             MeshSource::Data { mesh } => {
                 mesh.validate()?;
+                Ok(mesh.clone())
+            }
+            MeshSource::Skinned { mesh, skin } => {
+                mesh.validate()?;
+                skin.validate(mesh.positions.len())?;
                 Ok(mesh.clone())
             }
         }

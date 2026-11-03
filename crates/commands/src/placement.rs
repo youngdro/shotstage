@@ -463,13 +463,14 @@ fn prefab_create(scene: &mut Scene, p: PrefabParams) -> CmdResult<Value> {
         let pid = format!("{id}_{}", part.name);
         let mut t = Transform { translation: part.pos, scale: part.scale, ..Default::default() };
         t.set_euler_degrees(part.rot);
-        let kind = match part.prim {
-            Some(prim) => EntityKind::Mesh {
+        let kind = match (part.light, part.prim) {
+            (Some(l), _) => EntityKind::Light(l),
+            (None, Some(prim)) => EntityKind::Mesh {
                 source: MeshSource::Primitive { primitive: prim },
                 modifiers: part.modifiers,
                 color: color(part.color)?,
             },
-            None => EntityKind::Empty,
+            (None, None) => EntityKind::Empty,
         };
         let parent = part.parent.map(|q| format!("{id}_{q}")).unwrap_or_else(|| id.clone());
         scene.insert(Entity {
