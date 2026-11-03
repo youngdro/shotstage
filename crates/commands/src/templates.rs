@@ -186,7 +186,7 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
             timeline(143),
             motion("talk", "friend_a", None, 0, 6.0),
             cam("cam_a", "Cam A"),
-            frame("cam_a", "table", "full", "front", "eyeLevel", 35.0),
+            frame("cam_a", "table", "wide", "frontLeft", "high", 35.0),
             motion("orbitRight", "cam_a", Some("table"), 0, 6.0),
             ("light.preset", json!({"preset": "daylight", "camera": "cam_a"})),
             shot("cam_a", "arc", 0, 143),

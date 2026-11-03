@@ -280,14 +280,16 @@ pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
     Ok(m)
 }
 
-/// An entity's mesh at `frame` triangulated (flat normals) in its own space; cached by content
-/// for everything but skinned meshes.
+/// An entity's mesh at `frame` triangulated (auto-smoothed normals) in its own space; cached by
+/// content for everything but skinned meshes.
 pub fn posed_tris(scene: &Scene, id: &str, frame: f32) -> Result<std::rc::Rc<crate::TriMesh>> {
     match &scene.get(id)?.kind {
         crate::EntityKind::Mesh { source, modifiers, .. } if !matches!(source, crate::MeshSource::Skinned { .. }) => {
             crate::meshcache::local_tris(source, modifiers)
         }
-        _ => Ok(std::rc::Rc::new(posed_mesh(scene, id, frame)?.triangulate(false))),
+        _ => {
+            Ok(std::rc::Rc::new(posed_mesh(scene, id, frame)?.triangulate_auto_smooth(crate::meshcache::SMOOTH_ANGLE)))
+        }
     }
 }
 

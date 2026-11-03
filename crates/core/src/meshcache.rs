@@ -62,15 +62,18 @@ fn key(source: &MeshSource, modifiers: &[Modifier]) -> Option<u64> {
     Some(h.0)
 }
 
-/// The mesh with its modifiers, triangulated with flat normals, in its own space.
+/// Edges flatter than this many degrees are shaded smooth.
+pub const SMOOTH_ANGLE: f32 = 40.0;
+
+/// The mesh with its modifiers, triangulated with auto-smoothed normals, in its own space.
 pub fn local_tris(source: &MeshSource, modifiers: &[Modifier]) -> Result<Rc<TriMesh>> {
     let Some(k) = key(source, modifiers) else {
-        return Ok(Rc::new(evaluate_mesh(source, modifiers)?.triangulate(false)));
+        return Ok(Rc::new(evaluate_mesh(source, modifiers)?.triangulate_auto_smooth(SMOOTH_ANGLE)));
     };
     if let Some(t) = CACHE.with(|c| c.borrow().get(&k).cloned()) {
         return Ok(t);
     }
-    let t = Rc::new(evaluate_mesh(source, modifiers)?.triangulate(false));
+    let t = Rc::new(evaluate_mesh(source, modifiers)?.triangulate_auto_smooth(SMOOTH_ANGLE));
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if c.len() >= MAX_ENTRIES {
