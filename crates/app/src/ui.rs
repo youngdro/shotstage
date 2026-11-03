@@ -1,14 +1,171 @@
 //! The egui editor: outliner, properties, timeline, command console and the 3D viewport.
 //! Every edit goes through [`crate::hub::dispatch`]; the UI keeps only view state.
 
-use egui::{Color32, Rect, Sense, Vec2};
+use egui::{Color32, CursorIcon, Pos2, Rect, Sense, Vec2};
 use glam::{Mat4, Vec3, Vec4Swizzles};
 use serde_json::{Value, json};
 use shotstage_core::eval::{camera_data_at, camera_id_at, local_at, world_at};
+use shotstage_core::spatial::{self, RayOptions, raycast};
 use shotstage_core::{EntityKind, Modifier, Scene, TrackProperty};
 use shotstage_render::{Overlay, Pass, Renderer, View, pick};
 
 use crate::hub::{self, SharedHub};
+
+/// Something in the block palette.
+#[derive(Clone)]
+enum Block {
+    Shape(&'static str, Value, [f32; 3]),
+    Prefab(&'static str, &'static str),
+}
+
+impl Block {
+    fn label(&self) -> &'static str {
+        match self {
+            Block::Shape(l, ..) | Block::Prefab(_, l) => l,
+        }
+    }
+}
+
+fn palette() -> (Vec<Block>, Vec<Block>) {
+    let grey = [0.72, 0.70, 0.66];
+    let shapes = vec![
+        Block::Shape("Cube", json!({"shape": "cube", "size": [0.5, 0.5, 0.5]}), grey),
+        Block::Shape("Slab", json!({"shape": "cube", "size": [1.0, 0.1, 1.0]}), grey),
+        Block::Shape("Pillar", json!({"shape": "cube", "size": [0.3, 2.0, 0.3]}), grey),
+        Block::Shape("Sphere", json!({"shape": "sphere", "radius": 0.25, "segments": 24, "rings": 12}), grey),
+        Block::Shape("Cylinder", json!({"shape": "cylinder", "radius": 0.25, "height": 0.5, "segments": 24}), grey),
+        Block::Shape("Cone", json!({"shape": "cone", "radius": 0.25, "height": 0.5, "segments": 24}), grey),
+        Block::Shape(
+            "Torus",
+            json!({"shape": "torus", "majorRadius": 0.3, "minorRadius": 0.08, "majorSegments": 32, "minorSegments": 12}),
+            grey,
+        ),
+        Block::Shape("Floor", json!({"shape": "plane", "size": [12, 12]}), [0.5, 0.5, 0.52]),
+    ];
+    let props = vec![
+        Block::Prefab("person", "Person"),
+        Block::Prefab("table", "Table"),
+        Block::Prefab("chair", "Chair"),
+        Block::Prefab("sofa", "Sofa"),
+        Block::Prefab("bed", "Bed"),
+        Block::Prefab("lamp", "Lamp"),
+        Block::Prefab("crate", "Crate"),
+        Block::Prefab("stairs", "Stairs"),
+        Block::Prefab("wall", "Wall"),
+        Block::Prefab("doorway", "Doorway"),
+        Block::Prefab("car", "Car"),
+        Block::Prefab("tree", "Tree"),
+    ];
+    (shapes, props)
+}
+
+/// A block being dragged in from the palette.
+struct PaletteDrag {
+    block: Block,
+    spawned: Option<String>,
+    key: String,
+}
+
+/// What the current pointer drag in the viewport does.
+#[derive(Clone)]
+enum Gesture {
+    Idle,
+    Navigate,
+    /// Slide an object over surfaces (Shift: lift it straight up).
+    Move {
+        id: String,
+        grab: Vec3,
+        offset: Vec3,
+        key: String,
+        lift: Option<(Vec3, f32)>,
+    },
+    /// Gizmo: move along a world axis.
+    Axis {
+        id: String,
+        axis: Vec3,
+        start: Vec3,
+        t0: f32,
+        key: String,
+    },
+    /// Gizmo: turn about the vertical axis.
+    Ring {
+        id: String,
+        last: f32,
+        key: String,
+    },
+    /// Gizmo: uniform scale.
+    Scale {
+        id: String,
+        key: String,
+    },
+    /// Esc pressed: ignore the rest of this drag.
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Handle {
+    Axis(usize),
+    Ring,
+    Scale,
+}
+
+fn ray_at(rect: Rect, view: &View, pos: Pos2) -> (Vec3, Vec3) {
+    let ndc = glam::Vec2::new(
+        (pos.x - rect.left()) / rect.width() * 2.0 - 1.0,
+        1.0 - (pos.y - rect.top()) / rect.height() * 2.0,
+    );
+    let inv = (view.proj * view.view).inverse();
+    let near = inv.project_point3(Vec3::new(ndc.x, ndc.y, 0.0));
+    let far = inv.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
+    (near, (far - near).normalize_or_zero())
+}
+
+fn project(rect: Rect, view: &View, p: Vec3) -> Option<Pos2> {
+    let c = view.proj * view.view * p.extend(1.0);
+    if c.w <= 1e-5 {
+        return None;
+    }
+    let n = c.xyz() / c.w;
+    Some(egui::pos2(rect.left() + (n.x + 1.0) / 2.0 * rect.width(), rect.top() + (1.0 - n.y) / 2.0 * rect.height()))
+}
+
+/// Parameter along the line `p + a·s` closest to the ray `o + d·t`.
+fn closest_on_line(p: Vec3, a: Vec3, o: Vec3, d: Vec3) -> Option<f32> {
+    let w0 = p - o;
+    let (aa, ab, bb, ad, bd) = (a.dot(a), a.dot(d), d.dot(d), a.dot(w0), d.dot(w0));
+    let denom = aa * bb - ab * ab;
+    (denom.abs() > 1e-6).then(|| (ab * bd - bb * ad) / denom)
+}
+
+fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let (ab, ap) = (b - a, p - a);
+    let t = (ap.dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+    (a + ab * t - p).length()
+}
+
+/// The top-level group an entity belongs to (a prefab's root).
+fn root_of(scene: &Scene, id: &str) -> String {
+    let mut cur = id.to_string();
+    for _ in 0..10_000 {
+        match scene.get(&cur).ok().and_then(|e| e.parent.clone()) {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    cur
+}
+
+/// The mesh under a viewport ray that drags may grab (locked groups let the drag through).
+fn pick_grabbable(scene: &Scene, frame: f32, o: Vec3, d: Vec3) -> Option<String> {
+    let hit = pick(scene, frame, o, d)?;
+    let locked = scene.get(&root_of(scene, &hit)).map(|e| e.locked).unwrap_or(false)
+        || scene.get(&hit).map(|e| e.locked).unwrap_or(false);
+    (!locked).then_some(hit)
+}
+
+fn is_animated(scene: &Scene, id: &str) -> bool {
+    scene.timeline.track(id, TrackProperty::Transform).is_some()
+}
 
 struct Orbit {
     target: Vec3,
@@ -39,11 +196,22 @@ pub struct EditorApp {
     console_out: String,
     /// Bumped at the start of each drag so a drag is one undo step.
     gesture: u64,
+    snap: bool,
+    snap_step: f32,
+    drag: Gesture,
+    palette: Option<PaletteDrag>,
+    hovered: Option<String>,
+    hot_handle: Option<Handle>,
+    /// Viewport rect and camera of the last frame (for clicks on palette tiles).
+    last_view: Option<(Rect, View)>,
+    frame_angle: &'static str,
+    frame_side: &'static str,
 }
 
 impl EditorApp {
     pub fn new(cc: &eframe::CreationContext<'_>, hub: SharedHub) -> Self {
         hub.borrow_mut().repaint = Some(cc.egui_ctx.clone());
+        hub.borrow_mut().gpu = cc.wgpu_render_state.clone();
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let renderer = cc.wgpu_render_state.as_ref().map(|rs| Renderer::new(&rs.device));
         Self {
@@ -57,6 +225,15 @@ impl EditorApp {
             console: r#"{"command": "entity.create", "params": {"type": "mesh", "primitive": {"shape": "sphere", "radius": 0.5, "segments": 24, "rings": 12}, "position": [0, 0.5, 0]}}"#.into(),
             console_out: String::new(),
             gesture: 0,
+            snap: true,
+            snap_step: 0.25,
+            drag: Gesture::Idle,
+            palette: None,
+            hovered: None,
+            hot_handle: None,
+            last_view: None,
+            frame_angle: "eyeLevel",
+            frame_side: "front",
         }
     }
 
@@ -70,6 +247,54 @@ impl EditorApp {
         if let Err(e) = hub::dispatch(&self.hub, req) {
             log::warn!("{command}: {e}");
         }
+    }
+
+    /// Run with an explicit merge key (one undo step per key); returns the result.
+    fn run_key(&self, key: &str, command: &str, params: Value) -> Option<Value> {
+        match hub::dispatch(&self.hub, json!({ "command": command, "params": params, "merge": key })) {
+            Ok(o) => Some(o.result),
+            Err(e) => {
+                log::warn!("{command}: {e}");
+                None
+            }
+        }
+    }
+
+    fn new_key(&mut self, tag: &str) -> String {
+        self.gesture += 1;
+        format!("{tag}:{}", self.gesture)
+    }
+
+    fn snap_value(&self, ctrl: bool) -> Value {
+        if self.snap && !ctrl { json!(self.snap_step) } else { Value::Null }
+    }
+
+    /// Create a palette block (unplaced) under a merge key.
+    fn spawn(&self, block: &Block, key: &str) -> Option<String> {
+        let r = match block {
+            Block::Shape(name, prim, color) => self.run_key(
+                key,
+                "entity.create",
+                json!({"type": "mesh", "primitive": prim, "color": color, "name": name.to_lowercase(), "locked": *name == "Floor"}),
+            )?,
+            Block::Prefab(kind, _) => self.run_key(key, "prefab.create", json!({"kind": kind, "drop": false}))?,
+        };
+        r["id"].as_str().map(str::to_string)
+    }
+
+    /// Drop `id` where a viewport ray lands.
+    fn place_on_ray(&self, key: &str, id: &str, ray: (Vec3, Vec3), offset: Vec3, ctrl: bool) {
+        let scene = self.scene();
+        let f = self.frame();
+        let mut p = json!({"id": id, "ray": {"origin": ray.0.to_array(), "direction": ray.1.to_array()},
+            "offset": offset.to_array(), "snap": self.snap_value(ctrl), "frame": f});
+        if is_animated(&scene, id) {
+            p["keyframeAt"] = json!(f.round());
+        }
+        if p["snap"].is_null() {
+            p.as_object_mut().map(|o| o.remove("snap"));
+        }
+        self.run_key(key, "entity.place", p);
     }
 
     fn scene(&self) -> Scene {
@@ -89,6 +314,16 @@ impl EditorApp {
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Drop a selection that an agent deleted.
+        // WebGL needs polling for buffer maps; keep frames coming while snapshots are pending.
+        // (Poll without holding the hub: the map callback borrows it.)
+        let polling = {
+            let h = self.hub.borrow();
+            (h.pending_snapshots > 0).then(|| h.gpu.clone()).flatten()
+        };
+        if let Some(rs) = polling {
+            let _ = rs.device.poll(wgpu::PollType::Poll);
+            ui.ctx().request_repaint();
+        }
         {
             let mut h = self.hub.borrow_mut();
             if h.selected.as_ref().is_some_and(|s| !h.session.scene().contains(s)) {
@@ -118,8 +353,12 @@ impl eframe::App for EditorApp {
             (h.pass, h.look_through) = (self.pass, self.look_through);
         }
         egui::Panel::bottom("timeline").resizable(true).default_size(190.0).show(ui, |ui| self.bottom(ui));
-        egui::Panel::left("outliner").resizable(true).default_size(210.0).show(ui, |ui| self.outliner(ui));
-        egui::Panel::right("properties").resizable(true).default_size(280.0).show(ui, |ui| {
+        egui::Panel::left("outliner")
+            .resizable(true)
+            .default_size(215.0)
+            .min_size(215.0)
+            .show(ui, |ui| self.outliner(ui));
+        egui::Panel::right("properties").resizable(true).default_size(290.0).min_size(290.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.properties(ui));
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, frame));
@@ -131,15 +370,36 @@ impl EditorApp {
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
-        let (undo, redo, del, space) = ui.input(|i| {
+        let (undo, redo, del, space, turn, dup) = ui.input(|i| {
             let cmd = i.modifiers.command;
             (
                 cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
                 cmd && (i.key_pressed(egui::Key::Y) || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
-                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::X),
+                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::X) || i.key_pressed(egui::Key::Backspace),
                 i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::R).then_some(if i.modifiers.shift { -15.0 } else { 15.0 }),
+                cmd && i.key_pressed(egui::Key::D),
             )
         });
+        if let (Some(deg), Some(id)) = (turn, self.selected()) {
+            // while dragging, the turn joins the drag's undo step
+            let f = self.frame();
+            match &self.drag {
+                Gesture::Move { key, .. } => {
+                    let key = key.clone();
+                    self.run_key(&key, "entity.rotate", json!({"id": id, "degrees": deg, "frame": f}));
+                }
+                _ => {
+                    self.run("entity.rotate", json!({"id": id, "degrees": deg, "frame": f}));
+                }
+            }
+        }
+        if dup
+            && let Some(id) = self.selected()
+            && let Some(r) = self.run("entity.duplicate", json!({"id": id}))
+        {
+            self.select(r["id"].as_str().map(str::to_string));
+        }
         if undo {
             self.run("history.undo", json!({}));
         }
@@ -173,6 +433,13 @@ impl EditorApp {
             ui.selectable_value(&mut self.pass, Pass::Depth, "Depth");
             ui.selectable_value(&mut self.pass, Pass::Normal, "Normal");
             ui.separator();
+            ui.toggle_value(&mut self.snap, "Snap")
+                .on_hover_text("Snap dragged blocks to a grid (hold Ctrl to place freely)");
+            ui.add_enabled(
+                self.snap,
+                egui::DragValue::new(&mut self.snap_step).range(0.01..=5.0).speed(0.01).suffix(" m"),
+            );
+            ui.separator();
             let has_cam = camera_id_at(&self.scene(), self.frame()).is_some();
             ui.add_enabled_ui(has_cam, |ui| ui.toggle_value(&mut self.look_through, "Look through camera"));
             if !has_cam {
@@ -182,25 +449,41 @@ impl EditorApp {
     }
 
     fn outliner(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Add");
-        ui.horizontal_wrapped(|ui| {
-            let prims: [(&str, Value); 6] = [
-                ("Cube", json!({"shape": "cube", "size": [1, 1, 1]})),
-                ("Sphere", json!({"shape": "sphere", "radius": 0.5, "segments": 24, "rings": 12})),
-                ("Cylinder", json!({"shape": "cylinder", "radius": 0.5, "height": 1, "segments": 24})),
-                ("Cone", json!({"shape": "cone", "radius": 0.5, "height": 1, "segments": 24})),
-                ("Plane", json!({"shape": "plane", "size": [4, 4]})),
-                ("Torus", json!({"shape": "torus", "majorRadius": 0.5, "minorRadius": 0.15, "majorSegments": 32, "minorSegments": 12})),
-            ];
-            for (label, p) in prims {
-                if ui.button(label).clicked() {
-                    let y = if label == "Plane" { 0.0 } else { 0.5 };
-                    if let Some(r) = self.run("entity.create", json!({"type": "mesh", "primitive": p, "position": [0, y, 0]})) {
-                        self.select(r["id"].as_str().map(str::to_string));
+        ui.heading("Blocks");
+        ui.weak("Drag into the scene, or click to drop in the middle.");
+        let (shapes, props) = palette();
+        for (title, blocks) in [("Props (real size)", props), ("Shapes", shapes)] {
+            ui.label(title);
+            egui::Grid::new(title).num_columns(3).spacing([4.0, 4.0]).show(ui, |ui| {
+                for (i, b) in blocks.iter().enumerate() {
+                    let r = ui
+                        .add(
+                            egui::Button::new(b.label()).min_size(Vec2::new(62.0, 30.0)).sense(Sense::click_and_drag()),
+                        )
+                        .on_hover_cursor(CursorIcon::Grab);
+                    if r.drag_started() {
+                        let key = self.new_key("new");
+                        self.palette = Some(PaletteDrag { block: b.clone(), spawned: None, key });
+                    }
+                    if r.clicked() {
+                        let key = self.new_key("new");
+                        if let Some(id) = self.spawn(b, &key) {
+                            if let Some((rect, view)) = self.last_view {
+                                self.place_on_ray(&key, &id, ray_at(rect, &view, rect.center()), Vec3::ZERO, false);
+                            } else {
+                                self.run_key(&key, "entity.place", json!({"id": id}));
+                            }
+                            self.select(Some(id));
+                        }
+                    }
+                    if i % 3 == 2 {
+                        ui.end_row();
                     }
                 }
-            }
-            if ui.button("Camera").clicked() {
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui.button("+ Camera").clicked() {
                 let eye = self.orbit.eye();
                 if let Some(r) = self.run("entity.create", json!({"type": "camera", "position": eye.to_array()})) {
                     let id = r["id"].as_str().unwrap_or_default().to_string();
@@ -208,7 +491,7 @@ impl EditorApp {
                     self.select(Some(id));
                 }
             }
-            if ui.button("Empty").clicked()
+            if ui.button("+ Empty").clicked()
                 && let Some(r) = self.run("entity.create", json!({"type": "empty"}))
             {
                 self.select(r["id"].as_str().map(str::to_string));
@@ -271,6 +554,10 @@ impl EditorApp {
             if ui.checkbox(&mut visible, "Visible").changed() {
                 self.run("entity.setVisible", json!({"id": id, "visible": visible}));
             }
+            let mut locked = e.locked;
+            if ui.checkbox(&mut locked, "Locked").on_hover_text("Drags in the viewport pass through it").changed() {
+                self.run("entity.setLocked", json!({"id": id, "locked": locked}));
+            }
             if ui.button("Duplicate").clicked()
                 && let Some(r) = self.run("entity.duplicate", json!({"id": id}))
             {
@@ -280,6 +567,66 @@ impl EditorApp {
                 self.run("entity.delete", json!({"id": id}));
             }
         });
+
+        if !matches!(e.kind, EntityKind::Camera(_)) {
+            ui.separator();
+            ui.strong("Place");
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Drop to surface").on_hover_text("entity.place").clicked() {
+                    self.run("entity.place", json!({"id": id, "frame": frame}));
+                }
+                if ui.button("↺ 45°").clicked() {
+                    self.run("entity.rotate", json!({"id": id, "degrees": 45, "frame": frame}));
+                }
+                if ui.button("↻ 45°").clicked() {
+                    self.run("entity.rotate", json!({"id": id, "degrees": -45, "frame": frame}));
+                }
+                if let Some(cam) = camera_id_at(&scene, frame)
+                    && ui.button("Face camera").on_hover_text("entity.face").clicked()
+                {
+                    self.run("entity.face", json!({"id": id, "target": cam, "frame": frame}));
+                }
+            });
+
+            ui.separator();
+            ui.strong("Frame it");
+            ui.weak("Moves the active camera (or adds one) and looks through it.");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("frame_angle").selected_text(self.frame_angle).show_ui(ui, |ui| {
+                    for a in ["eyeLevel", "high", "low", "birdsEye", "wormsEye"] {
+                        ui.selectable_value(&mut self.frame_angle, a, a);
+                    }
+                });
+                egui::ComboBox::from_id_salt("frame_side").selected_text(self.frame_side).show_ui(ui, |ui| {
+                    for a in ["front", "frontLeft", "left", "backLeft", "back", "backRight", "right", "frontRight"] {
+                        ui.selectable_value(&mut self.frame_side, a, a);
+                    }
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                for (label, size) in [
+                    ("ECU", "extremeCloseUp"),
+                    ("CU", "closeUp"),
+                    ("MCU", "mediumCloseUp"),
+                    ("MS", "medium"),
+                    ("MFS", "mediumFull"),
+                    ("FS", "full"),
+                    ("WS", "wide"),
+                    ("EWS", "extremeWide"),
+                ] {
+                    if ui.button(label).on_hover_text(size).clicked() {
+                        let mut p = json!({"subject": id, "size": size, "angle": self.frame_angle, "side": self.frame_side, "frame": frame});
+                        if let Some(cam) = camera_id_at(&scene, frame) {
+                            p["camera"] = json!(cam);
+                        }
+                        if self.run("camera.frame", p).is_some() {
+                            self.look_through = true;
+                            self.hub.borrow_mut().look_through = true;
+                        }
+                    }
+                }
+            });
+        }
 
         ui.separator();
         ui.strong("Transform");
@@ -336,7 +683,7 @@ impl EditorApp {
                     if r.clicked() {
                         self.gesture += 1;
                     }
-                    if c != *color {
+                    if r.changed() && c != *color {
                         self.run_merged(&format!("color:{id}"), "mesh.setColor", json!({"id": id, "color": c}));
                     }
                 });
@@ -536,54 +883,313 @@ impl EditorApp {
             }
         };
 
-        // Navigation (orbit view only) and picking.
-        if cam.is_none() {
-            if resp.dragged_by(egui::PointerButton::Primary) && !ui.input(|i| i.modifiers.shift) {
-                let d = resp.drag_delta();
-                self.orbit.yaw -= d.x * 0.008;
-                self.orbit.pitch = (self.orbit.pitch + d.y * 0.008).clamp(-1.5, 1.5);
+        self.last_view = Some((rect, view));
+        let (pointer, modifiers, scroll, esc, released) = ui.input(|i| {
+            (
+                i.pointer.hover_pos(),
+                i.modifiers,
+                i.smooth_scroll_delta.y,
+                i.key_pressed(egui::Key::Escape),
+                i.pointer.any_released(),
+            )
+        });
+        let inside = pointer.filter(|p| rect.contains(*p));
+        let eye = view.view.inverse().w_axis.truncate();
+        let clean = cam.is_some();
+
+        // 1. Blocks dragged in from the palette: spawn on entering, follow the pointer, keep on
+        //    release inside the viewport, undo when released outside or on Esc.
+        if let Some(pd) = self.palette.as_mut() {
+            let mut finish = None;
+            if let Some(p) = inside {
+                if pd.spawned.is_none() {
+                    let (block, key) = (pd.block.clone(), pd.key.clone());
+                    let id = self.spawn(&block, &key);
+                    if let Some(pd) = self.palette.as_mut() {
+                        pd.spawned = id;
+                    }
+                }
+                if let Some(pd) = &self.palette
+                    && let Some(id) = &pd.spawned
+                {
+                    self.place_on_ray(&pd.key, id, ray_at(rect, &view, p), Vec3::ZERO, modifiers.command);
+                    self.hovered = None;
+                }
             }
-            if resp.dragged_by(egui::PointerButton::Secondary)
+            let pd = self.palette.as_ref().expect("checked above");
+            if released || esc {
+                finish = Some((inside.is_some() && !esc, pd.spawned.clone()));
+            }
+            if let Some((keep, spawned)) = finish {
+                match (keep, spawned) {
+                    (true, Some(id)) => self.select(Some(id)),
+                    (false, Some(_)) => {
+                        self.run("history.undo", json!({}));
+                    }
+                    _ => {}
+                }
+                self.palette = None;
+            } else if let Some(p) = pointer {
+                let painter =
+                    ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("block_drag")));
+                let label = pd.block.label();
+                let r = Rect::from_min_size(p + Vec2::new(14.0, 10.0), Vec2::new(8.0 + 7.0 * label.len() as f32, 20.0));
+                painter.rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(40, 40, 46, 230));
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            }
+        }
+
+        // 2. Gizmo handles of the selection (hidden in the clean camera view).
+        let selected = self.selected().filter(|s| scene.contains(s));
+        let gizmo = selected.as_ref().filter(|s| !clean && !scene.get(s).is_ok_and(|e| e.locked)).and_then(|id| {
+            let o = world_at(&scene, id, f).ok()?.w_axis.truncate();
+            let len = (eye - o).length().max(0.1) * 0.14;
+            let c = project(rect, &view, o)?;
+            let axes: Vec<Option<Pos2>> =
+                [Vec3::X, Vec3::Y, Vec3::Z].iter().map(|a| project(rect, &view, o + *a * len)).collect();
+            let ring: Vec<Pos2> = (0..=48)
+                .filter_map(|i| {
+                    let t = i as f32 / 48.0 * std::f32::consts::TAU;
+                    project(rect, &view, o + Vec3::new(t.cos(), 0.0, t.sin()) * len * 0.8)
+                })
+                .collect();
+            Some((id.clone(), o, len, c, axes, ring))
+        });
+        let handle_at = |p: Pos2| -> Option<Handle> {
+            let (_, _, _, c, axes, ring) = gizmo.as_ref()?;
+            if (p - (*c + Vec2::new(30.0, -30.0))).length() < 8.0 {
+                return Some(Handle::Scale);
+            }
+            for (i, a) in axes.iter().enumerate() {
+                if let Some(a) = a
+                    && seg_dist(p, *c, *a) < 7.0
+                    && (p - *c).length() > 6.0
+                {
+                    return Some(Handle::Axis(i));
+                }
+            }
+            ring.windows(2).any(|w| seg_dist(p, w[0], w[1]) < 5.0).then_some(Handle::Ring)
+        };
+        if matches!(self.drag, Gesture::Idle) {
+            self.hot_handle = inside.and_then(handle_at);
+        }
+
+        // 3. Hover highlight (whole group unless a part of it is selected).
+        if self.palette.is_none() && matches!(self.drag, Gesture::Idle) {
+            self.hovered = inside.filter(|_| self.hot_handle.is_none()).and_then(|p| {
+                let (o, d) = ray_at(rect, &view, p);
+                let hit = pick_grabbable(&scene, f, o, d)?;
+                let root = root_of(&scene, &hit);
+                let in_group =
+                    selected.as_ref().is_some_and(|s| *s != root && spatial::subtree(&scene, &root).contains(s));
+                Some(if in_group { hit } else { root })
+            });
+        }
+
+        // 4. Drags in the viewport.
+        if self.palette.is_none() {
+            let primary = resp.drag_started_by(egui::PointerButton::Primary);
+            if primary && let Some(start) = ui.input(|i| i.pointer.press_origin()).filter(|p| rect.contains(*p)) {
+                let (o, d) = ray_at(rect, &view, start);
+                self.drag = if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
+                    let key = self.new_key("gizmo");
+                    match h {
+                        Handle::Axis(i) => {
+                            let axis = [Vec3::X, Vec3::Y, Vec3::Z][i];
+                            let t0 = closest_on_line(*origin, axis, o, d).unwrap_or(0.0);
+                            Gesture::Axis { id: id.clone(), axis, start: *origin, t0, key }
+                        }
+                        Handle::Ring => {
+                            let c = gizmo.as_ref().map(|g| g.3).unwrap_or(start);
+                            Gesture::Ring { id: id.clone(), last: (-(start.y - c.y)).atan2(start.x - c.x), key }
+                        }
+                        Handle::Scale => Gesture::Scale { id: id.clone(), key },
+                    }
+                } else if let Some(hit) = pick_grabbable(&scene, f, o, d) {
+                    // grab the group, or the selected part of it
+                    let root = root_of(&scene, &hit);
+                    let mut target = match &selected {
+                        Some(s) if spatial::subtree(&scene, &root).contains(s) => s.clone(),
+                        _ => root,
+                    };
+                    let key = self.new_key("move");
+                    if modifiers.alt
+                        && let Some(r) =
+                            self.run_key(&key, "entity.duplicate", json!({"id": target, "offset": [0, 0, 0]}))
+                        && let Some(copy) = r["id"].as_str()
+                    {
+                        target = copy.to_string();
+                    }
+                    self.select(Some(target.clone()));
+                    // Hold the object where it was grabbed: the pointer moves on the horizontal
+                    // plane through the grab point, and the object drops onto what is below.
+                    let scene = self.scene();
+                    let grab = raycast(&scene, f, o, d, &RayOptions::default())
+                        .map(|h| Vec3::from_array(h.point))
+                        .unwrap_or(o + d * 5.0);
+                    let centre = spatial::bounds(&scene, &target, f).ok().flatten().map(|b| b.center()).unwrap_or(grab);
+                    let offset = Vec3::new(centre.x - grab.x, 0.0, centre.z - grab.z);
+                    Gesture::Move { id: target, grab, offset, key, lift: None }
+                } else if cam.is_none() {
+                    Gesture::Navigate
+                } else {
+                    Gesture::Idle
+                };
+            }
+            if esc && !matches!(self.drag, Gesture::Idle | Gesture::Navigate | Gesture::Cancelled) {
+                self.run("history.undo", json!({}));
+                self.drag = Gesture::Cancelled;
+            }
+            let ptr = pointer.unwrap_or(rect.center());
+            let (o, d) = ray_at(rect, &view, ptr);
+            match self.drag.clone() {
+                Gesture::Move { id, grab, offset, key, lift } if resp.dragged() => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    if modifiers.shift {
+                        // lift straight up: follow the pointer along the vertical line through the object
+                        let base = lift.map(|l| l.0).unwrap_or_else(|| {
+                            world_at(&scene, &id, f).map(|m| m.w_axis.truncate()).unwrap_or_default()
+                        });
+                        let t0 = lift.map(|l| l.1).or_else(|| closest_on_line(base, Vec3::Y, o, d)).unwrap_or(0.0);
+                        if let Some(t) = closest_on_line(base, Vec3::Y, o, d) {
+                            let mut p =
+                                json!({"id": id, "position": (base + Vec3::Y * (t - t0)).to_array(), "frame": f});
+                            if is_animated(&scene, &id) {
+                                p["keyframeAt"] = json!(f.round());
+                            }
+                            self.run_key(&key, "entity.moveTo", p);
+                        }
+                        self.drag = Gesture::Move { id, grab, offset, key, lift: Some((base, t0)) };
+                    } else {
+                        let t = if d.y.abs() > 1e-4 { (grab.y - o.y) / d.y } else { -1.0 };
+                        if t > 0.0 && t < 500.0 {
+                            let q = o + d * t + offset;
+                            let down = (Vec3::new(q.x, grab.y + 0.01, q.z), Vec3::NEG_Y);
+                            self.place_on_ray(&key, &id, down, Vec3::ZERO, modifiers.command);
+                        } else {
+                            self.place_on_ray(&key, &id, (o, d), offset, modifiers.command);
+                        }
+                        self.drag = Gesture::Move { id: id.clone(), grab, offset, key: key.clone(), lift: None };
+                        if scroll != 0.0 {
+                            self.run_key(
+                                &key,
+                                "entity.rotate",
+                                json!({"id": id, "degrees": scroll.signum() * 15.0, "frame": f}),
+                            );
+                        }
+                    }
+                }
+                Gesture::Axis { id, axis, start, t0, key } if resp.dragged() => {
+                    if let Some(t) = closest_on_line(start, axis, o, d) {
+                        let mut step = t - t0;
+                        if self.snap && !modifiers.command {
+                            step = (step / self.snap_step).round() * self.snap_step;
+                        }
+                        let mut p = json!({"id": id, "position": (start + axis * step).to_array(), "frame": f});
+                        if is_animated(&scene, &id) {
+                            p["keyframeAt"] = json!(f.round());
+                        }
+                        self.run_key(&key, "entity.moveTo", p);
+                    }
+                }
+                Gesture::Ring { id, last, key } if resp.dragged() => {
+                    if let Some((.., c, _, _)) = gizmo.as_ref() {
+                        let a = (-(ptr.y - c.y)).atan2(ptr.x - c.x);
+                        let mut delta = (a - last).to_degrees();
+                        if delta > 180.0 {
+                            delta -= 360.0;
+                        } else if delta < -180.0 {
+                            delta += 360.0;
+                        }
+                        // seen from below, screen rotation is mirrored
+                        let sign = if eye.y >= gizmo.as_ref().map(|g| g.1.y).unwrap_or(0.0) { 1.0 } else { -1.0 };
+                        self.run_key(&key, "entity.rotate", json!({"id": id, "degrees": delta * sign, "frame": f}));
+                        self.drag = Gesture::Ring { id, last: a, key };
+                    }
+                }
+                Gesture::Scale { id, key } if resp.dragged() => {
+                    let dd = resp.drag_delta();
+                    let k = (1.0 + (dd.x - dd.y) * 0.006).clamp(0.5, 2.0);
+                    if let Ok(t) = local_at(&scene, &id, f) {
+                        let sc = (t.scale() * k).to_array();
+                        let mut p = json!({"id": id, "scale": sc});
+                        if is_animated(&scene, &id) {
+                            p["keyframeAt"] = json!(f.round());
+                        }
+                        self.run_key(&key, "entity.setTransform", p);
+                    }
+                }
+                Gesture::Navigate if resp.dragged_by(egui::PointerButton::Primary) && !modifiers.shift => {
+                    let d = resp.drag_delta();
+                    self.orbit.yaw -= d.x * 0.008;
+                    self.orbit.pitch = (self.orbit.pitch + d.y * 0.008).clamp(-1.5, 1.5);
+                }
+                _ => {}
+            }
+            if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                self.drag = Gesture::Idle;
+            }
+        }
+        if cam.is_none() && self.palette.is_none() {
+            let pan = resp.dragged_by(egui::PointerButton::Secondary)
                 || resp.dragged_by(egui::PointerButton::Middle)
-                || (resp.dragged_by(egui::PointerButton::Primary) && ui.input(|i| i.modifiers.shift))
-            {
+                || (matches!(self.drag, Gesture::Navigate)
+                    && resp.dragged_by(egui::PointerButton::Primary)
+                    && modifiers.shift);
+            if pan {
                 let d = resp.drag_delta();
                 let inv = self.orbit.view().inverse();
-                let right = inv.x_axis.xyz();
-                let up = inv.y_axis.xyz();
                 let k = self.orbit.distance * 0.0015;
-                self.orbit.target += (-right * d.x + up * d.y) * k;
+                self.orbit.target += (-inv.x_axis.xyz() * d.x + inv.y_axis.xyz() * d.y) * k;
             }
-            if resp.hovered() {
-                let s = ui.input(|i| i.smooth_scroll_delta.y);
-                if s != 0.0 {
-                    self.orbit.distance = (self.orbit.distance * (1.0 - s * 0.0015)).clamp(0.3, 500.0);
-                }
+            if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && scroll != 0.0 {
+                self.orbit.distance = (self.orbit.distance * (1.0 - scroll * 0.0015)).clamp(0.3, 500.0);
             }
         }
         if resp.clicked()
-            && let Some(pos) = resp.interact_pointer_pos()
-            && rect.contains(pos)
+            && let Some(pos) = resp.interact_pointer_pos().filter(|p| rect.contains(*p))
         {
-            let ndc = glam::Vec2::new(
-                (pos.x - rect.left()) / rect.width() * 2.0 - 1.0,
-                1.0 - (pos.y - rect.top()) / rect.height() * 2.0,
-            );
-            let inv = (view.proj * view.view).inverse();
-            let near = inv.project_point3(Vec3::new(ndc.x, ndc.y, 0.0));
-            let far = inv.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
-            self.select(pick(&scene, f, near, (far - near).normalize_or_zero()));
+            let (o, d) = ray_at(rect, &view, pos);
+            let sel = pick(&scene, f, o, d).map(|hit| {
+                let root = root_of(&scene, &hit);
+                // first click takes the whole group; clicking inside a selected group picks the part
+                match &selected {
+                    Some(s) if spatial::subtree(&scene, &root).contains(s) => hit,
+                    _ => root,
+                }
+            });
+            self.select(sel);
         }
+        if self.hovered.is_some() && matches!(self.drag, Gesture::Idle) && self.palette.is_none() {
+            ui.ctx().set_cursor_icon(CursorIcon::Grab);
+        }
+        if self.hot_handle.is_some() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        let scene = self.scene();
+        let dragged_id = match (&self.drag, &self.palette) {
+            (Gesture::Move { id, .. }, _) => Some(id.clone()),
+            (_, Some(PaletteDrag { spawned: Some(id), .. })) => Some(id.clone()),
+            _ => None,
+        };
 
         let ppp = ui.ctx().pixels_per_point();
         let px = ((rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32);
         // Looking through the shot camera shows the clean reference frame: no grid, no gizmos.
-        let clean = cam.is_some();
         let overlay = Overlay {
             selected: if clean { None } else { self.selected() },
             grid: !clean,
             cameras: !clean,
             looking_through: cam.clone(),
+            hovered: if clean { None } else { self.hovered.clone() },
+            footprint: dragged_id,
         };
         let pass = self.pass;
         let (Some(rs), Some(renderer)) = (frame.wgpu_render_state(), self.renderer.as_mut()) else {
@@ -633,11 +1239,40 @@ impl EditorApp {
                 egui::FontId::monospace(12.0),
                 Color32::from_white_alpha(180),
             );
-        } else {
+        }
+        if let Some((_, _, _, c, axes, ring)) = &gizmo {
+            let hot = self.hot_handle;
+            let active = match &self.drag {
+                Gesture::Axis { axis, .. } => Some(Handle::Axis(axis.abs().max_position())),
+                Gesture::Ring { .. } => Some(Handle::Ring),
+                Gesture::Scale { .. } => Some(Handle::Scale),
+                _ => None,
+            };
+            let lit = |h: Handle| hot == Some(h) || active == Some(h);
+            let ring_c = if lit(Handle::Ring) {
+                Color32::from_rgb(255, 230, 120)
+            } else {
+                Color32::from_rgba_unmultiplied(230, 200, 90, 170)
+            };
+            painter.add(egui::Shape::line(ring.clone(), (if lit(Handle::Ring) { 3.0 } else { 1.5 }, ring_c)));
+            let colors =
+                [Color32::from_rgb(235, 80, 80), Color32::from_rgb(110, 210, 90), Color32::from_rgb(80, 140, 255)];
+            for (i, a) in axes.iter().enumerate() {
+                if let Some(a) = a {
+                    let w = if lit(Handle::Axis(i)) { 4.0 } else { 2.5 };
+                    let col = if lit(Handle::Axis(i)) { Color32::WHITE } else { colors[i] };
+                    painter.line_segment([*c, *a], (w, col));
+                    painter.circle_filled(*a, 5.0, col);
+                }
+            }
+            let sq = Rect::from_center_size(*c + Vec2::new(30.0, -30.0), Vec2::splat(10.0));
+            painter.rect_filled(sq, 1.0, if lit(Handle::Scale) { Color32::WHITE } else { Color32::from_gray(200) });
+        }
+        if !clean {
             painter.text(
                 full.left_bottom() + Vec2::new(8.0, -8.0),
                 egui::Align2::LEFT_BOTTOM,
-                "drag: orbit · shift/right-drag: pan · scroll: zoom · click: select",
+                "drag block in · drag object: slide on surfaces · Shift: lift · Alt: copy · wheel while dragging / R: turn · Ctrl: no snap · Esc: cancel · empty drag: orbit · right-drag: pan · scroll: zoom",
                 egui::FontId::proportional(11.0),
                 Color32::from_white_alpha(110),
             );

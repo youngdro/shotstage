@@ -5,6 +5,8 @@
 //! Parameters are untrusted: bad input returns a [`CommandError`], never a panic.
 
 mod builtin;
+mod placement;
+pub mod snapshot;
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;

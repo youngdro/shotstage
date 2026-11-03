@@ -163,3 +163,78 @@ fn merged_edits_share_one_undo_step() {
     run(&mut s, "history.undo", json!({}));
     assert!(s.scene().entities.is_empty());
 }
+
+#[test]
+fn blocks_rest_on_each_other() {
+    let mut s = Session::default();
+    let table = run(&mut s, "prefab.create", json!({"kind": "table", "position": [2, 5, 0]}));
+    assert_eq!(table["id"], "table_1");
+    // dropped from 5 m onto the floor
+    let b = run(&mut s, "entity.bounds", json!({"id": "table_1"}));
+    assert!(b["min"][1].as_f64().unwrap().abs() < 1e-4, "{b}");
+    assert!((b["max"][1].as_f64().unwrap() - 0.75).abs() < 1e-4);
+    // a crate on the table top, then a lamp next to the table, seen from a camera
+    run(&mut s, "prefab.create", json!({"kind": "crate", "id": "box"}));
+    let r = run(&mut s, "entity.place", json!({"id": "box", "on": "table_1"}));
+    assert_eq!(r["restingOn"], "table_1_top");
+    assert!((r["position"][1].as_f64().unwrap() - 0.75).abs() < 1e-4, "{r}");
+    run(&mut s, "entity.create", json!({"type": "camera", "id": "cam", "position": [2, 1.6, 6]}));
+    run(&mut s, "camera.lookAt", json!({"id": "cam", "target": "table_1"}));
+    run(&mut s, "prefab.create", json!({"kind": "lamp", "id": "lamp"}));
+    let r = run(
+        &mut s,
+        "entity.place",
+        json!({"id": "lamp", "nextTo": "table_1", "side": "left", "view": "cam", "gap": 0.1}),
+    );
+    assert!(r["position"][0].as_f64().unwrap() < 1.3, "lamp left of the table on screen: {r}");
+    // drag: a ray from above the table lands on its top; the same merge key is one undo step
+    for x in [1.8, 2.0, 2.2] {
+        let req = json!({"command": "entity.place", "merge": "drag-1",
+            "params": {"id": "box", "ray": {"origin": [x, 3, 0], "direction": [0, -1, 0]}, "snap": 0.1}});
+        s.dispatch_json(req).unwrap();
+    }
+    let p = run(&mut s, "entity.get", json!({"id": "box"}))["transform"]["translation"].clone();
+    assert!((p[0].as_f64().unwrap() - 2.2).abs() < 1e-4 && (p[1].as_f64().unwrap() - 0.75).abs() < 1e-4, "{p}");
+    run(&mut s, "history.undo", json!({}));
+    let p = run(&mut s, "entity.get", json!({"id": "box"}))["transform"]["translation"].clone();
+    assert!((p[0].as_f64().unwrap() - 2.0).abs() < 1e-3, "drag undone in one step: {p}");
+    // bad combinations are rejected without changing anything
+    let rev = s.revision();
+    assert!(s.dispatch("entity.place", json!({"id": "box", "on": "table_1", "nextTo": "lamp"})).is_err());
+    assert!(s.dispatch("entity.place", json!({"id": "table_1", "on": "table_1_top"})).is_err());
+    assert_eq!(s.revision(), rev);
+}
+
+#[test]
+fn frame_by_shot_size_and_turn() {
+    let mut s = Session::default();
+    run(&mut s, "prefab.create", json!({"kind": "person", "id": "hero"}));
+    let r = run(&mut s, "camera.frame", json!({"subject": "hero", "size": "medium", "side": "frontLeft"}));
+    assert_eq!(r["camera"], "camera_1", "a camera is created when there is none");
+    assert_eq!(r["describe"]["shotSize"], "medium shot");
+    assert_eq!(s.scene().active_camera.as_deref(), Some("camera_1"));
+    let r = run(&mut s, "camera.frame", json!({"subject": "hero", "size": "wide", "angle": "high"}));
+    assert_eq!(r["describe"]["shotSize"], "wide shot");
+    assert_eq!(r["describe"]["angle"], "high angle");
+    run(&mut s, "entity.face", json!({"id": "hero", "target": [5, 0, 0]}));
+    let e = run(&mut s, "entity.get", json!({"id": "hero"}));
+    let rot = glam::Quat::from_array(serde_json::from_value(e["transform"]["rotation"].clone()).unwrap());
+    assert!((rot * glam::Vec3::Z - glam::Vec3::X).length() < 1e-4, "{e}");
+    run(&mut s, "entity.rotate", json!({"id": "hero", "degrees": 90}));
+    let hit = run(&mut s, "scene.raycast", json!({"origin": [0, 1.6, 3], "direction": [0, 0, -1]}));
+    assert_eq!(hit["id"], "hero_head");
+    assert!(run(&mut s, "prefab.list", json!({})).as_array().unwrap().len() >= 10);
+}
+
+#[test]
+fn duplicate_copies_groups() {
+    let mut s = Session::default();
+    run(&mut s, "prefab.create", json!({"kind": "chair", "id": "chair"}));
+    let r = run(&mut s, "entity.duplicate", json!({"id": "chair", "offset": [1, 0, 0]}));
+    assert_eq!(r["id"], "chair_1");
+    let n = s.scene().entities.len();
+    assert_eq!(n, 2 * 7);
+    assert_eq!(s.scene().get("chair_1_seat").unwrap().parent.as_deref(), Some("chair_1"));
+    let again = run(&mut s, "entity.duplicate", json!({"id": "chair"}));
+    assert_eq!(s.scene().entities.len(), 3 * 7, "{again}");
+}

@@ -12,5 +12,6 @@ path = "src/main.rs"
 [dependencies]
 shotstage-core.workspace = true
 shotstage-commands.workspace = true
+shotstage-render.workspace = true
 serde_json.workspace = true
 clap = { version = "4", features = ["derive"] }

@@ -343,3 +343,155 @@ impl Renderer {
         queue.submit([enc.finish()]);
     }
 }
+
+/// A copy of the colour target in a mappable buffer (rows padded to 256 bytes).
+pub struct Readback {
+    pub buffer: wgpu::Buffer,
+    pub width: u32,
+    pub height: u32,
+    padded_row: u32,
+}
+
+impl Renderer {
+    /// Queue a copy of the last render into a buffer. Map it with `buffer.map_async`, then
+    /// call [`Readback::rgba`] once mapped.
+    pub fn readback(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Readback> {
+        let target = self.target.as_ref()?;
+        let (width, height) = target.size;
+        let padded_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shotstage readback"),
+            size: padded_row as u64 * height as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        queue.submit([enc.finish()]);
+        Some(Readback { buffer, width, height, padded_row })
+    }
+}
+
+impl Readback {
+    /// Tightly packed RGBA8 rows (the buffer must be mapped); unmaps the buffer.
+    pub fn rgba(&self) -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity((self.width * self.height * 4) as usize);
+        {
+            let data = self.buffer.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+            for row in data.chunks(self.padded_row as usize).take(self.height as usize) {
+                out.extend_from_slice(&row[..(self.width * 4) as usize]);
+            }
+        }
+        self.buffer.unmap();
+        Ok(out)
+    }
+}
+
+/// Encode RGBA8 pixels as PNG.
+pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().map_err(|e| e.to_string())?;
+        w.write_image_data(rgba).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+pub fn base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Overlay for exported frames: the clean camera view, nothing drawn on top.
+pub fn clean_overlay(camera: &str) -> Overlay {
+    Overlay { looking_through: Some(camera.to_string()), ..Default::default() }
+}
+
+/// Render to PNG on the calling thread (native only: blocks until the GPU is done).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+pub fn render_png_blocking(
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &Scene,
+    frame: f32,
+    view: View,
+    pass: Pass,
+    overlay: &Overlay,
+    size: (u32, u32),
+) -> Result<Vec<u8>, String> {
+    renderer.render(device, queue, scene, frame, view, pass, overlay, size);
+    let rb = renderer.readback(device, queue).ok_or("nothing rendered")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    rb.buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    encode_png(&rb.rgba()?, rb.width, rb.height)
+}
+
+/// A GPU device without a window, for the CLI and MCP server.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Headless {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub renderer: Renderer,
+    pub adapter: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Headless {
+    pub fn new() -> Result<Self, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .map_err(|e| format!("no GPU adapter: {e}"))?;
+        let info = adapter.get_info();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+            .map_err(|e| format!("GPU device: {e}"))?;
+        let renderer = Renderer::new(&device);
+        Ok(Self { device, queue, renderer, adapter: format!("{} ({:?})", info.name, info.backend) })
+    }
+
+    pub fn png(
+        &mut self,
+        scene: &Scene,
+        frame: f32,
+        view: View,
+        pass: Pass,
+        camera: &str,
+        size: (u32, u32),
+    ) -> Result<Vec<u8>, String> {
+        render_png_blocking(
+            &mut self.renderer,
+            &self.device,
+            &self.queue,
+            scene,
+            frame,
+            view,
+            pass,
+            &clean_overlay(camera),
+            size,
+        )
+    }
+}

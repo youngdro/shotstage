@@ -6,6 +6,7 @@
 //! shotstage batch steps.json --scene shot.json
 //! shotstage serve --scene shot.json          # JSON lines on stdin/stdout
 //! shotstage mcp --scene shot.json            # MCP server on stdio
+//! shotstage snapshot --scene shot.json -o frame.png --pass depth
 //! ```
 
 mod mcp;
@@ -16,8 +17,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
-use shotstage_commands::{Call, CommandError, Session};
+use shotstage_commands::snapshot::{SNAPSHOT_COMMAND, SnapshotPass, plan, result_json};
+use shotstage_commands::{Call, CommandError, Outcome, Session};
 use shotstage_core::Scene;
+use shotstage_render::{Headless, Pass, View};
 
 #[derive(Parser)]
 #[command(
@@ -64,6 +67,71 @@ enum Cmd {
         #[command(flatten)]
         scene: SceneArgs,
     },
+    /// Render the view through a camera to a PNG file (needs a GPU or a software Vulkan driver).
+    Snapshot {
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Output PNG path.
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Camera id. Default: the camera in use at the frame.
+        #[arg(long)]
+        camera: Option<String>,
+        #[arg(long)]
+        frame: Option<f32>,
+        /// clay, depth or normal.
+        #[arg(long, default_value = "clay")]
+        pass: String,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+    },
+}
+
+/// Lazily created GPU for `render.snapshot`.
+#[derive(Default)]
+pub(crate) struct Gpu(Option<Headless>);
+
+impl Gpu {
+    fn snapshot_png(&mut self, scene: &Scene, params: Value) -> Result<(Value, Vec<u8>), CommandError> {
+        let plan = plan(scene, params, None)?;
+        if self.0.is_none() {
+            self.0 = Some(Headless::new().map_err(|e| CommandError::new("unsupported", e))?);
+        }
+        let gpu = self.0.as_mut().expect("just set");
+        let pass = match plan.pass {
+            SnapshotPass::Clay => Pass::Clay,
+            SnapshotPass::Depth => Pass::Depth,
+            SnapshotPass::Normal => Pass::Normal,
+        };
+        let view = View { view: plan.view, proj: plan.proj, depth_near: 0.0, depth_far: 0.0 };
+        let png = gpu
+            .png(scene, plan.frame, view, pass, &plan.camera, (plan.width, plan.height))
+            .map_err(|e| CommandError::new("failed", e))?;
+        Ok((result_json(&plan, shotstage_render::base64(&png)), png))
+    }
+
+    /// Like `Session::dispatch`, but renders `render.snapshot` here.
+    pub(crate) fn dispatch(
+        &mut self,
+        session: &mut Session,
+        command: &str,
+        params: Value,
+    ) -> Result<Outcome, CommandError> {
+        if command == SNAPSHOT_COMMAND {
+            let (result, _) = self.snapshot_png(session.scene(), params)?;
+            return Ok(Outcome { result, revision: session.revision(), changed: false });
+        }
+        session.dispatch(command, params)
+    }
+
+    pub(crate) fn dispatch_json(&mut self, session: &mut Session, request: Value) -> Result<Outcome, CommandError> {
+        if request.get("command").and_then(Value::as_str) == Some(SNAPSHOT_COMMAND) {
+            return self.dispatch(session, SNAPSHOT_COMMAND, request.get("params").cloned().unwrap_or(json!({})));
+        }
+        session.dispatch_json(request)
+    }
 }
 
 #[derive(clap::Args)]
@@ -150,7 +218,7 @@ fn real_main() -> Result<ExitCode, String> {
                 Some(p) => serde_json::from_str(&read_arg(&p)?).map_err(|e| format!("params are not JSON: {e}"))?,
                 None => json!({}),
             };
-            finish(session.dispatch(&command, params), &mut session, &scene)
+            finish(Gpu::default().dispatch(&mut session, &command, params), &mut session, &scene)
         }
         Cmd::Batch { file, scene } => {
             let mut session = scene.open()?;
@@ -163,12 +231,13 @@ fn real_main() -> Result<ExitCode, String> {
             let mut session = scene.open()?;
             let stdin = std::io::stdin();
             let mut out = std::io::stdout().lock();
+            let mut gpu = Gpu::default();
             for line in stdin.lock().lines() {
                 let line = line.map_err(|e| e.to_string())?;
                 if line.trim().is_empty() {
                     continue;
                 }
-                let reply = serve_line(&mut session, &line, &scene);
+                let reply = serve_line(&mut session, &mut gpu, &line, &scene);
                 writeln!(out, "{reply}").map_err(|e| e.to_string())?;
                 out.flush().map_err(|e| e.to_string())?;
             }
@@ -178,6 +247,25 @@ fn real_main() -> Result<ExitCode, String> {
             let session = scene.open()?;
             mcp::serve(session, scene.scene.clone().filter(|_| !scene.dry_run))?;
             Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Snapshot { scene, out, camera, frame, pass, width, height } => {
+            let session = scene.open()?;
+            let params = json!({ "camera": camera, "frame": frame, "pass": pass, "width": width, "height": height });
+            let params = Value::Object(
+                params.as_object().cloned().unwrap_or_default().into_iter().filter(|(_, v)| !v.is_null()).collect(),
+            );
+            match Gpu::default().snapshot_png(session.scene(), params) {
+                Ok((mut meta, png)) => {
+                    std::fs::write(&out, png).map_err(|e| format!("writing {}: {e}", out.display()))?;
+                    meta["data"] = json!(out.display().to_string());
+                    print_json(&json!({ "ok": true, "result": meta }));
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    print_json(&error_json(&e));
+                    Ok(ExitCode::from(1))
+                }
+            }
         }
     }
 }
@@ -204,7 +292,7 @@ fn finish(
 
 /// One JSON-lines request: `{"id": 1, "command": "...", "params": {...}}` or
 /// `{"id": 1, "batch": [...]}`. The reply echoes `id`.
-fn serve_line(session: &mut Session, line: &str, scene: &SceneArgs) -> Value {
+fn serve_line(session: &mut Session, gpu: &mut Gpu, line: &str, scene: &SceneArgs) -> Value {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => return error_json(&CommandError::invalid(format!("request is not JSON: {e}"))),
@@ -214,7 +302,7 @@ fn serve_line(session: &mut Session, line: &str, scene: &SceneArgs) -> Value {
     if let Some(o) = body.as_object_mut() {
         o.remove("id");
     }
-    let mut reply = match session.dispatch_json(body) {
+    let mut reply = match gpu.dispatch_json(session, body) {
         Ok(o) => {
             let saved = if o.changed { scene.save(session).err() } else { None };
             json!({ "ok": true, "result": o.result, "revision": o.revision, "changed": o.changed, "saveError": saved })

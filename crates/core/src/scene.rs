@@ -102,6 +102,10 @@ pub struct Entity {
     pub transform: Transform,
     #[serde(default = "yes")]
     pub visible: bool,
+    /// Locked entities (a floor, a backdrop) can be selected but not dragged in the viewport,
+    /// so dragging on them orbits the view. Commands still edit them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
     pub kind: EntityKind,
 }
 

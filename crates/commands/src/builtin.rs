@@ -16,7 +16,7 @@ use shotstage_core::{
 
 use crate::{CmdResult, Command, CommandError, command};
 
-fn finite3(v: [f32; 3], what: &str) -> CmdResult<Vec3> {
+pub(crate) fn finite3(v: [f32; 3], what: &str) -> CmdResult<Vec3> {
     if v.iter().all(|x| x.is_finite() && x.abs() < 1e6) {
         Ok(Vec3::from_array(v))
     } else {
@@ -24,7 +24,7 @@ fn finite3(v: [f32; 3], what: &str) -> CmdResult<Vec3> {
     }
 }
 
-fn color(v: [f32; 3]) -> CmdResult<[f32; 3]> {
+pub(crate) fn color(v: [f32; 3]) -> CmdResult<[f32; 3]> {
     if v.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)) {
         Ok(v)
     } else {
@@ -32,7 +32,7 @@ fn color(v: [f32; 3]) -> CmdResult<[f32; 3]> {
     }
 }
 
-fn frame_ok(f: f32) -> CmdResult<f32> {
+pub(crate) fn frame_ok(f: f32) -> CmdResult<f32> {
     if f.is_finite() && (-100_000.0..=1_000_000.0).contains(&f) {
         Ok(f)
     } else {
@@ -40,7 +40,7 @@ fn frame_ok(f: f32) -> CmdResult<f32> {
     }
 }
 
-fn summary_of(e: &Entity) -> Value {
+pub(crate) fn summary_of(e: &Entity) -> Value {
     json!({
         "id": e.id, "name": e.name, "type": e.kind.type_name(), "parent": e.parent,
         "visible": e.visible,
@@ -67,7 +67,7 @@ fn camera_mut<'a>(scene: &'a mut Scene, id: &str) -> CmdResult<&'a mut CameraDat
     }
 }
 
-fn pick_camera(scene: &Scene, id: Option<String>, frame: f32) -> CmdResult<String> {
+pub(crate) fn pick_camera(scene: &Scene, id: Option<String>, frame: f32) -> CmdResult<String> {
     id.or_else(|| shotstage_core::eval::camera_id_at(scene, frame))
         .ok_or_else(|| CommandError::new("failed", "no camera given and the scene has no active camera"))
 }
@@ -76,7 +76,7 @@ fn pick_camera(scene: &Scene, id: Option<String>, frame: f32) -> CmdResult<Strin
 
 #[derive(Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
-struct NoParams {}
+pub(crate) struct NoParams {}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +132,8 @@ struct CreateParams {
     color: Option<[f32; 3]>,
     /// For cameras: make it the active camera. Default: true when no camera is active.
     make_active: Option<bool>,
+    /// Can't be dragged in the viewport (floors, backdrops). Default false.
+    locked: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -179,6 +181,13 @@ struct ParentParams {
     id: String,
     /// New parent id, or null for the scene root.
     parent: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct LockedParams {
+    id: String,
+    locked: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -260,7 +269,7 @@ struct LensParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(untagged)]
-enum Target {
+pub(crate) enum Target {
     /// Another entity's id.
     Entity(String),
     /// A world-space point, metres.
@@ -380,7 +389,7 @@ struct DollyMoveParams {
 
 // ---------------------------------------------------------------- handlers
 
-fn target_point(scene: &Scene, t: &Target, frame: f32) -> CmdResult<Vec3> {
+pub(crate) fn target_point(scene: &Scene, t: &Target, frame: f32) -> CmdResult<Vec3> {
     Ok(match t {
         Target::Entity(id) => world_at(scene, id, frame)?.w_axis.truncate(),
         Target::Point(p) => finite3(*p, "target")?,
@@ -438,7 +447,8 @@ fn create(scene: &mut Scene, p: CreateParams) -> CmdResult<Value> {
     }
     let is_cam = matches!(kind, EntityKind::Camera(_));
     let name = p.name.unwrap_or_else(|| id.clone());
-    scene.insert(Entity { id: id.clone(), name, parent: p.parent, transform: t, visible: true, kind })?;
+    let locked = p.locked.unwrap_or(false);
+    scene.insert(Entity { id: id.clone(), name, parent: p.parent, transform: t, visible: true, locked, kind })?;
     if is_cam && p.make_active.unwrap_or(scene.active_camera.is_none()) {
         scene.active_camera = Some(id.clone());
     }
@@ -610,15 +620,40 @@ pub fn registry() -> Vec<Command> {
         command!("entity.create", "Create a mesh (primitive or explicit geometry), camera or empty.", mutates: true, CreateParams, create),
         command!("entity.delete", "Delete an entity and its children.", mutates: true, IdParams,
             |s, p| Ok(json!({ "deleted": s.remove(&p.id)? }))),
-        command!("entity.duplicate", "Copy an entity (not its children).", mutates: true, DuplicateParams,
+        command!("entity.duplicate", "Copy an entity with its children (a whole prefab group) and their animation.", mutates: true, DuplicateParams,
         |s, p| {
-            let mut e = s.get(&p.id)?.clone();
-            e.id = match p.new_id { Some(id) => id, None => s.unique_id(&p.id) };
             let off = finite3(p.offset.unwrap_or([0.5, 0.0, 0.0]), "offset")?;
-            e.transform.translation = (e.transform.translation() + off).to_array();
-            let id = e.id.clone();
-            s.insert(e)?;
-            Ok(json!({ "id": id }))
+            let ids = shotstage_core::spatial::subtree(s, &p.id);
+            let new_root = match p.new_id { Some(id) => { validate_id(&id)?; id } None => s.unique_id(&p.id) };
+            let mut map = std::collections::HashMap::new();
+            map.insert(p.id.clone(), new_root.clone());
+            for id in &ids[1..] {
+                // `<root>_<part>` becomes `<newRoot>_<part>` so groups stay readable
+                let stem = id.strip_prefix(&format!("{}_", p.id)).map(|rest| format!("{new_root}_{rest}")).unwrap_or_else(|| id.clone());
+                let fresh = if s.contains(&stem) || map.values().any(|v| *v == stem) { s.unique_id(&stem) } else { stem };
+                map.insert(id.clone(), fresh);
+            }
+            for id in &ids {
+                let mut e = s.get(id)?.clone();
+                e.id = map[id].clone();
+                if id == &p.id {
+                    e.transform.translation = (e.transform.translation() + off).to_array();
+                } else {
+                    e.parent = e.parent.as_ref().map(|par| map.get(par).cloned().unwrap_or_else(|| par.clone()));
+                }
+                s.insert(e)?;
+            }
+            let tracks: Vec<_> = s.timeline.tracks.iter().filter(|t| map.contains_key(&t.entity)).cloned().collect();
+            for mut t in tracks {
+                if t.entity == p.id && t.property == TrackProperty::Transform {
+                    for k in &mut t.keys {
+                        if let KeyValue::Transform(tr) = &mut k.value { tr.translation = (tr.translation() + off).to_array(); }
+                    }
+                }
+                t.entity = map[&t.entity].clone();
+                s.timeline.tracks.push(t);
+            }
+            Ok(json!({ "id": new_root, "entities": ids.len() }))
         }),
         command!("entity.rename", "Change an entity's display name (the id stays).", mutates: true, RenameParams,
         |s, p| {
@@ -639,6 +674,8 @@ pub fn registry() -> Vec<Command> {
             |s, p| { s.set_parent(&p.id, p.parent.as_deref())?; Ok(Value::Null) }),
         command!("entity.setVisible", "Show or hide an entity.", mutates: true, VisibleParams,
             |s, p| { s.get_mut(&p.id)?.visible = p.visible; Ok(Value::Null) }),
+        command!("entity.setLocked", "Lock an entity so viewport drags pass through it (floors, backdrops); commands still edit it.", mutates: true, LockedParams,
+            |s, p| { s.get_mut(&p.id)?.locked = p.locked; Ok(Value::Null) }),
         // meshes
         command!("mesh.setPrimitive", "Change a mesh's primitive parameters (size, segments...).", mutates: true, PrimitiveParams,
             |s, p| { p.primitive.build()?; let (src, _, _) = mesh_parts(s, &p.id)?; *src = MeshSource::Primitive { primitive: p.primitive }; Ok(Value::Null) }),
@@ -790,4 +827,7 @@ pub fn registry() -> Vec<Command> {
             Ok(Value::Null)
         }),
     ]
+    .into_iter()
+    .chain(crate::placement::commands())
+    .collect()
 }

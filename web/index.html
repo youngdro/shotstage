@@ -14,7 +14,7 @@
 </head>
 <body>
   <div id="app">
-    <header>shotstage demo host page · the editor below is mounted into <code>#stage</code>; try <code>shotstage.dispatch(...)</code> in the console</header>
+    <header>shotstage demo host page · the editor below is mounted into <code>#stage</code>; try <code>shotstage.dispatch(...)</code> or <code>await shotstage.snapshot()</code> in the console</header>
     <div id="stage"></div>
   </div>
   <script type="module">
@@ -23,16 +23,22 @@
     const editor = await mount("#stage", {});
     window.shotstage = editor;   // optional global for agents and the devtools console
 
-    // A small starter scene, built through the same API agents use.
+    // A small starter scene, built through the same API agents use: real-size blocks that
+    // rest on each other, and a camera framed by shot size instead of coordinates.
     editor.batch([
-      { command: "entity.create", params: { type: "mesh", id: "floor", primitive: { shape: "plane", size: [12, 12] }, color: [0.5, 0.5, 0.52] } },
-      { command: "entity.create", params: { type: "mesh", id: "actor", name: "Actor", primitive: { shape: "cube", size: [0.5, 1.7, 0.3] }, position: [0, 0.85, 0], color: [0.85, 0.6, 0.45] } },
-      { command: "entity.create", params: { type: "mesh", id: "table", primitive: { shape: "cylinder", radius: 0.6, height: 0.75, segments: 32 }, position: [1.4, 0.375, -0.6] } },
-      { command: "entity.create", params: { type: "mesh", id: "lamp", primitive: { shape: "sphere", radius: 0.25, segments: 24, rings: 12 }, position: [1.4, 0.95, -0.6], color: [0.95, 0.9, 0.6] } },
-      { command: "entity.create", params: { type: "camera", id: "cam_a", name: "Cam A", position: [0.5, 1.5, 5.5] } },
-      { command: "camera.lookAt", params: { id: "cam_a", target: "actor" } },
-      { command: "camera.dollyMove", params: { id: "cam_a", distance: 1.5, start: 0, end: 72 } },
-      { command: "camera.orbitMove", params: { id: "cam_a", target: "actor", degrees: 45, start: 72, end: 119 } },
+      { command: "entity.create", params: { type: "mesh", id: "floor", primitive: { shape: "plane", size: [12, 12] }, color: [0.5, 0.5, 0.52], locked: true } },
+      { command: "prefab.create", params: { kind: "person", id: "actor", name: "Actor", position: [0, 0, 0] } },
+      { command: "prefab.create", params: { kind: "table", id: "table", position: [1.3, 0, -0.7] } },
+      { command: "prefab.create", params: { kind: "chair", id: "chair", position: [1.3, 0, 0], rotationY: 180 } },
+      { command: "prefab.create", params: { kind: "lamp", id: "lamp", position: [1.6, 0, -0.8] } },
+      { command: "entity.place", params: { id: "lamp", nextTo: "table", side: "right", gap: 0.15 } },
+      { command: "prefab.create", params: { kind: "crate", id: "box", scale: 0.4 } },
+      { command: "entity.place", params: { id: "box", on: "table" } },
+      { command: "prefab.create", params: { kind: "doorway", id: "door", position: [0, 0, -2.5] } },
+      { command: "entity.create", params: { type: "camera", id: "cam_a", name: "Cam A" } },
+      { command: "camera.frame", params: { camera: "cam_a", subject: "actor", size: "full", side: "frontRight" } },
+      { command: "camera.dollyMove", params: { id: "cam_a", distance: 1.2, start: 0, end: 72 } },
+      { command: "camera.orbitMove", params: { id: "cam_a", target: "actor", degrees: 40, start: 72, end: 119 } },
       { command: "shot.create", params: { camera: "cam_a", start: 0, end: 119, name: "push-in" } },
     ]);
     editor.on(ev => { if (ev.type === "change") console.debug("shotstage change", ev.revision); });

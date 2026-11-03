@@ -8,7 +8,20 @@
 | --- | --- |
 | ![look through](docs/images/look-through.png) | ![depth](docs/images/depth-pass.png) |
 
-> 状态：M0 骨架。场景、网格与修改器、相机、时间线关键帧、命令系统、CLI、MCP、可嵌入的网页编辑器已经可用；离屏导出（mp4 / 控制图序列）、glTF 导入、人偶、变换 gizmo 在后续里程碑。
+> 状态：M0 + 积木式搭景。场景、网格与修改器、相机、时间线关键帧、命令系统、CLI、MCP、可嵌入的网页编辑器、拖拽摆放、真实尺寸预制件、按景别构图、截图已经可用；离屏导出（mp4 / 控制图序列）、glTF 导入、可摆姿态的人偶在后续里程碑。
+
+## 像搭积木一样搭场景
+
+- **从左侧素材栏拖进视口**：物体落在鼠标下的表面上，可能是地面、桌面或别的物体顶上；拖出视口松手或按 Esc 就取消。单击素材则放到画面中间。
+- **真实尺寸预制件**：人偶 1.72 m、餐桌、椅子、沙发、床、楼梯、墙、门洞、车、树、落地灯、箱子。它们都是一个组，整组一起拖动；在已选中的组里再点一次，可以选中单个部件。
+- **直接拖动场景里的物体**：物体沿表面滑动，并且始终停在鼠标下面。**Shift** 竖直抬高；**Alt** 拖动时复制整组；拖动中滚动滚轮或按 **R** 旋转 15°（Shift+R 反向）；默认按 0.25 m 吸附网格，按住 **Ctrl** 可自由摆放；**Esc** 撤回这次拖动。拖动时会显示落点的投影。
+- **专业手柄**：选中物体后出现 X/Y/Z 移动轴、水平旋转环和等比缩放方块，可以精确调整。
+- **锁定**：地面、背景这类物体可以勾选 Locked，在它们上面拖动会旋转视角，不会把它们拖走。
+- **景别构图**：选中主体后，在右侧 "Frame it" 选角度（平视、俯、仰、鸟瞰、虫视）和方位（正面、侧面、背面等），再点 ECU / CU / MCU / MS / MFS / FS / WS / EWS，镜头就会自动就位，并切换到镜头视角。
+
+![Frame it：点 MS 后镜头自动构成中景](docs/images/frame-it.png)
+
+每一次拖动只算一步撤销，背后调用的是 `entity.place`、`entity.moveTo`、`entity.rotate`、`prefab.create`、`camera.frame` 这些命令，agent 可以用完全相同的方式操作。
 
 ## 结构
 
@@ -49,6 +62,7 @@ editor.commands();                 // 全部命令 + 参数 JSON Schema
 editor.scene();                    // 场景文档（保存它，下次 mount 时传回）
 const sub = editor.on(ev => {});   // { type: "change" | "command", revision, request }
 editor.off(sub);
+const shot = await editor.snapshot({ pass: "depth", width: 1024 }); // 透过镜头截图：{ dataUrl, data(base64), width, height, ... }
 editor.destroy();                  // 停止渲染并移除 canvas
 ```
 
@@ -66,6 +80,7 @@ shotstage run entity.create '{"type":"mesh","primitive":{"shape":"sphere","radiu
 shotstage batch steps.json -s shot.json          # [{"command": ..., "params": ...}, ...]
 shotstage serve -s shot.json                     # 常驻会话：stdin/stdout 每行一个 JSON 请求
 shotstage mcp -s shot.json                       # MCP（stdio），改动自动写回 shot.json
+shotstage snapshot -s shot.json -o frame.png --pass depth   # 透过镜头渲染 PNG（需要 GPU 或软件 Vulkan，如 lavapipe）
 ```
 
 `serve` 的每行请求格式为 `{"id": 1, "command": "...", "params": {...}}` 或 `{"id": 2, "batch": [...]}`，回复会带回同一个 `id`。
@@ -76,20 +91,22 @@ shotstage mcp -s shot.json                       # MCP（stdio），改动自动
 claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json
 ```
 
-MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch`、`scene_save` 四个通用工具。
+MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch`、`scene_save` 四个通用工具。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图。
 
-## 命令目录（M0）
+## 命令目录
 
 | 分组 | 命令 |
 | --- | --- |
 | 会话 | `command.list` `history.undo` `history.redo` `history.info` |
-| 场景 | `scene.inspect` `scene.summary` `scene.new` `scene.load` `scene.evaluate` |
-| 实体 | `entity.create` `entity.delete` `entity.duplicate` `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` |
+| 场景 | `scene.inspect` `scene.summary` `scene.new` `scene.load` `scene.evaluate` `scene.raycast` |
+| 积木摆放 | `prefab.create` `prefab.list` `entity.place`（`ray` 落到射线击中处 / `on` 放到某物顶上 / `nextTo`+`side`(+`view` 按镜头左右) 并排 / 不带参数时落到正下方）`entity.moveTo` `entity.rotate` `entity.face` `entity.bounds` |
+| 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
-| 相机 | `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
+| 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
+| 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.delete` |
 
-约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，相机朝 -Z 看。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。
+约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。
 
 参数一律当作不可信输入处理：缺字段、类型错误、越界或未知字段都会返回错误，场景保持不变。
 
@@ -104,7 +121,7 @@ cargo run -p shotstage-app [scene.json]          # 原生编辑器
 
 ## 路线图
 
-- **M1 场景编辑**：glTF/GLB 导入、变换 gizmo、关节式人偶与姿态预设、更多网格命令
+- **M1 场景编辑**：glTF/GLB 导入、关节式人偶与姿态预设、按名字引用物体、防穿插、更多网格命令
 - **M2 镜头与时间线**：时间线 UI（关键帧拖拽、曲线）、相机支架（轨道 / 摇臂）、更多命名运镜
 - **M3 导出**：离屏逐帧渲染，导出首尾帧、mp4、深度 / 法线 / OpenPose / ID 序列，以及导出包
 - **M4 Agent**：`render_frame` 返回图片、MCP 实时桥（agent 驱动用户打开的网页编辑器）、权限分级

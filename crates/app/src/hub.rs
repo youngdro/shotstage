@@ -6,7 +6,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use serde_json::{Value, json};
+use shotstage_commands::snapshot::{SNAPSHOT_COMMAND, SnapshotPass, SnapshotPlan};
 use shotstage_commands::{CommandError, Outcome, Session};
+use shotstage_render::{Pass, Renderer, View};
 
 pub type Listener = Rc<dyn Fn(&Value)>;
 
@@ -23,6 +25,47 @@ pub struct Hub {
     pub pass: shotstage_render::Pass,
     /// Viewport shows the shot camera instead of the free orbit view.
     pub look_through: bool,
+    /// GPU of the editor window, used for snapshots.
+    pub(crate) gpu: Option<eframe::egui_wgpu::RenderState>,
+    /// Offscreen renderer for snapshots (separate from the viewport's).
+    pub(crate) snap_renderer: Option<Renderer>,
+    /// Snapshots waiting for the GPU (the UI polls the device while > 0).
+    pub(crate) pending_snapshots: u32,
+}
+
+pub(crate) fn render_pass(p: SnapshotPass) -> Pass {
+    match p {
+        SnapshotPass::Clay => Pass::Clay,
+        SnapshotPass::Depth => Pass::Depth,
+        SnapshotPass::Normal => Pass::Normal,
+    }
+}
+
+impl Hub {
+    /// Plan a snapshot and draw it into the snapshot renderer; returns what to read back.
+    pub(crate) fn draw_snapshot(
+        &mut self,
+        params: Value,
+    ) -> Result<(SnapshotPlan, eframe::egui_wgpu::RenderState, shotstage_render::Readback), CommandError> {
+        let plan = shotstage_commands::snapshot::plan(self.session.scene(), params, Some(self.frame))?;
+        let rs = self.gpu.clone().ok_or_else(|| CommandError::new("unsupported", "the editor has no GPU"))?;
+        let renderer = self.snap_renderer.get_or_insert_with(|| Renderer::new(&rs.device));
+        let view = View { view: plan.view, proj: plan.proj, depth_near: 0.0, depth_far: 0.0 };
+        renderer.render(
+            &rs.device,
+            &rs.queue,
+            self.session.scene(),
+            plan.frame,
+            view,
+            render_pass(plan.pass),
+            &shotstage_render::clean_overlay(&plan.camera),
+            (plan.width, plan.height),
+        );
+        let rb = renderer
+            .readback(&rs.device, &rs.queue)
+            .ok_or_else(|| CommandError::new("failed", "nothing was rendered"))?;
+        Ok((plan, rs, rb))
+    }
 }
 
 pub type SharedHub = Rc<RefCell<Hub>>;
@@ -107,6 +150,9 @@ pub fn dispatch(hub: &SharedHub, request: Value) -> Result<Outcome, CommandError
         let mut h = hub.borrow_mut();
         let r = match editor_command(&mut h, &request) {
             Some(r) => r,
+            None if request.get("command").and_then(Value::as_str) == Some(SNAPSHOT_COMMAND) => {
+                snapshot_sync(&mut h, &request)
+            }
             None => h.session.dispatch_json(request.clone()),
         };
         let listeners: Vec<Listener> = h.listeners.iter().map(|(_, f)| f.clone()).collect();
@@ -123,6 +169,29 @@ pub fn dispatch(hub: &SharedHub, request: Value) -> Result<Outcome, CommandError
         }
     }
     result
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn snapshot_sync(h: &mut Hub, request: &Value) -> Result<Outcome, CommandError> {
+    let (plan, rs, rb) = h.draw_snapshot(request.get("params").cloned().unwrap_or(json!({})))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    rb.buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+        let _ = tx.send(r);
+    });
+    let fail = |e: String| CommandError::new("failed", e);
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| fail(e.to_string()))?;
+    rx.recv().map_err(|e| fail(e.to_string()))?.map_err(|e| fail(e.to_string()))?;
+    let png = shotstage_render::encode_png(&rb.rgba().map_err(fail)?, rb.width, rb.height).map_err(fail)?;
+    let result = shotstage_commands::snapshot::result_json(&plan, shotstage_render::base64(&png));
+    Ok(Outcome { result, revision: h.session.revision(), changed: false })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn snapshot_sync(_: &mut Hub, _: &Value) -> Result<Outcome, CommandError> {
+    Err(CommandError::new(
+        "unsupported",
+        "in the browser render.snapshot is asynchronous: use `await editor.snapshot(params)`",
+    ))
 }
 
 /// Convenience for the UI: run one command and log failures instead of returning them.

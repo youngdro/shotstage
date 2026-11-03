@@ -8,7 +8,10 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
+use shotstage_commands::snapshot::SNAPSHOT_COMMAND;
 use shotstage_commands::{Call, CommandInfo, Session};
+
+use crate::Gpu;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -77,8 +80,34 @@ fn text_result(v: &Value, is_error: bool) -> Value {
     })
 }
 
-fn call_tool(session: &mut Session, save_to: &Option<PathBuf>, name: &str, args: Value) -> Value {
+fn image_result(meta: &Value) -> Value {
+    let mut info = meta.clone();
+    let data = info.as_object_mut().and_then(|o| o.remove("data")).unwrap_or(Value::Null);
+    json!({
+        "content": [
+            {"type": "image", "data": data, "mimeType": "image/png"},
+            {"type": "text", "text": serde_json::to_string(&info).unwrap_or_default()},
+        ],
+        "isError": false,
+    })
+}
+
+fn call_tool(session: &mut Session, gpu: &mut Gpu, save_to: &Option<PathBuf>, name: &str, args: Value) -> Value {
     let list = session.list();
+    // Snapshots come back as an image the model can look at.
+    let snapshot_args = match name {
+        "render_snapshot" => Some(args.clone()),
+        "command_run" if args.get("command").and_then(Value::as_str) == Some(SNAPSHOT_COMMAND) => {
+            Some(args.get("params").cloned().unwrap_or(json!({})))
+        }
+        _ => None,
+    };
+    if let Some(a) = snapshot_args {
+        return match gpu.dispatch(session, SNAPSHOT_COMMAND, a) {
+            Ok(o) => image_result(&o.result),
+            Err(e) => text_result(&json!({"error": {"code": e.code, "message": e.message}}), true),
+        };
+    }
     let outcome = match name {
         "command_list" => {
             let f = args.get("filter").and_then(Value::as_str).unwrap_or("");
@@ -125,7 +154,7 @@ fn call_tool(session: &mut Session, save_to: &Option<PathBuf>, name: &str, args:
 }
 
 /// Handle one JSON-RPC message; `None` for notifications.
-pub fn handle(session: &mut Session, save_to: &Option<PathBuf>, msg: &Value) -> Option<Value> {
+pub fn handle(session: &mut Session, gpu: &mut Gpu, save_to: &Option<PathBuf>, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -134,14 +163,14 @@ pub fn handle(session: &mut Session, save_to: &Option<PathBuf>, msg: &Value) -> 
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "shotstage", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "shotstage is a 3D previs editor. Build a scene (entity_create, entity_setTransform, mesh_addModifier), place cameras (camera_lookAt, camera_describe), animate (keyframe_set, camera_dollyMove, camera_orbitMove) and read results (scene_summary, camera_trajectory). Every edit is undoable with history_undo. Units: metres, degrees, frames.",
+            "instructions": "shotstage is a 3D previs editor. Prefer the high-level tools: prefab_create (real-size person, table, chair, sofa, car...), entity_place (rest on / next to / drop), entity_face, camera_frame (shot size + angle + side), then look at the result with render_snapshot (returns an image) and camera_describe. Low-level tools (entity_create, entity_setTransform, mesh_*, keyframe_set, camera_dollyMove, camera_orbitMove) give exact control. Read the scene with scene_summary and entity_bounds. Every edit is undoable with history_undo. Units: metres, degrees, frames; +Y up, object fronts face +Z.",
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools(&session.list(), save_to.is_some())})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            Ok(call_tool(session, save_to, &name, args))
+            Ok(call_tool(session, gpu, save_to, &name, args))
         }
         m if m.starts_with("notifications/") => return None,
         m => Err(json!({"code": -32601, "message": format!("method not found: {m}")})),
@@ -156,13 +185,14 @@ pub fn handle(session: &mut Session, save_to: &Option<PathBuf>, msg: &Value) -> 
 pub fn serve(mut session: Session, save_to: Option<PathBuf>) -> Result<(), String> {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
+    let mut gpu = Gpu::default();
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&mut session, &save_to, &msg),
+            Ok(msg) => handle(&mut session, &mut gpu, &save_to, &msg),
             Err(e) => Some(
                 json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}}),
             ),
@@ -182,11 +212,15 @@ mod tests {
     #[test]
     fn mcp_round_trip() {
         let mut s = Session::default();
+        let mut g = Gpu::default();
         let init =
-            handle(&mut s, &None, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})).unwrap();
+            handle(&mut s, &mut g, &None, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+                .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "shotstage");
-        assert!(handle(&mut s, &None, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
-        let list = handle(&mut s, &None, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
+        assert!(
+            handle(&mut s, &mut g, &None, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none()
+        );
+        let list = handle(&mut s, &mut g, &None, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|t| t["name"] == "entity_create"));
         for t in tools {
@@ -196,6 +230,7 @@ mod tests {
         }
         let call = handle(
             &mut s,
+            &mut g,
             &None,
             &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "entity_create", "arguments": {"type": "camera", "position": [0, 1.6, 4]}}}),
@@ -205,6 +240,7 @@ mod tests {
         assert_eq!(s.scene().entities.len(), 1);
         let bad = handle(
             &mut s,
+            &mut g,
             &None,
             &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
             "params": {"name": "entity_delete", "arguments": {"id": "ghost"}}}),

@@ -4,6 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use shotstage_core::eval::{camera_data_at, world_at};
 use shotstage_core::mesh::evaluate_mesh;
+use shotstage_core::spatial::{self, RayOptions, is_hidden};
 use shotstage_core::{EntityKind, Scene};
 
 #[repr(C)]
@@ -31,6 +32,10 @@ pub struct Overlay {
     pub cameras: bool,
     /// Camera being looked through: its frustum is not drawn.
     pub looking_through: Option<String>,
+    /// Entity under the pointer (lightly highlighted with its children).
+    pub hovered: Option<String>,
+    /// Entity being dragged: its footprint and a drop line to the ground are drawn.
+    pub footprint: Option<String>,
 }
 
 #[derive(Default)]
@@ -42,35 +47,32 @@ pub struct Geometry {
 const SELECT: [f32; 3] = [1.0, 0.62, 0.18];
 const CAMERA: [f32; 3] = [0.35, 0.6, 1.0];
 
-fn is_hidden(scene: &Scene, id: &str) -> bool {
-    let mut cur = Some(id.to_string());
-    while let Some(c) = cur {
-        match scene.get(&c) {
-            Ok(e) if !e.visible => return true,
-            Ok(e) => cur = e.parent.clone(),
-            Err(_) => return true,
-        }
-    }
-    false
-}
-
 pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
     let mut g = Geometry::default();
     if overlay.grid {
         grid(&mut g.lines);
     }
+    let group = |id: &Option<String>| id.as_deref().map(|i| spatial::subtree(scene, i)).unwrap_or_default();
+    let (selected_set, hovered_set) = (group(&overlay.selected), group(&overlay.hovered));
     for (index, e) in scene.entities.iter().enumerate() {
         if is_hidden(scene, &e.id) {
             continue;
         }
         let Ok(world) = world_at(scene, &e.id, frame) else { continue };
-        let selected = overlay.selected.as_deref() == Some(e.id.as_str());
+        let selected = selected_set.contains(&e.id);
+        let hovered = !selected && hovered_set.contains(&e.id);
         match &e.kind {
             EntityKind::Mesh { source, modifiers, color } => {
                 let Ok(mesh) = evaluate_mesh(source, modifiers) else { continue };
                 let tri = mesh.triangulate(false);
                 let normal_m = world.inverse().transpose();
-                let c = if selected { mix(*color, SELECT, 0.45) } else { *color };
+                let c = if selected {
+                    mix(*color, SELECT, 0.45)
+                } else if hovered {
+                    mix(*color, [1.0; 3], 0.25)
+                } else {
+                    *color
+                };
                 for &i in &tri.indices {
                     let i = i as usize;
                     g.triangles.push(Vertex {
@@ -97,6 +99,24 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
             }
             _ => {}
         }
+    }
+    if let Some(id) = &overlay.footprint
+        && let Ok(Some(b)) = spatial::bounds(scene, id, frame)
+    {
+        // outline of the footprint where it rests, and a plumb line when it floats
+        let y = b.min.y + 0.005;
+        let c = [b.min, Vec3::new(b.max.x, y, b.min.z), Vec3::new(b.max.x, y, b.max.z), Vec3::new(b.min.x, y, b.max.z)];
+        let c = c.map(|p| Vec3::new(p.x, y, p.z));
+        for i in 0..4 {
+            line(&mut g.lines, c[i], c[(i + 1) % 4], SELECT);
+        }
+        let mid = Vec3::new(b.center().x, y, b.center().z);
+        if y > 0.02 {
+            line(&mut g.lines, mid, Vec3::new(mid.x, 0.0, mid.z), [0.6, 0.6, 0.6]);
+        }
+        let s = 0.08;
+        line(&mut g.lines, mid - Vec3::X * s, mid + Vec3::X * s, SELECT);
+        line(&mut g.lines, mid - Vec3::Z * s, mid + Vec3::Z * s, SELECT);
     }
     g
 }
@@ -143,49 +163,7 @@ fn frustum(out: &mut Vec<LineVertex>, world: Mat4, hfov: f32, vfov: f32, c: [f32
 
 /// Pick the mesh entity under a world-space ray (closest triangle hit).
 pub fn pick(scene: &Scene, frame: f32, origin: Vec3, dir: Vec3) -> Option<String> {
-    let mut best: Option<(f32, String)> = None;
-    for e in &scene.entities {
-        if is_hidden(scene, &e.id) {
-            continue;
-        }
-        let EntityKind::Mesh { source, modifiers, .. } = &e.kind else { continue };
-        let (Ok(world), Ok(mesh)) = (world_at(scene, &e.id, frame), evaluate_mesh(source, modifiers)) else { continue };
-        let inv = world.inverse();
-        let (o, d) = (inv.transform_point3(origin), inv.transform_vector3(dir));
-        let tri = mesh.triangulate(true);
-        for t in tri.indices.chunks(3) {
-            let v = |i: u32| Vec3::from_array(tri.positions[i as usize]);
-            if let Some(s) = ray_triangle(o, d, v(t[0]), v(t[1]), v(t[2])) {
-                let dist = world.transform_vector3(d * s).length();
-                if best.as_ref().is_none_or(|(b, _)| dist < *b) {
-                    best = Some((dist, e.id.clone()));
-                }
-            }
-        }
-    }
-    best.map(|(_, id)| id)
-}
-
-fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
-    let (e1, e2) = (b - a, c - a);
-    let p = d.cross(e2);
-    let det = e1.dot(p);
-    if det.abs() < 1e-9 {
-        return None;
-    }
-    let inv = 1.0 / det;
-    let s = o - a;
-    let u = s.dot(p) * inv;
-    if !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    let q = s.cross(e1);
-    let v = d.dot(q) * inv;
-    if v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    let t = e2.dot(q) * inv;
-    (t > 0.0).then_some(t)
+    spatial::raycast(scene, frame, origin, dir, &RayOptions::default())?.id
 }
 
 #[cfg(test)]
@@ -201,6 +179,7 @@ mod tests {
             parent: None,
             transform: Transform::default(),
             visible: true,
+            locked: false,
             kind: EntityKind::Mesh {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size: [1.0; 3] } },
                 modifiers: vec![],
@@ -214,6 +193,7 @@ mod tests {
             parent: None,
             transform: Transform { translation: [0.0, 0.0, 5.0], ..Default::default() },
             visible: true,
+            locked: false,
             kind: EntityKind::Camera(CameraData::default()),
         })
         .unwrap();

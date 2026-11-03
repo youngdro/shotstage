@@ -7,6 +7,7 @@ pub mod camera;
 pub mod eval;
 pub mod mesh;
 pub mod scene;
+pub mod spatial;
 pub mod timeline;
 
 pub use camera::{CameraData, Intrinsics};

@@ -253,6 +253,7 @@ mod tests {
             parent: None,
             transform: Transform::from_parts(Vec3::new(0.0, 0.85, 0.0), glam::Quat::IDENTITY, Vec3::ONE),
             visible: true,
+            locked: false,
             kind: EntityKind::Mesh {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size: [0.5, 1.7, 0.3] } },
                 modifiers: vec![],
@@ -268,6 +269,7 @@ mod tests {
             parent: None,
             transform: t,
             visible: true,
+            locked: false,
             kind: EntityKind::Camera(CameraData::default()),
         })
         .unwrap();

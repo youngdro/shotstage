@@ -38,6 +38,18 @@ fn err_js(e: CommandError) -> JsValue {
     obj.into()
 }
 
+/// The browser runs wasm on one thread; wgpu still asks callbacks to be `Send` when the
+/// fragile-send-sync feature is on, so this wrapper vouches for values that never leave it.
+struct SingleThread<T>(T);
+// SAFETY: wasm32 without atomics has a single thread; the value is only used on it.
+unsafe impl<T> Send for SingleThread<T> {}
+
+impl<T> SingleThread<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 /// One mounted editor.
 #[wasm_bindgen]
 pub struct Shotstage {
@@ -133,6 +145,11 @@ impl Shotstage {
     pub fn commands(&self) -> JsValue {
         let mut list = serde_json::to_value(self.hub.borrow().session.list()).unwrap_or(json!([]));
         if let Some(a) = list.as_array_mut() {
+            if let Some(snap) = a.iter_mut().find(|c| c["id"] == "render.snapshot") {
+                snap["summary"] = json!(
+                    "Render the view through a camera to a PNG. In the browser call `await editor.snapshot(params)`."
+                );
+            }
             for (id, summary) in EDITOR_COMMANDS {
                 a.push(json!({ "id": id, "summary": summary, "mutates": false, "params": {"type": "object"} }));
             }
@@ -164,6 +181,55 @@ impl Shotstage {
 
     pub fn off(&self, id: u32) -> bool {
         self.hub.borrow_mut().unsubscribe(id)
+    }
+
+    /// Render the view through a camera (same params as the `render.snapshot` command:
+    /// `{camera?, frame?, pass?: "clay"|"depth"|"normal", width?, height?}`). Resolves to
+    /// `{mimeType, data (base64 PNG), dataUrl, width, height, camera, frame, pass}`.
+    pub fn snapshot(&self, params: JsValue) -> js_sys::Promise {
+        let params = match from_js(&params) {
+            Ok(Value::Null) => json!({}),
+            Ok(v) => v,
+            Err(e) => return js_sys::Promise::reject(&e),
+        };
+        let drawn = self.hub.borrow_mut().draw_snapshot(params);
+        let (plan, rs, rb) = match drawn {
+            Ok(x) => x,
+            Err(e) => return js_sys::Promise::reject(&err_js(e)),
+        };
+        let hub = self.hub.clone();
+        let mut rb = Some(rb);
+        hub.borrow_mut().pending_snapshots += 1;
+        if let Some(ctx) = &hub.borrow().repaint {
+            ctx.request_repaint();
+        }
+        js_sys::Promise::new(&mut |resolve, reject| {
+            let (hub, plan) = (hub.clone(), plan.clone());
+            let rb = rb.take().expect("promise executor runs once");
+            let buffer = rb.buffer.clone();
+            let rb2 = rb;
+            let cell = SingleThread((hub, plan, rb2, resolve.clone(), reject.clone()));
+            buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+                let (hub, plan, rb2, resolve, reject) = cell.into_inner();
+                hub.borrow_mut().pending_snapshots -= 1;
+                let out = r.map_err(|e| e.to_string()).and_then(|_| {
+                    let rgba = rb2.rgba()?;
+                    shotstage_render::encode_png(&rgba, rb2.width, rb2.height)
+                });
+                match out {
+                    Ok(png) => {
+                        let b64 = shotstage_render::base64(&png);
+                        let mut v = shotstage_commands::snapshot::result_json(&plan, b64.clone());
+                        v["dataUrl"] = json!(format!("data:image/png;base64,{b64}"));
+                        let _ = resolve.call1(&JsValue::NULL, &to_js(&v));
+                    }
+                    Err(e) => {
+                        let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new(&format!("failed: {e}")).into());
+                    }
+                }
+            });
+            let _ = rs.device.poll(wgpu::PollType::Poll);
+        })
     }
 
     /// Stop the editor and remove its canvas from the container.
