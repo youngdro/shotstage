@@ -25,6 +25,30 @@ pub enum Interp {
     /// Smooth ease-in/ease-out between keys (the default: reads like a real camera move).
     #[default]
     Ease,
+    /// Start slowly, arrive at full speed.
+    EaseIn,
+    /// Leave at full speed, settle gently.
+    EaseOut,
+    /// Overshoot a little and settle back (a springy arrival).
+    Overshoot,
+}
+
+impl Interp {
+    /// Progress 0..1 between two keys for a time fraction `t` 0..1.
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Interp::Step => 0.0,
+            Interp::Linear => t,
+            Interp::Ease => ease(t),
+            Interp::EaseIn => t * t * t,
+            Interp::EaseOut => 1.0 - (1.0 - t).powi(3),
+            Interp::Overshoot => {
+                let (c1, c3) = (1.70158f32, 2.70158f32);
+                1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -111,11 +135,7 @@ impl Track {
         let i = self.keys.partition_point(|k| k.frame <= frame);
         let (a, b) = (&self.keys[i - 1], &self.keys[i]);
         let t = ((frame - a.frame) / (b.frame - a.frame)).clamp(0.0, 1.0);
-        let t = match a.interp {
-            Interp::Step => 0.0,
-            Interp::Linear => t,
-            Interp::Ease => ease(t),
-        };
+        let t = a.interp.apply(t);
         Some(blend(&a.value, &b.value, t))
     }
 

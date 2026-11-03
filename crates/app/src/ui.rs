@@ -18,25 +18,38 @@ enum Block {
     Shape(&'static str, Value, [f32; 3]),
     /// prefab kind, label, description
     Prefab(&'static str, &'static str, &'static str),
+    /// light kind, label, description
+    Light(&'static str, &'static str, &'static str),
+    /// lighting preset, label, description (click only)
+    LightPreset(&'static str, &'static str, &'static str),
 }
 
 impl Block {
     fn label(&self) -> &'static str {
         match self {
-            Block::Shape(l, ..) | Block::Prefab(_, l, _) => l,
+            Block::Shape(l, ..) | Block::Prefab(_, l, _) | Block::Light(_, l, _) | Block::LightPreset(_, l, _) => l,
         }
     }
     fn description(&self) -> &'static str {
         match self {
             Block::Shape(..) => "Basic shape (edit its size in Mesh / with mesh.setPrimitive)",
-            Block::Prefab(_, _, d) => d,
+            Block::Prefab(_, _, d) | Block::Light(_, _, d) | Block::LightPreset(_, _, d) => d,
         }
     }
+    /// Key of this block's palette thumbnail.
+    fn thumb_key(&self) -> Option<String> {
+        match self {
+            Block::Prefab(k, ..) => Some(format!("prefab:{k}")),
+            Block::Shape(l, ..) => Some(format!("shape:{l}")),
+            _ => None,
+        }
+    }
+
     fn matches(&self, filter: &str) -> bool {
         filter.is_empty() || {
             let key = match self {
                 Block::Shape(..) => "",
-                Block::Prefab(k, ..) => k,
+                Block::Prefab(k, ..) | Block::Light(k, ..) | Block::LightPreset(k, ..) => k,
             };
             self.label().to_lowercase().contains(filter)
                 || key.to_lowercase().contains(filter)
@@ -45,19 +58,319 @@ impl Block {
     }
 }
 
+/// What a scene-tree row asked for this frame.
+enum TreeAct {
+    /// id, add to the selection (Shift)
+    Pick(String, bool),
+    Visible(String, bool),
+    Locked(String, bool),
+    Rename(String, String),
+    Focus(String),
+    Duplicate(String),
+    Delete(String),
+}
+
+struct TreeCtx<'a> {
+    scene: &'a Scene,
+    selected: &'a Option<String>,
+    also: &'a [String],
+    /// (id, name being typed)
+    renaming: &'a mut Option<(String, String)>,
+    acts: Vec<TreeAct>,
+}
+
+fn tree_level(ui: &mut egui::Ui, cx: &mut TreeCtx, parent: Option<&str>) {
+    let scene = cx.scene;
+    for e in scene.children(parent) {
+        if scene.children(Some(&e.id)).next().is_none() {
+            tree_row(ui, cx, e);
+            continue;
+        }
+        // groups start folded; open the ones holding the selection
+        let id = ui.make_persistent_id(("tree", &e.id));
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+        if cx.selected.as_ref().is_some_and(|s| s != &e.id && spatial::subtree(scene, &e.id).contains(s)) {
+            state.set_open(true);
+        }
+        state.show_header(ui, |ui| tree_row(ui, cx, e)).body(|ui| tree_level(ui, cx, Some(&e.id)));
+    }
+}
+
+/// One row: icon and name (click selects, Shift+click adds, double-click renames, right-click
+/// for more), with show/lock toggles on the right (bright when hidden or locked).
+fn tree_row(ui: &mut egui::Ui, cx: &mut TreeCtx, e: &shotstage_core::Entity) {
+    let scene = cx.scene;
+    let joint = rig::is_joint(scene, &e.id);
+    let icon = match e.kind {
+        EntityKind::Mesh { .. } => "■",
+        EntityKind::Camera(_) => "◉",
+        EntityKind::Light(_) => "☀",
+        EntityKind::Image(_) => "▨",
+        EntityKind::Empty if joint => "•",
+        EntityKind::Empty => "▣",
+    };
+    if let Some((rid, buf)) = cx.renaming.as_mut()
+        && *rid == e.id
+    {
+        let r = ui.add(egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 8.0));
+        if r.lost_focus() {
+            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                cx.acts.push(TreeAct::Rename(e.id.clone(), buf.clone()));
+            }
+            *cx.renaming = None;
+        } else if !r.has_focus() {
+            r.request_focus();
+        }
+        return;
+    }
+    let on = cx.selected.as_deref() == Some(&e.id) || cx.also.contains(&e.id);
+    let active = if scene.active_camera.as_deref() == Some(&e.id) { " ★" } else { "" };
+    let text = format!("{icon} {}{active}", e.name);
+    let text = if e.visible { egui::RichText::new(text) } else { egui::RichText::new(text).weak() };
+    ui.horizontal(|ui| {
+        // toggles on the right, so the name gets what is left
+        let n = if joint { 1.0 } else { 2.0 };
+        let toggle_w = n * (18.0 + ui.spacing().item_spacing.x) + 6.0;
+        let r = ui
+            .allocate_ui_with_layout(
+                Vec2::new((ui.available_width() - toggle_w).max(40.0), 18.0),
+                egui::Layout::top_down_justified(egui::Align::LEFT),
+                |ui| ui.add(egui::Button::selectable(on, text).truncate()),
+            )
+            .inner;
+        if r.clicked() {
+            cx.acts.push(TreeAct::Pick(e.id.clone(), ui.input(|i| i.modifiers.shift)));
+        }
+        if r.double_clicked() && !joint {
+            *cx.renaming = Some((e.id.clone(), e.name.clone()));
+        }
+        r.context_menu(|ui| {
+            if ui.button("Focus").clicked() {
+                cx.acts.push(TreeAct::Focus(e.id.clone()));
+                ui.close();
+            }
+            if !joint {
+                if ui.button("Rename").clicked() {
+                    *cx.renaming = Some((e.id.clone(), e.name.clone()));
+                    ui.close();
+                }
+                if ui.button("Duplicate").clicked() {
+                    cx.acts.push(TreeAct::Duplicate(e.id.clone()));
+                    ui.close();
+                }
+            }
+            if ui.button(if e.visible { "Hide" } else { "Show" }).clicked() {
+                cx.acts.push(TreeAct::Visible(e.id.clone(), !e.visible));
+                ui.close();
+            }
+            if !joint {
+                if ui.button(if e.locked { "Unlock" } else { "Lock" }).clicked() {
+                    cx.acts.push(TreeAct::Locked(e.id.clone(), !e.locked));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Delete").clicked() {
+                    cx.acts.push(TreeAct::Delete(e.id.clone()));
+                    ui.close();
+                }
+            }
+        });
+        {
+            let small = |s: &str, active: bool| {
+                let t = egui::RichText::new(s).size(12.0);
+                egui::Button::new(if active { t } else { t.weak() }).frame(false).min_size(Vec2::new(18.0, 18.0))
+            };
+            if ui
+                .add(small(if e.visible { "👁" } else { "⊘" }, !e.visible))
+                .on_hover_text(if e.visible { "Hide" } else { "Show" })
+                .clicked()
+            {
+                cx.acts.push(TreeAct::Visible(e.id.clone(), !e.visible));
+            }
+            if !joint
+                && ui
+                    .add(small(if e.locked { "🔒" } else { "🔓" }, e.locked))
+                    .on_hover_text(if e.locked {
+                        "Unlock (drags pass through locked objects)"
+                    } else {
+                        "Lock: drags pass through it"
+                    })
+                    .clicked()
+            {
+                cx.acts.push(TreeAct::Locked(e.id.clone(), !e.locked));
+            }
+        }
+    });
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ScrollMode {
+    /// Trackpad: orbit; mouse wheel: zoom.
+    Auto,
+    Zoom,
+    Orbit,
+}
+
+/// Whether this frame's wheel input came from a trackpad (None: no wheel input). Native macOS
+/// says so; the web does not, so there fingers are told apart from a wheel by their sideways or
+/// fractional movement.
+fn wheel_from_trackpad(events: &[egui::Event]) -> Option<bool> {
+    let mut out = None;
+    for e in events {
+        if let egui::Event::MouseWheel { unit, delta, source, .. } = e {
+            let t = match source {
+                egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum => Some(true),
+                egui::MouseWheelSource::Wheel => Some(false),
+                _ if *unit != egui::MouseWheelUnit::Point => Some(false),
+                _ if delta.x != 0.0 || delta.y.fract() != 0.0 => Some(true),
+                // a big, whole, vertical step is a wheel notch; small ones keep the last guess
+                _ if delta.y.abs() >= 50.0 => Some(false),
+                _ => None,
+            };
+            out = t.or(out);
+        }
+    }
+    out
+}
+
+/// Offscreen renderer and texture of the shot-camera preview; `key` says what it last showed.
+struct Pip {
+    renderer: Renderer,
+    tex: Option<(egui::TextureId, u64)>,
+    key: Option<String>,
+    at: f64,
+    /// Where it was drawn last frame (None when hidden).
+    rect: Option<Rect>,
+}
+
+/// One entry of the quick-actions box.
+struct QuickItem {
+    label: String,
+    kind: &'static str,
+    hint: String,
+    run: QuickRun,
+}
+
+enum QuickRun {
+    Block(Block),
+    Template(&'static str, &'static str),
+    /// preset, target, subject
+    Motion(&'static shotstage_commands::motion::Preset, String, Option<String>),
+    /// person root, pose
+    Pose(String, &'static str),
+    /// a shot's first frame
+    Shot(u32),
+    LookThrough(String),
+    Select(String),
+    Action(QuickAction),
+}
+
+#[derive(Clone, Copy)]
+enum QuickAction {
+    Save,
+    Open,
+    Undo,
+    Redo,
+    New,
+    Shadows,
+    Focus,
+    Key,
+    Duplicate,
+    Delete,
+    CameraHere,
+    SaveFrame,
+    ExportBoard,
+    Play,
+    Start,
+    CameraView,
+    Board,
+    Preview,
+    FitTimeline,
+    SafeAreas,
+}
+
+/// `holdBasket` → `Hold basket`, `tPose` → `T pose`.
+fn humanize(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else if c.is_uppercase() {
+            out.push(' ');
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Order quick items for a query: label starts with it, then a word in the label does, then the
+/// label contains it, then the kind or hint does. Every word of the query must match somewhere.
+fn rank_quick(items: &[QuickItem], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let mut scored: Vec<(u8, usize)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            let label = it.label.to_lowercase();
+            let all = format!("{label} {} {}", it.kind.to_lowercase(), it.hint.to_lowercase());
+            if !words.iter().all(|w| all.contains(w)) {
+                return None;
+            }
+            let score = if q.is_empty() {
+                // nothing typed: what fits the selection first, blocks and templates last
+                match it.kind {
+                    "Pose" | "Motion" | "Camera move" => 1,
+                    "Action" => 2,
+                    "Shot" | "Camera" => 3,
+                    _ => 4,
+                }
+            } else if label.starts_with(&q) {
+                0
+            } else if label.split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(words[0])) {
+                1
+            } else if label.contains(&q) {
+                2
+            } else {
+                3
+            };
+            Some((score, i))
+        })
+        .collect();
+    scored.sort_by_key(|&(s, i)| (s, i));
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
 /// The one accent colour of the UI.
 const ACCENT: Color32 = Color32::from_rgb(70, 150, 255);
 
-const HELP: &str = "Blocks: drag from the left panel into the view (or click to drop in the middle).\n\
+const HELP: &str = "Quick actions: Cmd/Ctrl+K or / opens a search box for every block, move, pose, template and action.\n\
+Blocks: drag from the left panel into the view (or click to drop in the middle).\n\
 Object: click to select (a second click picks a part); drag to slide it over surfaces.\n\
 Shift+drag: lift · Alt+drag: copy · R / Shift+R or wheel while dragging: turn · Ctrl: no snap · Esc: cancel.\n\
 People: click a body part to select its joint, then drag the part to bend it, or turn the coloured rings.\n\
-View: drag empty space to orbit · right-drag or Shift+drag to pan · scroll or pinch to zoom · double-click to focus.\n\
-Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play.";
+View: drag empty space to orbit · right-drag or Shift+drag to pan · pinch or mouse wheel to zoom · trackpad two-finger scroll orbits (Shift: pan) · double-click or F to focus.\n\
+Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+C / X / V copy, cut, paste (also between scenes) · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus · Cmd/Ctrl+S save.\n\
+Several objects: Shift+click to add · Cmd/Ctrl+drag on empty space to box-select · Cmd/Ctrl+G group · Cmd/Ctrl+Shift+G ungroup.";
 
 /// A collapsible properties section.
 fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
     egui::CollapsingHeader::new(egui::RichText::new(title).strong()).id_salt(title).default_open(open).show(ui, add);
+}
+
+/// The joint a click on `hit` (at `point`) means: a person's body part's joint, or the nearest
+/// bone of an imported skeleton.
+fn joint_at(scene: &Scene, hit: &str, point: Vec3, frame: f32) -> Option<String> {
+    rig::joint_of(scene, hit).or_else(|| rig::joint_near(scene, hit, point, frame))
+}
+
+/// Mesh under a ray, with the point hit.
+fn pick_point(scene: &Scene, frame: f32, o: Vec3, d: Vec3) -> Option<(String, Vec3)> {
+    // the ray starts at the viewer: billboards are hit where they are drawn
+    let h = raycast(scene, frame, o, d, &RayOptions { eye: Some(o), ..Default::default() })?;
+    Some((h.id?, Vec3::from_array(h.point)))
 }
 
 /// The joint a drag on `joint`'s body part should turn: hands swing the forearm, feet the shin.
@@ -67,6 +380,71 @@ fn drive_joint(scene: &Scene, joint: &str) -> String {
         Some("wrist_l" | "wrist_r" | "ankle_l" | "ankle_r") => parent(joint).unwrap_or_else(|| joint.to_string()),
         _ => joint.to_string(),
     }
+}
+
+/// A view-cube axis on screen: (depth, position, label, colour, (yaw, pitch) to look along it).
+type CubeAxis<'a> = (f32, Pos2, &'a str, Color32, (f32, f32));
+
+/// A command id as words for the History menu.
+fn friendly(command: &str) -> String {
+    match command {
+        "entity.place" | "entity.moveTo" => "Move".into(),
+        "entity.rotate" => "Turn".into(),
+        "entity.setTransform" => "Edit transform".into(),
+        "entity.create" => "Add".into(),
+        "entity.delete" => "Delete".into(),
+        "entity.duplicate" => "Duplicate".into(),
+        "prefab.create" => "Add block".into(),
+        "pose.set" | "pose.aim" => "Pose".into(),
+        "motion.apply" => "Animate".into(),
+        "keyframe.set" => "Key".into(),
+        "keyframe.move" => "Retime key".into(),
+        "keyframe.retime" => "Retime animation".into(),
+        "entity.paste" => "Paste".into(),
+        "shot.cut" => "Cut".into(),
+        "keyframe.delete" => "Delete key".into(),
+        "camera.frame" => "Frame shot".into(),
+        "model.import" => "Import model".into(),
+        "image.import" => "Add picture".into(),
+        "light.preset" => "Lighting preset".into(),
+        "scene.template" => "Template".into(),
+        "keyframe.setInterp" => "Easing".into(),
+        "entity.rename" => "Rename".into(),
+        "entity.setVisible" => "Show / hide".into(),
+        "entity.setLocked" => "Lock / unlock".into(),
+        "entity.group" => "Group".into(),
+        "entity.ungroup" => "Ungroup".into(),
+        "entity.align" | "entity.distribute" => "Arrange".into(),
+        "entity.attach" => "Hold in hand".into(),
+        "camera.lookAt" | "camera.setLens" | "camera.setActive" => "Camera".into(),
+        "shot.create" => "Add shot".into(),
+        "shot.set" => "Edit shot".into(),
+        "shot.delete" => "Delete shot".into(),
+        "light.set" => "Light".into(),
+        "scene.load" => "Open scene".into(),
+        "scene.new" => "New scene".into(),
+        "batch" => "Several changes".into(),
+        other => other.replace('.', " "),
+    }
+}
+
+/// What the thumbnail renderer creates for each palette block (with id `thumb`).
+fn thumb_items() -> Vec<(String, Value)> {
+    let mut out = vec![];
+    for (_, _, blocks) in palette() {
+        for b in blocks {
+            let Some(key) = b.thumb_key() else { continue };
+            let create = match &b {
+                Block::Prefab(kind, ..) => json!({"command": "prefab.create", "params": {"kind": kind, "id": "thumb"}}),
+                Block::Shape(_, prim, color) => {
+                    json!({"command": "entity.create", "params": {"type": "mesh", "id": "thumb", "primitive": prim, "color": color}})
+                }
+                _ => continue,
+            };
+            out.push((key, create));
+        }
+    }
+    out
 }
 
 /// Palette sections: title, open at start, blocks.
@@ -99,6 +477,31 @@ fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
         ("Fresh retail", true, of(Category::Retail)),
         ("Product shoot", true, of(Category::Product)),
         ("Furniture & set", false, of(Category::Furniture)),
+        (
+            "Lights",
+            false,
+            vec![
+                Block::Light("sun", "Sun", "Parallel sunlight; aim it to set the time of day"),
+                Block::Light("point", "Point", "A bare bulb: light in every direction"),
+                Block::Light("spot", "Spot", "A cone of light (stage light, rim light)"),
+                Block::Light("area", "Area", "A soft panel: softbox, window"),
+                Block::LightPreset(
+                    "threePoint",
+                    "3-point",
+                    "Key, fill and rim around the selection (or the whole scene)",
+                ),
+                Block::LightPreset("rembrandt", "Rembrandt", "One high side key light, moody"),
+                Block::LightPreset(
+                    "productSoftbox",
+                    "Product",
+                    "Two side softboxes and one overhead: even product light",
+                ),
+                Block::LightPreset("backlight", "Backlight", "Rim light from behind"),
+                Block::LightPreset("goldenHour", "Golden hr", "Warm low sun from the side"),
+                Block::LightPreset("daylight", "Daylight", "High neutral sun"),
+                Block::LightPreset("clear", "No lights", "Remove all lights: back to the flat studio light"),
+            ],
+        ),
         ("Shapes", false, shapes),
     ]
 }
@@ -115,6 +518,10 @@ struct PaletteDrag {
 enum Gesture {
     Idle,
     Navigate,
+    /// Cmd/Ctrl+drag on empty space: select what falls inside a rectangle.
+    Marquee {
+        start: Pos2,
+    },
     /// Slide an object over surfaces (Shift: lift it straight up).
     Move {
         id: String,
@@ -148,6 +555,18 @@ enum Gesture {
     /// Gizmo: uniform scale.
     Scale {
         id: String,
+        key: String,
+    },
+    /// Drag where a light points (a handle on the surface it shines at).
+    LightAim {
+        id: String,
+        key: String,
+    },
+    /// Drag a key point of a motion path (moves that key's position).
+    PathKey {
+        id: String,
+        frame: f32,
+        origin: Vec3,
         key: String,
     },
     /// Esc pressed: ignore the rest of this drag.
@@ -209,10 +628,65 @@ fn root_of(scene: &Scene, id: &str) -> String {
 
 /// The mesh under a viewport ray that drags may grab (locked groups let the drag through).
 fn pick_grabbable(scene: &Scene, frame: f32, o: Vec3, d: Vec3) -> Option<String> {
-    let hit = pick(scene, frame, o, d)?;
+    let hit = pick_point(scene, frame, o, d)?.0;
     let locked = scene.get(&root_of(scene, &hit)).map(|e| e.locked).unwrap_or(false)
         || scene.get(&hit).map(|e| e.locked).unwrap_or(false);
     (!locked).then_some(hit)
+}
+
+/// A row of the track strip: one object (a person with all its joints) and its key frames.
+struct TrackRow {
+    id: String,
+    label: String,
+    tracks: Vec<(String, TrackProperty)>,
+    frames: Vec<f32>,
+}
+
+/// A keyframe diamond (or, with `all`, a row's whole animation by its bar) being dragged along
+/// the track strip.
+#[derive(Clone)]
+struct KeyDrag {
+    row: String,
+    frame: f32,
+    key: String,
+    all: bool,
+}
+
+/// A shot bar being dragged on the timeline: what part, where it was grabbed.
+#[derive(Clone)]
+struct ShotDrag {
+    id: String,
+    /// 0 = move, 1 = start edge, 2 = end edge
+    part: u8,
+    grab: f32,
+    start: u32,
+    end: u32,
+    key: String,
+}
+
+fn timeline_rows(scene: &Scene) -> Vec<TrackRow> {
+    let mut rows: Vec<TrackRow> = vec![];
+    for tr in &scene.timeline.tracks {
+        if tr.keys.is_empty() || !scene.contains(&tr.entity) {
+            continue;
+        }
+        let root = root_of(scene, &tr.entity);
+        let i = match rows.iter().position(|r| r.id == root) {
+            Some(i) => i,
+            None => {
+                let name = scene.get(&root).map(|e| e.name.clone()).unwrap_or_else(|_| root.clone());
+                rows.push(TrackRow { id: root.clone(), label: name, tracks: vec![], frames: vec![] });
+                rows.len() - 1
+            }
+        };
+        rows[i].tracks.push((tr.entity.clone(), tr.property));
+        rows[i].frames.extend(tr.keys.iter().map(|k| k.frame));
+    }
+    for r in &mut rows {
+        r.frames.sort_by(|a, b| a.total_cmp(b));
+        r.frames.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    }
+    rows
 }
 
 fn is_animated(scene: &Scene, id: &str) -> bool {
@@ -240,6 +714,21 @@ pub struct EditorApp {
     hub: SharedHub,
     renderer: Option<Renderer>,
     texture: Option<(egui::TextureId, u64)>,
+    /// The small shot-camera preview in the corner of the free view.
+    pip: Option<Pip>,
+    cam_preview: bool,
+    /// The frames the timeline shows when zoomed in (None: all of it).
+    tl_view: Option<(f32, f32)>,
+    /// The storyboard strip above the timeline.
+    show_board: bool,
+    board: Option<crate::storyboard::Storyboard>,
+    /// What scrolling does in the view, and whether the last wheel input looked like a trackpad.
+    scroll_mode: ScrollMode,
+    /// The selection rectangle being dragged, in screen points.
+    marquee: Option<Rect>,
+    /// Scrolling not yet turned into a 15° turn of the dragged object.
+    turn_acc: f32,
+    wheel_trackpad: bool,
     orbit: Orbit,
     look_through: bool,
     pass: Pass,
@@ -260,6 +749,52 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Autosave: the revision last written and when (seconds), and a found autosave offered for
+    /// restoring: (scene JSON, object count).
+    autosaved: (u64, f64),
+    autosave_warned: bool,
+    restore_offer: Option<(std::rc::Rc<Scene>, usize)>,
+    /// Draw shadows in the view.
+    shadows: bool,
+    /// More selected objects (Shift+click), besides the hub's selection.
+    also: Vec<String>,
+    /// Scene tree: name filter and the row being renamed (id, text).
+    tree_filter: String,
+    renaming: Option<(String, String)>,
+    /// Properties header: the name being edited (id, text).
+    name_edit: Option<(String, String)>,
+    /// The camera the next picked picture becomes the reference of.
+    reference_for: Option<String>,
+    /// egui textures of reference pictures: asset key -> (identity of the pixels, texture).
+    ref_textures: std::collections::HashMap<String, (usize, egui::TextureHandle)>,
+    /// Palette thumbnails (rendered in the background).
+    thumbs: Option<crate::thumbs::Thumbs>,
+    /// Draw action / title safe frames when looking through a camera.
+    safe_areas: bool,
+    /// Result of a background "save frame".
+    saved: crate::files::Outbox,
+    /// Key every edit at the current frame.
+    auto_key: bool,
+    key_drag: Option<KeyDrag>,
+    shot_drag: Option<ShotDrag>,
+    /// The key a context menu on the track strip is about: (row, frame).
+    key_menu: Option<(String, f32)>,
+    motion_filter: String,
+    /// The quick-actions box when open: (query, highlighted row).
+    quick: Option<(String, usize)>,
+
+    motion_secs: f32,
+    motion_strength: f32,
+    /// Mode for the next picked image (card, billboard, backdrop, floor).
+    image_mode: Option<&'static str>,
+    /// Ignore scene lights (view option).
+    studio_light: bool,
+    /// The last object (group) selected: what lights and presets aim at.
+    last_subject: Option<String>,
+    /// A short status message and when it appeared.
+    toast: Option<(String, f64)>,
+    /// Files picked or dropped, waiting to be imported: (name, bytes, drop position).
+    incoming: crate::files::Inbox,
 }
 
 impl EditorApp {
@@ -280,6 +815,15 @@ impl EditorApp {
             hub,
             renderer,
             texture: None,
+            pip: None,
+            cam_preview: true,
+            show_board: false,
+            tl_view: None,
+            board: None,
+            scroll_mode: ScrollMode::Auto,
+            turn_acc: 0.0,
+            marquee: None,
+            wheel_trackpad: false,
             orbit: Orbit { target: Vec3::new(0.0, 0.5, 0.0), yaw: 0.6, pitch: 0.35, distance: 9.0 },
             look_through: false,
             pass: Pass::Clay,
@@ -298,6 +842,37 @@ impl EditorApp {
             frame_side: "front",
             block_filter: String::new(),
             show_console: false,
+            image_mode: None,
+            saved: Default::default(),
+            safe_areas: false,
+            thumbs: None,
+            reference_for: None,
+            also: vec![],
+            shadows: true,
+            autosaved: (u64::MAX, 0.0),
+            autosave_warned: false,
+            restore_offer: crate::files::autosave_read().and_then(|j| {
+                let sc: Scene = serde_json::from_str(&j).ok()?;
+                let n = sc.entities.iter().filter(|e| e.parent.is_none()).count();
+                (n > 0).then(|| (std::rc::Rc::new(sc), n))
+            }),
+            ref_textures: Default::default(),
+            auto_key: false,
+            key_drag: None,
+            shot_drag: None,
+            key_menu: None,
+            motion_filter: String::new(),
+            tree_filter: String::new(),
+            renaming: None,
+            name_edit: None,
+            quick: None,
+
+            motion_secs: 0.0,
+            motion_strength: 1.0,
+            studio_light: false,
+            last_subject: None,
+            toast: None,
+            incoming: Default::default(),
         }
     }
 
@@ -342,6 +917,12 @@ impl EditorApp {
                 json!({"type": "mesh", "primitive": prim, "color": color, "name": name.to_lowercase(), "locked": *name == "Floor"}),
             )?,
             Block::Prefab(kind, ..) => self.run_key(key, "prefab.create", json!({"kind": kind, "drop": false}))?,
+            Block::Light(kind, label, _) => self.run_key(
+                key,
+                "entity.create",
+                json!({"type": "light", "name": label.to_lowercase(), "light": {"kind": kind}, "position": [0, 2.2, 0]}),
+            )?,
+            Block::LightPreset(..) => return None,
         };
         r["id"].as_str().map(str::to_string)
     }
@@ -350,9 +931,21 @@ impl EditorApp {
     fn place_on_ray(&self, key: &str, id: &str, ray: (Vec3, Vec3), offset: Vec3, ctrl: bool) {
         let scene = self.scene();
         let f = self.frame();
+        if matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Light(_))) {
+            // a light hangs above where it is dropped, a little towards the viewer, aimed at it
+            let opts = RayOptions { ignore: &[id.to_string()], ground: true, ..Default::default() };
+            if let Some(h) = raycast(&scene, f, ray.0, ray.1, &opts) {
+                let at = Vec3::from_array(h.point);
+                let back = Vec3::new(-ray.1.x, 0.0, -ray.1.z).normalize_or_zero();
+                let pos = at + Vec3::Y * 2.0 + back * 1.2;
+                self.run_key(key, "entity.moveTo", json!({"id": id, "position": pos.to_array(), "frame": f}));
+                self.run_key(key, "camera.lookAt", json!({"id": id, "target": (at + Vec3::Y * 0.5).to_array()}));
+            }
+            return;
+        }
         let mut p = json!({"id": id, "ray": {"origin": ray.0.to_array(), "direction": ray.1.to_array()},
             "offset": offset.to_array(), "snap": self.snap_value(ctrl), "frame": f});
-        if is_animated(&scene, id) {
+        if self.keyed(&scene, id) {
             p["keyframeAt"] = json!(f.round());
         }
         if p["snap"].is_null() {
@@ -361,8 +954,807 @@ impl EditorApp {
         self.run_key(key, "entity.place", p);
     }
 
-    fn scene(&self) -> Scene {
-        self.hub.borrow().session.scene().clone()
+    fn apply_template(&mut self, name: &str, label: &str) {
+        match hub::dispatch(&self.hub, json!({"command": "scene.template", "params": {"name": name}})) {
+            Ok(o) => {
+                let scene = self.scene();
+                self.select(None);
+                self.hub.borrow_mut().frame = scene.timeline.start as f32;
+                if let Some(Some(b)) = scene
+                    .entities
+                    .iter()
+                    .filter(|e| e.parent.is_none())
+                    .map(|e| spatial::bounds(&scene, &e.id, 0.0).ok().flatten())
+                    .reduce(spatial::Aabb::union)
+                {
+                    self.orbit.target = b.center();
+                    self.orbit.distance = (b.size().max_element() * 1.4).clamp(2.0, 60.0);
+                    // look from where the shot camera looks, a little further back
+                    if let Some(cam) = camera_id_at(&scene, scene.timeline.start as f32)
+                        && let Ok(w) = world_at(&scene, &cam, scene.timeline.start as f32)
+                    {
+                        // centre on what the camera looks at (the product, not the backdrop)
+                        let eye = w.w_axis.truncate();
+                        let fwd = w.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
+                        let opts = RayOptions { ground: true, ..Default::default() };
+                        let at = raycast(&scene, 0.0, eye, fwd, &opts)
+                            .map(|h| Vec3::from_array(h.point))
+                            .unwrap_or(b.center());
+                        self.orbit.target = at;
+                        let dir = eye - at;
+                        if dir.length() > 0.1 {
+                            self.orbit.yaw = dir.x.atan2(dir.z);
+                            self.orbit.pitch = (dir.y / dir.length()).asin().clamp(0.1, 1.2);
+                            self.orbit.distance = (dir.length() * 1.6).clamp(1.0, 60.0);
+                        }
+                    }
+                }
+                self.toast(format!(
+                    "{label}: {} objects, {} shots · press Preview shot to play it",
+                    o.result["entities"], o.result["shots"]
+                ));
+            }
+            Err(e) => self.toast(format!("{label}: {}", e.message)),
+        }
+    }
+
+    /// Write the scene to the autosave a couple of seconds after it last changed (not while an
+    /// autosave is waiting to be restored, so it is not overwritten).
+    fn autosave(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if self.restore_offer.is_some() {
+            return;
+        }
+        let rev = self.hub.borrow().session.revision();
+        if self.autosaved.0 == u64::MAX {
+            // first frame: remember where we start; save after the next change
+            self.autosaved = (rev, now);
+            return;
+        }
+        if rev == self.autosaved.0 {
+            return;
+        }
+        if now - self.autosaved.1 < 2.0 {
+            // egui only draws on input: come back when the save is due
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(2.0 - (now - self.autosaved.1) + 0.05));
+            return;
+        }
+        let json = serde_json::to_string(&*self.scene()).unwrap_or_default();
+        match crate::files::autosave_write(&json) {
+            Ok(()) => self.autosave_warned = false,
+            Err(e) => {
+                log::warn!("autosave: {e}");
+                // say it once, not every two seconds
+                if !self.autosave_warned {
+                    self.autosave_warned = true;
+                    self.toast(format!("Autosave is not keeping this scene ({e}): use Save (Cmd/Ctrl+S)"));
+                }
+            }
+        }
+        self.autosaved = (rev, now);
+    }
+
+    fn save_scene(&mut self) {
+        let json = serde_json::to_string_pretty(&*self.scene()).unwrap_or_default();
+        match crate::files::save("scene.shotstage.json", json.as_bytes(), "application/json") {
+            Ok(Some(w)) => self.toast(format!("Saved the scene: {w}")),
+            Ok(None) => {}
+            Err(e) => self.toast(format!("Could not save: {e}")),
+        }
+    }
+
+    /// Show a short status message at the bottom of the view.
+    fn toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), f64::NAN));
+    }
+
+    /// Import the files that were picked or dropped.
+    fn import_incoming(&mut self) {
+        use shotstage_commands::model::{ModelFormat, encode};
+        let items: Vec<_> = self.incoming.borrow_mut().drain(..).collect();
+        for (name, bytes, at) in items {
+            let (stem, ext) = name
+                .rsplit_once('.')
+                .map(|(s, e)| (s.to_string(), e.to_ascii_lowercase()))
+                .unwrap_or((name.clone(), String::new()));
+            if ext == "json" {
+                // a saved scene
+                let opened = serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string()).and_then(|scene| {
+                    hub::dispatch(&self.hub, json!({"command": "scene.load", "params": {"scene": scene}}))
+                        .map_err(|e| e.message)
+                });
+                match opened {
+                    Ok(_) => self.toast(format!("Opened {name} (Undo goes back to the previous scene)")),
+                    Err(e) => self.toast(format!("{name} is not a shotstage scene: {e}")),
+                }
+                continue;
+            }
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
+                && let Some(cam) = self.reference_for.take()
+            {
+                let req = json!({"command": "camera.setReference", "params": {"camera": cam, "data": encode(&bytes), "opacity": 0.5}});
+                match hub::dispatch(&self.hub, req) {
+                    Ok(_) => {
+                        self.look_through = true;
+                        self.hub.borrow_mut().look_through = true;
+                        self.toast(format!("{name} is laid over the camera view: line the shot up with it"));
+                    }
+                    Err(e) => self.toast(format!("Could not use {name}: {}", e.message)),
+                }
+                continue;
+            }
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                let key = self.new_key("import");
+                let mut params = json!({"data": encode(&bytes), "name": stem});
+                if let Some(mode) = self.image_mode.take() {
+                    params["mode"] = json!(mode);
+                }
+                let backdrop = params["mode"] == "backdrop";
+                match hub::dispatch(&self.hub, json!({"command": "image.import", "params": params, "merge": key})) {
+                    Ok(o) => {
+                        let id = o.result["id"].as_str().unwrap_or_default().to_string();
+                        if !backdrop && let Some((rect, view)) = self.last_view {
+                            let p = at.filter(|p| rect.contains(*p)).unwrap_or(rect.center());
+                            self.place_on_ray(&key, &id, ray_at(rect, &view, p), Vec3::ZERO, false);
+                        }
+                        self.select(Some(id));
+                        self.toast(format!("Added {name} ({} × {} px)", o.result["pixels"][0], o.result["pixels"][1]));
+                    }
+                    Err(e) => self.toast(format!("Could not add {name}: {}", e.message)),
+                }
+                continue;
+            }
+            let Some(format) = ModelFormat::from_extension(&ext) else {
+                self.toast(format!("{name}: not a model shotstage can import (glb, gltf, obj, stl, fbx, blend)"));
+                continue;
+            };
+            let key = self.new_key("import");
+            let params = json!({"format": format.extension(), "data": encode(&bytes), "name": stem});
+            match hub::dispatch(&self.hub, json!({"command": "model.import", "params": params, "merge": key})) {
+                Ok(o) => {
+                    let id = o.result["id"].as_str().unwrap_or_default().to_string();
+                    if let Some((rect, view)) = self.last_view {
+                        let p = at.filter(|p| rect.contains(*p)).unwrap_or(rect.center());
+                        self.place_on_ray(&key, &id, ray_at(rect, &view, p), Vec3::ZERO, false);
+                    }
+                    self.select(Some(id));
+                    let skins = o.result["skins"].as_u64().unwrap_or(0);
+                    let mut msg = format!("Imported {name}: {} parts", o.result["entities"]);
+                    if skins > 0 {
+                        msg.push_str(" with a skeleton (click it, then a part, to pose)");
+                    }
+                    if let Some(w) = o.result["warnings"].as_array().and_then(|w| w.first()).and_then(Value::as_str) {
+                        msg.push_str(&format!(" · {w}"));
+                    }
+                    self.toast(msg);
+                }
+                Err(e) => self.toast(format!("Could not import {name}: {}", e.message)),
+            }
+        }
+    }
+
+    fn export_model(&mut self, format: &str) {
+        use base64::Engine as _;
+        let req = json!({"command": "model.export", "params": {"format": format, "frame": self.frame()}});
+        let r = match hub::dispatch(&self.hub, req) {
+            Ok(o) => o.result,
+            Err(e) => return self.toast(format!("Export failed: {}", e.message)),
+        };
+        let name = r["fileName"].as_str().unwrap_or("scene.glb").to_string();
+        let bytes = match (r["data"].as_str(), r["text"].as_str()) {
+            (Some(d), _) => base64::engine::general_purpose::STANDARD.decode(d).unwrap_or_default(),
+            (None, Some(t)) => t.as_bytes().to_vec(),
+            _ => return self.toast("Export failed: no data"),
+        };
+        let mime = r["mimeType"].as_str().unwrap_or("application/octet-stream").to_string();
+        match crate::files::save(&name, &bytes, &mime) {
+            Ok(Some(where_)) => {
+                if let Some(mtl) = r["mtl"].as_str() {
+                    let mtl_name = name.replace(".obj", ".mtl");
+                    let _ = crate::files::save(&mtl_name, mtl.as_bytes(), "text/plain");
+                }
+                self.toast(format!("Exported {} meshes, {} triangles: {where_}", r["meshes"], r["triangles"]));
+            }
+            Ok(None) => {}
+            Err(e) => self.toast(format!("Export failed: {e}")),
+        }
+    }
+
+    /// Motion presets for the selection: camera moves for a camera, actions for a person,
+    /// motion for anything else. One click writes editable keyframes from the playhead.
+    fn animate_section(&mut self, ui: &mut egui::Ui, scene: &Scene, id: &str, frame: f32) {
+        use shotstage_commands::motion::{Group, PRESETS};
+        let is_cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));
+        if matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Light(_))) {
+            return;
+        }
+        let person = rig::person_root(scene, id).ok();
+        let groups: &[Group] = if is_cam {
+            &[Group::Camera]
+        } else if person.is_some() {
+            &[Group::Character, Group::Object]
+        } else {
+            &[Group::Object]
+        };
+        let target = person.clone().unwrap_or_else(|| if is_cam { id.to_string() } else { root_of(scene, id) });
+        section(ui, "Animate", true, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.motion_filter)
+                    .hint_text("Search moves…")
+                    .desired_width(f32::INFINITY),
+            );
+            egui::Grid::new("motion_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                ui.label("Length");
+                ui.add(
+                    egui::DragValue::new(&mut self.motion_secs)
+                        .range(0.0..=60.0)
+                        .speed(0.05)
+                        .custom_formatter(|v, _| if v <= 0.0 { "preset".into() } else { format!("{v:.1} s") }),
+                )
+                .on_hover_text("How long the move takes (preset = its own length)");
+                ui.end_row();
+                ui.label("Strength");
+                ui.add(egui::Slider::new(&mut self.motion_strength, 0.25..=3.0).max_decimals(2));
+                ui.end_row();
+            });
+            let subject = self.last_subject.clone().filter(|s| scene.contains(s) && *s != target);
+            if is_cam {
+                match &subject {
+                    Some(s) => ui.weak(format!(
+                        "Moves around / looks at: {}",
+                        scene.get(s).map(|e| e.name.as_str()).unwrap_or(s)
+                    )),
+                    None => ui.weak("Select an object first to move around it (otherwise: what the camera looks at)."),
+                };
+            }
+            let filter = self.motion_filter.trim().to_lowercase();
+            ui.horizontal_wrapped(|ui| {
+                // a person's own actions first, then general motion
+                let ordered = groups.iter().flat_map(|g| PRESETS.iter().filter(move |p| p.group == *g));
+                for p in ordered.filter(|p| p.name != "pathFollow") {
+                    if !filter.is_empty()
+                        && !p.label.to_lowercase().contains(&filter)
+                        && !p.description.to_lowercase().contains(&filter)
+                    {
+                        continue;
+                    }
+                    if ui.button(p.label).on_hover_text(format!("{} ({} s)", p.description, p.seconds)).clicked() {
+                        self.apply_motion(p, &target, if is_cam { subject.as_deref() } else { None }, frame);
+                    }
+                }
+            });
+        });
+    }
+
+    /// The selection with its Shift+clicked extras, leaving out anything inside another of them
+    /// (it goes along with its parent).
+    fn selection_roots(&self) -> Vec<String> {
+        let Some(id) = self.selected() else { return vec![] };
+        let scene = self.scene();
+        let all: Vec<String> = std::iter::once(id).chain(self.also.iter().cloned()).collect();
+        all.iter()
+            .filter(|i| !all.iter().any(|o| o != *i && spatial::subtree(&scene, o).contains(i)))
+            .cloned()
+            .collect()
+    }
+
+    /// A new 16:9 camera where the free view looks from, aimed at the orbit target, with a lens
+    /// whose frame fits inside what the view shows (the view is 45° tall); it becomes the active
+    /// camera if there is none.
+    fn camera_from_view(&mut self) {
+        let scene = self.scene();
+        let id = scene.unique_id("cam");
+        let aspect = 16.0_f32 / 9.0;
+        let view_aspect = self.last_view.map(|(r, _)| r.width() / r.height().max(1.0)).unwrap_or(aspect);
+        let mut tan_half = 22.5_f32.to_radians().tan();
+        if view_aspect < aspect {
+            // a narrow view: match its width instead, so the frame stays inside it
+            tan_half *= view_aspect / aspect;
+        }
+        let focal = ((36.0 / aspect) / (2.0 * tan_half)).clamp(8.0, 300.0);
+        let n = scene.entities.iter().filter(|e| matches!(e.kind, EntityKind::Camera(_))).count();
+        let name = format!("Cam {}", (b'A' + (n as u8).min(25)) as char);
+        let steps = json!([
+            {"command": "entity.create", "params": {"type": "camera", "id": id, "name": name,
+                "position": self.orbit.eye().to_array(),
+                "camera": {"focalLengthMm": (focal * 10.0).round() / 10.0, "aspect": aspect},
+                "makeActive": scene.active_camera.is_none()}},
+            {"command": "camera.lookAt", "params": {"id": id, "target": self.orbit.target.to_array()}},
+        ]);
+        match hub::dispatch(&self.hub, json!({"batch": steps})) {
+            Ok(_) => {
+                self.also.clear();
+                self.select(Some(id));
+                self.toast(format!("{name} placed where you are looking from: + Shot or the Shots row uses it"));
+            }
+            Err(e) => self.toast(format!("Could not add a camera: {}", e.message)),
+        }
+    }
+
+    /// Clear the scene (undoable) and start the view over: playhead at the start, whole
+    /// timeline, free view.
+    fn new_scene(&mut self) {
+        if self.run("scene.new", json!({})).is_some() {
+            self.also.clear();
+            self.select(None);
+            self.playing = false;
+            self.tl_view = None;
+            self.look_through = false;
+            let start = self.scene().timeline.start as f32;
+            let mut h = self.hub.borrow_mut();
+            h.frame = start;
+            h.look_through = false;
+        }
+    }
+
+    /// Put the selection on the clipboard as a shotstage clip (and delete it for Cut).
+    fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
+        let ids = self.selection_roots();
+        if ids.is_empty() {
+            return;
+        }
+        let Some(clip) = self.run("entity.copy", json!({"ids": ids})) else { return };
+        ctx.copy_text(clip.to_string());
+        let n = ids.len();
+        if cut {
+            self.delete_selection();
+        }
+        self.toast(format!(
+            "{} {n} object{} (paste with Cmd/Ctrl+V, here or in another scene)",
+            if cut { "Cut" } else { "Copied" },
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
+    /// Paste a shotstage clip from the clipboard; other text is ignored. Pasting next to the
+    /// originals shifts the copies a little so they do not hide each other.
+    fn paste(&mut self, text: &str) {
+        let Ok(clip) = serde_json::from_str::<Value>(text.trim()) else { return };
+        if clip["shotstageClip"].is_null() {
+            return;
+        }
+        let scene = self.scene();
+        let all_here = clip["entities"].as_array().is_some_and(|es| {
+            es.iter().filter(|e| e["parent"].is_null()).all(|e| e["id"].as_str().is_some_and(|id| scene.contains(id)))
+        });
+        let mut params = json!({"clip": clip});
+        if all_here {
+            params["offset"] = json!([0.5, 0.0, 0.0]);
+        }
+        match hub::dispatch(&self.hub, json!({"command": "entity.paste", "params": params})) {
+            Ok(o) => {
+                let mut ids: Vec<String> = o.result["ids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if !ids.is_empty() {
+                    let first = ids.remove(0);
+                    self.select(Some(first));
+                    self.also = ids;
+                }
+                self.toast("Pasted (Undo takes it back)");
+            }
+            Err(e) => self.toast(format!("Could not paste: {}", e.message)),
+        }
+    }
+
+    /// Duplicate everything selected as one undo step and select the copies.
+    fn duplicate_selection(&mut self) {
+        let ids = self.selection_roots();
+        if ids.is_empty() {
+            return;
+        }
+        let steps: Vec<Value> =
+            ids.iter().map(|i| json!({"command": "entity.duplicate", "params": {"id": i}})).collect();
+        match hub::dispatch(&self.hub, json!({"batch": steps})) {
+            Ok(o) => {
+                let mut new: Vec<String> = o
+                    .result
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|r| r["id"].as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if !new.is_empty() {
+                    let first = new.remove(0);
+                    self.select(Some(first));
+                    self.also = new;
+                }
+            }
+            Err(e) => self.toast(format!("Could not duplicate: {}", e.message)),
+        }
+    }
+
+    /// Select every visible, unlocked top-level object whose middle shows inside `r` (screen).
+    fn select_in_rect(&mut self, r: Rect, view_rect: Rect, view: &View, f: f32) {
+        let scene = self.scene();
+        let mut hits: Vec<String> = scene
+            .entities
+            .iter()
+            .filter(|e| e.parent.is_none() && e.visible && !e.locked)
+            .filter(|e| {
+                let mid = spatial::bounds(&scene, &e.id, f)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.center())
+                    .or_else(|| world_at(&scene, &e.id, f).ok().map(|w| w.w_axis.truncate()));
+                mid.and_then(|m| project(view_rect, view, m)).is_some_and(|p| r.contains(p))
+            })
+            .map(|e| e.id.clone())
+            .collect();
+        if hits.is_empty() {
+            self.also.clear();
+            self.select(None);
+            return;
+        }
+        let first = hits.remove(0);
+        self.select(Some(first));
+        self.also = hits;
+    }
+
+    /// Delete everything selected (with Shift+clicked extras) as one undo step.
+    fn delete_selection(&mut self) {
+        let ids = self.selection_roots();
+        if ids.is_empty() {
+            return;
+        }
+        self.also.clear();
+        let steps: Vec<Value> = ids.iter().map(|i| json!({"command": "entity.delete", "params": {"id": i}})).collect();
+        if let Err(e) = hub::dispatch(&self.hub, json!({"batch": steps})) {
+            self.toast(format!("Could not delete: {}", e.message));
+        }
+    }
+
+    /// Write a motion preset's keys on `target` from `frame`, then play it back.
+    fn apply_motion(
+        &mut self,
+        p: &shotstage_commands::motion::Preset,
+        target: &str,
+        subject: Option<&str>,
+        frame: f32,
+    ) {
+        let mut req =
+            json!({"preset": p.name, "target": target, "start": frame.round(), "intensity": self.motion_strength});
+        if self.motion_secs > 0.0 {
+            req["duration"] = json!(self.motion_secs);
+        }
+        if let Some(s) = subject {
+            req["subject"] = json!(s);
+        }
+        match hub::dispatch(&self.hub, json!({"command": "motion.apply", "params": req})) {
+            Ok(o) => {
+                // play it back right away
+                self.hub.borrow_mut().frame = o.result["start"].as_f64().unwrap_or(0.0) as f32;
+                self.playing = true;
+                let (st, en) = (o.result["start"].as_f64().unwrap_or(0.0), o.result["end"].as_f64().unwrap_or(0.0));
+                self.toast(format!(
+                    "{}: frames {st:.0}–{en:.0}, {} keys · drag them on the timeline to retime",
+                    p.label, o.result["keys"]
+                ));
+            }
+            Err(e) => self.toast(format!("{}: {}", p.label, e.message)),
+        }
+    }
+
+    /// Everything the quick-actions box can do right now, with the selection in mind.
+    fn quick_items(&self) -> Vec<QuickItem> {
+        use shotstage_commands::motion::{Group, PRESETS};
+        let mut out = Vec::new();
+        let scene = self.scene();
+        let sel = self.selected().filter(|s| scene.contains(s));
+        let act = |label: &'static str, hint: &'static str, a: QuickAction| QuickItem {
+            label: label.into(),
+            kind: "Action",
+            hint: hint.into(),
+            run: QuickRun::Action(a),
+        };
+        out.push(act("Save scene", "Cmd/Ctrl+S", QuickAction::Save));
+        out.push(act("Open / import a file…", "scene, model or picture", QuickAction::Open));
+        out.push(act("Undo", "Cmd/Ctrl+Z", QuickAction::Undo));
+        out.push(act("Redo", "Cmd/Ctrl+Shift+Z", QuickAction::Redo));
+        out.push(act("New scene", "clear everything (undoable)", QuickAction::New));
+        out.push(act("Toggle shadows", "", QuickAction::Shadows));
+        out.push(act("Play / pause", "Space", QuickAction::Play));
+        out.push(act("Go to the start", "Home", QuickAction::Start));
+        out.push(act("Toggle camera view", "look through the shot camera", QuickAction::CameraView));
+        out.push(act("Toggle storyboard", "every shot as a picture", QuickAction::Board));
+        out.push(act("Toggle camera preview", "the small view in the corner", QuickAction::Preview));
+        out.push(act("Fit the timeline", "show all frames", QuickAction::FitTimeline));
+        out.push(act("Toggle safe areas", "action / title safe frames in camera view", QuickAction::SafeAreas));
+        out.push(act("New camera from this view", "where you are looking from", QuickAction::CameraHere));
+        if scene.active_camera.is_some() || !scene.timeline.shots.is_empty() {
+            out.push(act("Save frame as PNG", "the shot camera at the playhead, 1920 px", QuickAction::SaveFrame));
+        }
+        if !scene.timeline.shots.is_empty() {
+            out.push(act("Export storyboard", "every shot as one HTML page", QuickAction::ExportBoard));
+        }
+        if sel.is_some() {
+            out.push(act("Focus the selection", "F", QuickAction::Focus));
+            out.push(act("Key the selection", "K: keyframe at the playhead", QuickAction::Key));
+            out.push(act("Duplicate", "Cmd/Ctrl+D", QuickAction::Duplicate));
+            out.push(act("Delete", "Delete", QuickAction::Delete));
+        }
+        if let Some(id) = &sel {
+            let is_cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));
+            let person = rig::person_root(&scene, id).ok();
+            if let Some(root) = &person {
+                for p in rig::POSES {
+                    out.push(QuickItem {
+                        label: humanize(p.name),
+                        kind: "Pose",
+                        hint: p.description.into(),
+                        run: QuickRun::Pose(root.clone(), p.name),
+                    });
+                }
+            }
+            if !matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Light(_))) {
+                let target = person.clone().unwrap_or_else(|| if is_cam { id.clone() } else { root_of(&scene, id) });
+                let subject = self.last_subject.clone().filter(|s| scene.contains(s) && *s != target);
+                for p in PRESETS.iter().filter(|p| p.name != "pathFollow") {
+                    let fits = match p.group {
+                        Group::Camera => is_cam,
+                        Group::Character => person.is_some(),
+                        Group::Object => !is_cam,
+                    };
+                    if fits {
+                        let subject = if is_cam { subject.clone() } else { None };
+                        out.push(QuickItem {
+                            label: p.label.into(),
+                            kind: if is_cam { "Camera move" } else { "Motion" },
+                            hint: p.description.into(),
+                            run: QuickRun::Motion(p, target.clone(), subject),
+                        });
+                    }
+                }
+            }
+        }
+        // getting around: shots, cameras, and every object by name (before the blocks, so typing
+        // an object's name selects it rather than adding another one)
+        let fps = scene.timeline.fps.max(1.0);
+        for (i, sh) in scene.timeline.shots.iter().enumerate() {
+            let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+            out.push(QuickItem {
+                label: format!("Go to shot {}: {}", i + 1, sh.name),
+                kind: "Shot",
+                hint: format!("{:.1}s through {cam}", (sh.end + 1 - sh.start) as f32 / fps),
+                run: QuickRun::Shot(sh.start),
+            });
+        }
+        for e in scene.entities.iter().filter(|e| e.parent.is_none()) {
+            if matches!(e.kind, EntityKind::Camera(_)) {
+                out.push(QuickItem {
+                    label: format!("Look through {}", e.name),
+                    kind: "Camera",
+                    hint: "makes it the active camera".into(),
+                    run: QuickRun::LookThrough(e.id.clone()),
+                });
+            }
+            out.push(QuickItem {
+                label: e.name.clone(),
+                kind: "Select",
+                hint: e.id.clone(),
+                run: QuickRun::Select(e.id.clone()),
+            });
+        }
+        for (_, _, blocks) in palette() {
+            for b in blocks {
+                let kind = if matches!(b, Block::LightPreset(..)) { "Lighting" } else { "Add" };
+                out.push(QuickItem {
+                    label: b.label().into(),
+                    kind,
+                    hint: b.description().into(),
+                    run: QuickRun::Block(b),
+                });
+            }
+        }
+        for (name, label, desc) in shotstage_commands::templates::TEMPLATES {
+            out.push(QuickItem {
+                label: (*label).into(),
+                kind: "Template",
+                hint: (*desc).into(),
+                run: QuickRun::Template(name, label),
+            });
+        }
+        out
+    }
+
+    fn run_quick(&mut self, item: QuickItem, ctx: &egui::Context) {
+        let frame = self.frame();
+        match item.run {
+            QuickRun::Block(b) => self.use_block(&b),
+            QuickRun::Template(name, label) => self.apply_template(name, label),
+            QuickRun::Motion(p, target, subject) => self.apply_motion(p, &target, subject.as_deref(), frame),
+            QuickRun::Pose(root, pose) => {
+                let animated =
+                    self.auto_key || rig::JOINTS.iter().any(|j| is_animated(&self.scene(), &format!("{root}_{j}")));
+                let mut req = json!({"id": root, "pose": pose, "frame": frame});
+                if animated {
+                    req["keyframeAt"] = json!(frame.round());
+                }
+                self.run("pose.set", req);
+            }
+            QuickRun::Shot(start) => {
+                self.playing = false;
+                self.look_through = true;
+                let mut h = self.hub.borrow_mut();
+                h.frame = start as f32;
+                h.look_through = true;
+            }
+            QuickRun::LookThrough(cam) => {
+                self.run("camera.setActive", json!({"id": cam}));
+                self.look_through = true;
+                self.hub.borrow_mut().look_through = true;
+            }
+            QuickRun::Select(id) => {
+                self.also.clear();
+                self.select(Some(id));
+                self.focus_selection();
+            }
+            QuickRun::Action(a) => match a {
+                QuickAction::Save => self.save_scene(),
+                QuickAction::Open => crate::files::pick(&self.incoming, ctx),
+                QuickAction::Undo => _ = self.run("history.undo", json!({})),
+                QuickAction::Redo => _ = self.run("history.redo", json!({})),
+                QuickAction::New => self.new_scene(),
+                QuickAction::Shadows => self.shadows = !self.shadows,
+                QuickAction::Focus => self.focus_selection(),
+                QuickAction::Key => self.key_selection(),
+                QuickAction::Duplicate => self.duplicate_selection(),
+                QuickAction::Delete => self.delete_selection(),
+                QuickAction::CameraHere => self.camera_from_view(),
+                QuickAction::SaveFrame => crate::files::save_frame(&self.hub, 1920, &self.saved),
+                QuickAction::ExportBoard => self.export_board(),
+                QuickAction::Play => self.playing = !self.playing,
+                QuickAction::Start => {
+                    self.playing = false;
+                    let start = self.scene().timeline.start as f32;
+                    self.hub.borrow_mut().frame = start;
+                }
+                QuickAction::CameraView => {
+                    self.look_through = !self.look_through;
+                    self.hub.borrow_mut().look_through = self.look_through;
+                }
+                QuickAction::Board => self.show_board = !self.show_board,
+                QuickAction::Preview => self.cam_preview = !self.cam_preview,
+                QuickAction::FitTimeline => self.tl_view = None,
+                QuickAction::SafeAreas => self.safe_areas = !self.safe_areas,
+            },
+        }
+    }
+
+    /// The quick-actions box (Cmd/Ctrl+K or /): type a few letters, Enter runs the top match.
+    fn quick_box(&mut self, ctx: &egui::Context, full: Rect) {
+        let Some((mut query, mut pick)) = self.quick.take() else { return };
+        let items = self.quick_items();
+        let ranked = rank_quick(&items, &query);
+        let (up, down, enter, esc) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if down {
+            pick = (pick + 1).min(ranked.len().saturating_sub(1));
+        }
+        if up {
+            pick = pick.saturating_sub(1);
+        }
+        let mut chosen = enter.then(|| ranked.get(pick).copied()).flatten();
+        let mut keep = !esc && !enter;
+        let width = 460.0_f32.min(full.width() - 24.0);
+        let resp = egui::Area::new(egui::Id::unique("quick_actions"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(full.center().x - width / 2.0, full.top() + 48.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(width);
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut query)
+                            .hint_text("Add a block, apply a move or pose, run an action…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    edit.request_focus();
+                    if edit.changed() {
+                        pick = 0;
+                    }
+                    ui.add_space(4.0);
+                    if ranked.is_empty() {
+                        ui.weak("Nothing matches.");
+                    }
+                    egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
+                        for (row, &i) in ranked.iter().enumerate().take(40) {
+                            let it = &items[i];
+                            let on = row == pick;
+                            let r = ui
+                                .horizontal(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    let label = egui::RichText::new(&it.label);
+                                    ui.label(if on { label.strong() } else { label });
+                                    ui.weak(egui::RichText::new(it.kind).small());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add(
+                                            egui::Label::new(egui::RichText::new(&it.hint).weak().small()).truncate(),
+                                        );
+                                    });
+                                })
+                                .response
+                                .interact(Sense::click());
+                            if on {
+                                ui.painter().rect_filled(r.rect.expand(2.0), 4.0, ACCENT.gamma_multiply(0.22));
+                                if up || down {
+                                    r.scroll_to_me(None);
+                                }
+                            }
+                            if r.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
+                                pick = row;
+                            }
+                            if r.clicked() {
+                                chosen = Some(i);
+                                keep = false;
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.weak(egui::RichText::new("↑↓ choose · Enter run · Esc close").small());
+                });
+            })
+            .response;
+        if ctx.input(|i| i.pointer.any_pressed()) && !resp.contains_pointer() {
+            keep = false;
+        }
+        if let Some(i) = chosen {
+            let label = items[i].label.clone();
+            let kind = items[i].kind;
+            self.run_quick(items.into_iter().nth(i).unwrap(), ctx);
+            if kind != "Action" && kind != "Lighting" && kind != "Template" {
+                log::debug!("quick: {label}");
+            }
+        }
+        if keep {
+            self.quick = Some((query, pick));
+        }
+    }
+
+    /// Point the orbit view at the selection and fit it (F).
+    fn focus_selection(&mut self) {
+        let Some(id) = self.selected() else { return };
+        let scene = self.scene();
+        let f = self.frame();
+        let solid = matches!(
+            scene.get(&id).map(|e| &e.kind),
+            Ok(EntityKind::Mesh { .. } | EntityKind::Empty | EntityKind::Image(_))
+        );
+        let target = if solid { root_of(&scene, &id) } else { id.clone() };
+        let (center, size) = match spatial::bounds(&scene, &target, f) {
+            Ok(Some(b)) => (b.center(), b.size().max_element()),
+            _ => match world_at(&scene, &id, f) {
+                Ok(w) => (w.w_axis.truncate(), 1.0),
+                Err(_) => return,
+            },
+        };
+        self.orbit.target = center;
+        self.orbit.distance = (size * 2.2).clamp(0.4, 200.0);
+        self.look_through = false;
+        self.hub.borrow_mut().look_through = false;
+    }
+
+    /// Should edits to `id` be keyed? (animated already, or Auto-key is on)
+    fn keyed(&self, scene: &Scene, id: &str) -> bool {
+        self.auto_key || is_animated(scene, id)
+    }
+
+    /// The current scene, shared (copied once per change, not per call).
+    fn scene(&self) -> std::rc::Rc<Scene> {
+        let mut h = self.hub.borrow_mut();
+        let rev = h.session.revision();
+        if let Some((r, s)) = &h.scene_cache
+            && *r == rev
+        {
+            return s.clone();
+        }
+        let s = std::rc::Rc::new(h.session.scene().clone());
+        h.scene_cache = Some((rev, s.clone()));
+        s
     }
     fn frame(&self) -> f32 {
         self.hub.borrow().frame
@@ -399,6 +1791,38 @@ impl eframe::App for EditorApp {
                 h.selected = None;
             }
         }
+        // palette thumbnails, a few per frame until they are all done
+        if let Some(rs) = frame.wgpu_render_state() {
+            let thumbs = self.thumbs.get_or_insert_with(|| crate::thumbs::Thumbs::new(&rs.device, thumb_items()));
+            if thumbs.step(rs, 4) {
+                ui.ctx().request_repaint();
+            }
+        }
+        crate::files::take_dropped(ui.ctx(), &self.incoming);
+        self.autosave(ui.ctx());
+        let saved = self.saved.borrow_mut().take();
+        match saved {
+            Some(Ok(w)) => self.toast(format!("Saved: {w}")),
+            Some(Err(e)) => self.toast(format!("Could not save: {e}")),
+            None => {}
+        }
+        if !self.incoming.borrow().is_empty() {
+            self.import_incoming();
+        }
+        {
+            let scene = self.scene();
+            let primary = self.selected();
+            self.also.retain(|a| scene.contains(a) && Some(a) != primary.as_ref());
+            if primary.is_none() {
+                self.also.clear();
+            }
+        }
+        if let Some(sel) = self.selected() {
+            let scene = self.scene();
+            if matches!(scene.get(&sel).map(|e| &e.kind), Ok(EntityKind::Mesh { .. } | EntityKind::Empty)) {
+                self.last_subject = Some(root_of(&scene, &sel));
+            }
+        }
         if self.playing {
             let dt = ui.input(|i| i.stable_dt).min(0.1);
             let scene = self.scene();
@@ -411,6 +1835,7 @@ impl eframe::App for EditorApp {
             ui.ctx().request_repaint();
         }
         self.shortcuts(ui);
+        self.quick_box(ui.ctx(), ui.ctx().content_rect());
 
         {
             let h = self.hub.borrow();
@@ -418,6 +1843,9 @@ impl eframe::App for EditorApp {
         }
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("timeline").resizable(false).show(ui, |ui| self.bottom(ui));
+        if self.show_board {
+            egui::Panel::bottom("storyboard").resizable(false).show(ui, |ui| self.storyboard_strip(ui, frame));
+        }
         egui::Panel::left("outliner")
             .resizable(true)
             .default_size(252.0)
@@ -467,11 +1895,8 @@ impl EditorApp {
                 }
             }
         }
-        if dup
-            && let Some(id) = self.selected()
-            && let Some(r) = self.run("entity.duplicate", json!({"id": id}))
-        {
-            self.select(r["id"].as_str().map(str::to_string));
+        if dup {
+            self.duplicate_selection();
         }
         if undo {
             self.run("history.undo", json!({}));
@@ -479,11 +1904,99 @@ impl EditorApp {
         if redo {
             self.run("history.redo", json!({}));
         }
-        if del && let Some(id) = self.selected() {
-            self.run("entity.delete", json!({ "id": id }));
+        if del {
+            self.delete_selection();
         }
         if space {
             self.playing = !self.playing;
+        }
+        if ui.input(|i| {
+            (i.modifiers.command && i.key_pressed(egui::Key::K))
+                || i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "/"))
+        }) {
+            self.quick = Some((String::new(), 0));
+        }
+        // Cmd/Ctrl+C, X, V: objects travel through the system clipboard as JSON (between scenes,
+        // tabs, and to or from agents)
+        let (copy, cut, pasted) = ui.input(|i| {
+            let mut out = (false, false, None);
+            for e in &i.events {
+                match e {
+                    egui::Event::Copy => out.0 = true,
+                    egui::Event::Cut => out.1 = true,
+                    egui::Event::Paste(t) => out.2 = Some(t.clone()),
+                    _ => {}
+                }
+            }
+            out
+        });
+        if copy || cut {
+            self.copy_selection(ui.ctx(), cut);
+        }
+        if let Some(text) = pasted {
+            self.paste(&text);
+        }
+        // Esc with nothing in progress clears the selection
+        if ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && matches!(self.drag, Gesture::Idle)
+            && self.palette.is_none()
+            && self.quick.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+        {
+            self.also.clear();
+            self.select(None);
+        }
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            self.save_scene();
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::F)) {
+            self.focus_selection();
+        }
+        let (group, ungroup) = ui.input(|i| {
+            let g = i.modifiers.command && i.key_pressed(egui::Key::G);
+            (g && !i.modifiers.shift, g && i.modifiers.shift)
+        });
+        if group && !self.also.is_empty() {
+            self.group_selection();
+        }
+        if ungroup && let Some(id) = self.selected() {
+            match hub::dispatch(&self.hub, json!({"command": "entity.ungroup", "params": {"id": id}})) {
+                Ok(_) => {
+                    self.select(None);
+                    self.toast("Ungrouped");
+                }
+                Err(e) => self.toast(format!("Could not ungroup: {}", e.message)),
+            }
+        }
+        let (key, home, end, step) = ui.input(|i| {
+            let step = if i.key_pressed(egui::Key::ArrowLeft) {
+                -1.0
+            } else if i.key_pressed(egui::Key::ArrowRight) {
+                1.0
+            } else {
+                0.0
+            };
+            (
+                !i.modifiers.command && i.key_pressed(egui::Key::K),
+                i.key_pressed(egui::Key::Home),
+                i.key_pressed(egui::Key::End),
+                step * if i.modifiers.shift { 10.0 } else { 1.0 },
+            )
+        });
+        let t = self.scene().timeline.clone();
+        if key {
+            self.key_selection();
+        }
+        if home {
+            self.hub.borrow_mut().frame = t.start as f32;
+        }
+        if end {
+            self.hub.borrow_mut().frame = t.end as f32;
+        }
+        if step != 0.0 {
+            self.playing = false;
+            let mut h = self.hub.borrow_mut();
+            h.frame = (h.frame.round() + step).clamp(t.start as f32, t.end as f32);
         }
     }
 
@@ -491,8 +2004,14 @@ impl EditorApp {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("shotstage").strong().color(ACCENT));
             ui.separator();
+            if ui.button("Open…").on_hover_text("Open a saved scene (.json), or import models and pictures").clicked() {
+                crate::files::pick(&self.incoming, ui.ctx());
+            }
+            if ui.button("Save").on_hover_text("Save the scene as a .shotstage.json file (Cmd/Ctrl+S)").clicked() {
+                self.save_scene();
+            }
             if ui.button("New").on_hover_text("Clear the scene (undoable)").clicked() {
-                self.run("scene.new", json!({}));
+                self.new_scene();
             }
             if ui.button("Undo").on_hover_text("Cmd/Ctrl+Z").clicked() {
                 self.run("history.undo", json!({}));
@@ -500,6 +2019,61 @@ impl EditorApp {
             if ui.button("Redo").on_hover_text("Cmd/Ctrl+Shift+Z").clicked() {
                 self.run("history.redo", json!({}));
             }
+            if ui.button("🔍 Actions").on_hover_text("Search every block, move, pose, template and action (Cmd/Ctrl+K or /)").clicked() {
+                self.quick = Some((String::new(), 0));
+            }
+            ui.menu_button("History", |ui| {
+                let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
+                let undo: Vec<String> = info["undo"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if undo.is_empty() {
+                    ui.weak("Nothing to undo yet");
+                } else {
+                    ui.weak("Click a step to go back to before it");
+                }
+                for (i, label) in undo.iter().take(20).enumerate() {
+                    if ui.button(format!("{}. {}", i + 1, friendly(label))).clicked() {
+                        for _ in 0..=i {
+                            self.run("history.undo", json!({}));
+                        }
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            if ui
+                .button("Import…")
+                .on_hover_text("glTF / GLB, OBJ, STL, FBX and .blend (FBX / .blend on the desktop, through Blender). You can also drop files on the view.")
+                .clicked()
+            {
+                crate::files::pick(&self.incoming, ui.ctx());
+            }
+            ui.menu_button("Templates", |ui| {
+                ui.weak("Start from a ready scene (replaces this one; Undo brings it back)");
+                for (name, label, desc) in shotstage_commands::templates::TEMPLATES {
+                    if ui.button(*label).on_hover_text(*desc).clicked() {
+                        self.apply_template(name, label);
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("Export", |ui| {
+                ui.weak("The scene posed at the current frame");
+                for (label, format, tip) in [
+                    ("GLB (glTF binary)", "glb", "Meshes, colours, cameras and lights: Blender, Unreal, Unity, three.js"),
+                    ("glTF (text)", "gltf", "The same as GLB, as one JSON file"),
+                    ("OBJ + MTL", "obj", "Meshes and colours, for almost any 3D tool"),
+                    ("STL", "stl", "Geometry only, for 3D printing and CAD"),
+                    ("FBX (via Blender)", "fbx", "Needs Blender on this computer (desktop editor)"),
+                ] {
+                    if ui.button(label).on_hover_text(tip).clicked() {
+                        self.export_model(format);
+                        ui.close();
+                    }
+                }
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak("3D previs for AI images and video");
             });
@@ -531,10 +2105,16 @@ impl EditorApp {
         let filter = self.block_filter.trim().to_lowercase();
         egui::ScrollArea::vertical().id_salt("blocks").auto_shrink([false, false]).show(ui, |ui| {
             let gap = ui.spacing().item_spacing.x;
-            let cols = ((ui.available_width() + gap) / (74.0 + gap)).floor().max(2.0);
-            let tile = ((ui.available_width() + gap) / cols - gap).floor();
+            // tiles fill the width inside a section (sections are indented)
+            let tile_for = |w: f32| {
+                let cols = ((w + gap) / (70.0 + gap)).floor().max(2.0);
+                ((w + gap) / cols - gap).floor() - 0.5
+            };
+            let tile = tile_for(ui.available_width() - ui.spacing().indent);
             for (title, open, blocks) in palette() {
-                let shown: Vec<Block> = blocks.into_iter().filter(|b| b.matches(&filter)).collect();
+                // searching a section's name shows all of it
+                let whole = !filter.is_empty() && title.to_lowercase().contains(&filter);
+                let shown: Vec<Block> = blocks.into_iter().filter(|b| whole || b.matches(&filter)).collect();
                 if shown.is_empty() {
                     continue;
                 }
@@ -544,6 +2124,7 @@ impl EditorApp {
                     header = header.open(Some(true));
                 }
                 header.show(ui, |ui| {
+                    let tile = tile_for(ui.available_width());
                     ui.horizontal_wrapped(|ui| {
                         for b in &shown {
                             self.block_tile(ui, b, tile);
@@ -551,6 +2132,25 @@ impl EditorApp {
                     });
                 });
             }
+            egui::CollapsingHeader::new(egui::RichText::new("Images").strong())
+                .id_salt("images")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.weak("Pick a picture, or drop one on the view (a transparent PNG becomes a cut-out).");
+                    ui.horizontal_wrapped(|ui| {
+                        for (label, mode, tip) in [
+                            ("Card", "card", "A standing picture: reference photo, poster, sign"),
+                            ("Cut-out", "billboard", "Always faces the camera: cut-out people, trees"),
+                            ("Backdrop", "backdrop", "Fills the camera's background, behind everything"),
+                            ("Floor", "floor", "Lies flat: rug, floor plan, logo on the ground"),
+                        ] {
+                            if ui.add_sized([tile, 30.0], egui::Button::new(label)).on_hover_text(tip).clicked() {
+                                self.image_mode = Some(mode);
+                                crate::files::pick(&self.incoming, ui.ctx());
+                            }
+                        }
+                    });
+                });
             egui::CollapsingHeader::new(egui::RichText::new("Cameras & helpers").strong())
                 .id_salt("helpers")
                 .default_open(false)
@@ -584,27 +2184,63 @@ impl EditorApp {
     }
 
     fn block_tile(&mut self, ui: &mut egui::Ui, b: &Block, width: f32) {
-        let r = ui
-            .add_sized(
+        let thumb = b.thumb_key().and_then(|k| self.thumbs.as_ref()?.get(&k));
+        let r = match thumb {
+            // a picture with the label under it
+            Some((tex, uv)) => {
+                let height = (width - 8.0) * 0.75 + 24.0;
+                let (rect, r) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+                let v = ui.style().interact(&r);
+                let p = ui.painter_at(rect);
+                p.rect_filled(rect, 5.0, v.weak_bg_fill);
+                p.rect_stroke(rect, 5.0, v.bg_stroke, egui::StrokeKind::Inside);
+                let img =
+                    Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(width - 8.0, (width - 8.0) * 0.75));
+                p.image(tex, img, uv, Color32::WHITE);
+                p.text(
+                    egui::pos2(rect.center().x, rect.bottom() - 11.0),
+                    egui::Align2::CENTER_CENTER,
+                    b.label(),
+                    egui::FontId::proportional(11.5),
+                    v.text_color(),
+                );
+                r
+            }
+            None => ui.add_sized(
                 [width, 30.0],
                 egui::Button::new(egui::RichText::new(b.label()).size(12.5)).sense(Sense::click_and_drag()),
-            )
-            .on_hover_cursor(CursorIcon::Grab)
-            .on_hover_text(b.description());
-        if r.drag_started() {
+            ),
+        };
+        let r = r.on_hover_cursor(CursorIcon::Grab).on_hover_text(b.description());
+        if r.drag_started() && !matches!(b, Block::LightPreset(..)) {
             let key = self.new_key("new");
             self.palette = Some(PaletteDrag { block: b.clone(), spawned: None, key });
         }
         if r.clicked() {
-            let key = self.new_key("new");
-            if let Some(id) = self.spawn(b, &key) {
-                if let Some((rect, view)) = self.last_view {
-                    self.place_on_ray(&key, &id, ray_at(rect, &view, rect.center()), Vec3::ZERO, false);
-                } else {
-                    self.run_key(&key, "entity.place", json!({"id": id}));
-                }
-                self.select(Some(id));
+            self.use_block(b);
+        }
+    }
+
+    /// Clicking a block: drop it in the middle of the view (or apply a lighting preset).
+    fn use_block(&mut self, b: &Block) {
+        if let Block::LightPreset(preset, ..) = b {
+            let mut p = json!({"preset": preset});
+            if let Some(s) = self.last_subject.clone().filter(|s| self.scene().contains(s)) {
+                p["subject"] = json!(s);
             }
+            if self.run("light.preset", p).is_some() {
+                self.toast(format!("Lighting: {}", b.label()));
+            }
+            return;
+        }
+        let key = self.new_key("new");
+        if let Some(id) = self.spawn(b, &key) {
+            if let Some((rect, view)) = self.last_view {
+                self.place_on_ray(&key, &id, ray_at(rect, &view, rect.center()), Vec3::ZERO, false);
+            } else {
+                self.run_key(&key, "entity.place", json!({"id": id}));
+            }
+            self.select(Some(id));
         }
     }
 
@@ -615,59 +2251,112 @@ impl EditorApp {
         ui.horizontal(|ui| {
             ui.strong("Scene");
             ui.weak(format!("{} objects", scene.entities.iter().filter(|e| e.parent.is_none()).count()));
+            if scene.entities.len() > 8 {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tree_filter)
+                        .hint_text("Filter…")
+                        .desired_width(ui.available_width()),
+                );
+            }
         });
+        let filter = self.tree_filter.trim().to_lowercase();
+        // with a filter, show the matching objects flat
+        let flat: Option<Vec<&shotstage_core::Entity>> = (!filter.is_empty()).then(|| {
+            scene
+                .entities
+                .iter()
+                .filter(|e| !rig::is_joint(&scene, &e.id) && e.name.to_lowercase().contains(&filter))
+                .collect()
+        });
+        let mut ctx = TreeCtx {
+            scene: &scene,
+            selected: &selected,
+            also: &self.also,
+            renaming: &mut self.renaming,
+            acts: Vec::new(),
+        };
         egui::ScrollArea::vertical().id_salt("scene_tree").auto_shrink([false, false]).show(ui, |ui| {
-            fn row(ui: &mut egui::Ui, scene: &Scene, e: &shotstage_core::Entity, selected: &Option<String>) -> bool {
-                let icon = match e.kind {
-                    EntityKind::Mesh { .. } => "■",
-                    EntityKind::Camera(_) => "◉",
-                    EntityKind::Empty if rig::joint_name(scene, &e.id).is_some() => "•",
-                    EntityKind::Empty => "▣",
-                };
-                let active = if scene.active_camera.as_deref() == Some(&e.id) { " ★" } else { "" };
-                let text = format!("{icon} {}{active}", e.name);
-                let text = if e.visible { egui::RichText::new(text) } else { egui::RichText::new(text).weak() };
-                ui.selectable_label(selected.as_deref() == Some(&e.id), text).clicked()
-            }
-            fn tree(
-                ui: &mut egui::Ui,
-                scene: &Scene,
-                parent: Option<&str>,
-                selected: &Option<String>,
-                picked: &mut Option<Option<String>>,
-            ) {
-                for e in scene.children(parent) {
-                    if scene.children(Some(&e.id)).next().is_none() {
-                        if row(ui, scene, e, selected) {
-                            *picked = Some(Some(e.id.clone()));
-                        }
-                        continue;
+            match &flat {
+                Some(list) => {
+                    for e in list {
+                        tree_row(ui, &mut ctx, e);
                     }
-                    // groups start folded; open the ones holding the selection
-                    let id = ui.make_persistent_id(("tree", &e.id));
-                    let mut state =
-                        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-                    if selected.as_ref().is_some_and(|s| s != &e.id && spatial::subtree(scene, &e.id).contains(s)) {
-                        state.set_open(true);
+                    if list.is_empty() {
+                        ui.weak("Nothing matches.");
                     }
-                    state
-                        .show_header(ui, |ui| {
-                            if row(ui, scene, e, selected) {
-                                *picked = Some(Some(e.id.clone()));
-                            }
-                        })
-                        .body(|ui| tree(ui, scene, Some(&e.id), selected, picked));
                 }
-            }
-            let mut picked = None;
-            tree(ui, &scene, None, &selected, &mut picked);
-            if let Some(p) = picked {
-                self.select(p);
+                None => tree_level(ui, &mut ctx, None),
             }
             if scene.entities.is_empty() {
                 ui.weak("Empty scene. Add blocks above, or drive it from the console / API.");
             }
         });
+        let acts = std::mem::take(&mut ctx.acts);
+        for act in acts {
+            match act {
+                TreeAct::Pick(id, false) => {
+                    self.also.clear();
+                    self.select(Some(id));
+                }
+                TreeAct::Pick(id, true) => match self.selected() {
+                    None => self.select(Some(id)),
+                    Some(p) if p == id => {}
+                    Some(_) => match self.also.iter().position(|a| *a == id) {
+                        Some(i) => {
+                            self.also.remove(i);
+                        }
+                        None => self.also.push(id),
+                    },
+                },
+                TreeAct::Visible(id, v) => _ = self.run("entity.setVisible", json!({"id": id, "visible": v})),
+                TreeAct::Locked(id, v) => _ = self.run("entity.setLocked", json!({"id": id, "locked": v})),
+                TreeAct::Rename(id, name) => {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        self.run("entity.rename", json!({"id": id, "name": name}));
+                    }
+                }
+                TreeAct::Focus(id) => {
+                    self.also.clear();
+                    self.select(Some(id));
+                    self.focus_selection();
+                }
+                TreeAct::Duplicate(id) => {
+                    if let Some(r) = self.run("entity.duplicate", json!({"id": id})) {
+                        self.select(r["id"].as_str().map(str::to_string));
+                    }
+                }
+                TreeAct::Delete(id) => _ = self.run("entity.delete", json!({ "id": id })),
+            }
+        }
+    }
+
+    /// The selection's name as a heading; click it to rename.
+    fn name_header(&mut self, ui: &mut egui::Ui, id: &str, name: &str, editable: bool) {
+        if let Some((eid, buf)) = self.name_edit.as_mut()
+            && eid == id
+        {
+            let r = ui.add(egui::TextEdit::singleline(buf).font(egui::TextStyle::Heading).desired_width(f32::INFINITY));
+            // (lost_focus is read before asking for focus again, or it never reports)
+            if r.lost_focus() {
+                let new = buf.trim().to_string();
+                self.name_edit = None;
+                if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && !new.is_empty() && new != name {
+                    self.run("entity.rename", json!({"id": id, "name": new}));
+                }
+            } else if !r.has_focus() {
+                r.request_focus();
+            }
+            return;
+        }
+        let r = ui.add(egui::Label::new(egui::RichText::new(name).heading()).sense(if editable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        }));
+        if editable && r.on_hover_cursor(CursorIcon::Text).on_hover_text("Click to rename").clicked() {
+            self.name_edit = Some((id.to_string(), name.to_string()));
+        }
     }
 
     fn properties(&mut self, ui: &mut egui::Ui) {
@@ -678,12 +2367,16 @@ impl EditorApp {
             ui.label("• Drag a block from the left into the scene.");
             ui.label("• Click an object to select it; drag it to slide it over surfaces.");
             ui.label("• Click a person, then a body part, to pose it.");
-            ui.label("• Pinch or scroll to zoom, drag empty space to orbit.");
+            ui.label("• Drag empty space (or two fingers on a trackpad) to orbit; pinch or wheel to zoom.");
             return;
         };
         let scene = self.scene();
         let Ok(e) = scene.get(&id) else { return };
         let frame = self.frame();
+        if !self.also.is_empty() {
+            self.multi_section(ui, &scene, &id);
+            return;
+        }
         let joint = rig::joint_name(&scene, &id);
         let person = rig::person_root(&scene, &id).ok().filter(|r| *r == id);
         let kind = match (&e.kind, joint, &person) {
@@ -692,8 +2385,16 @@ impl EditorApp {
             (EntityKind::Empty, ..) if scene.children(Some(&id)).next().is_some() => "group",
             (k, ..) => k.type_name(),
         };
-        ui.heading(&e.name);
-        ui.weak(format!("{kind} · {}", e.id));
+        self.name_header(ui, &id, &e.name, joint.is_none());
+        let dims = matches!(e.kind, EntityKind::Mesh { .. } | EntityKind::Empty | EntityKind::Image(_))
+            .then(|| spatial::bounds(&scene, &id, frame).ok().flatten())
+            .flatten()
+            .map(|b| {
+                let s = b.size();
+                format!(" · {:.2} × {:.2} × {:.2} m", s.x, s.y, s.z)
+            })
+            .unwrap_or_default();
+        ui.weak(format!("{kind} · {}{dims}", e.id));
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let mut visible = e.visible;
@@ -721,15 +2422,60 @@ impl EditorApp {
             self.joint_section(ui, &scene, &id, j, frame);
             return;
         }
+        if rig::is_joint(&scene, &id) {
+            self.bone_section(ui, &scene, &id, frame);
+            return;
+        }
         if let Some(root) = &person {
             self.person_section(ui, &scene, root, frame);
         }
 
-        if !matches!(e.kind, EntityKind::Camera(_)) {
+        if !matches!(e.kind, EntityKind::Camera(_) | EntityKind::Light(_)) {
             section(ui, "Place", true, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Drop to surface").on_hover_text("entity.place").clicked() {
                         self.run("entity.place", json!({"id": id, "frame": frame}));
+                    }
+                    // props can be held by a person (they follow the hand)
+                    if person.is_none() {
+                        let held_by = e.parent.as_ref().filter(|p| rig::is_joint(&scene, p)).cloned();
+                        match held_by {
+                            Some(_) => {
+                                if ui
+                                    .button("Let go")
+                                    .on_hover_text("Stop following the hand (stays where it is)")
+                                    .clicked()
+                                {
+                                    self.run("entity.attach", json!({"id": id, "to": null}));
+                                }
+                            }
+                            None => {
+                                let people: Vec<(String, String)> = scene
+                                    .entities
+                                    .iter()
+                                    .filter(|x| {
+                                        x.parent.is_none() && rig::person_root(&scene, &x.id).is_ok_and(|r| r == x.id)
+                                    })
+                                    .map(|x| (x.id.clone(), x.name.clone()))
+                                    .collect();
+                                if !people.is_empty() {
+                                    ui.menu_button("Hold in hand", |ui| {
+                                        for (pid, pname) in &people {
+                                            for (hand, label) in [("right", "right hand"), ("left", "left hand")] {
+                                                if ui.button(format!("{pname} · {label}")).clicked() {
+                                                    self.run(
+                                                        "entity.attach",
+                                                        json!({"id": id, "to": pid, "hand": hand}),
+                                                    );
+                                                    self.toast("It now follows the hand: pose or animate the person");
+                                                    ui.close();
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
                     }
                     if ui.button("↺ 45°").on_hover_text("R").clicked() {
                         self.run("entity.rotate", json!({"id": id, "degrees": 45, "frame": frame}));
@@ -796,9 +2542,10 @@ impl EditorApp {
             });
         }
 
+        self.animate_section(ui, &scene, &id, frame);
         let plain = person.is_none() && !matches!(e.kind, EntityKind::Empty);
         section(ui, "Transform", plain, |ui| {
-            let animated = scene.timeline.track(&id, TrackProperty::Transform).is_some();
+            let animated = self.keyed(&scene, &id);
             let t = local_at(&scene, &id, frame).unwrap_or(e.transform);
             let (mut pos, mut rot, mut scale) = (t.translation, t.euler_degrees(), t.scale);
             let (mut changed, mut started) = (false, false);
@@ -899,6 +2646,97 @@ impl EditorApp {
             EntityKind::Camera(_) => {
                 section(ui, "Camera", true, |ui| {
                     let lens = camera_data_at(&scene, &id, frame).unwrap_or_default();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Frame");
+                        for (label, a, tip) in [
+                            ("16:9", 16.0 / 9.0, "Landscape video"),
+                            ("9:16", 9.0 / 16.0, "Vertical video: Reels, TikTok, Shorts"),
+                            ("1:1", 1.0, "Square"),
+                            ("4:5", 0.8, "Portrait feed post"),
+                            ("4:3", 4.0 / 3.0, "Classic"),
+                            ("2.39:1", 2.39, "Cinemascope"),
+                        ] {
+                            let on = (lens.aspect - a).abs() < 0.01;
+                            if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                                self.run("camera.setLens", json!({"id": id, "aspect": a}));
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .button("Match current view")
+                            .on_hover_text("Put this camera where you are looking from in the view")
+                            .clicked()
+                        {
+                            // one undo step: move, aim, and key it if it is animated
+                            let eye = self.orbit.eye();
+                            let mut steps = vec![
+                                json!({"command": "entity.moveTo", "params": {"id": id, "position": eye.to_array(), "frame": frame}}),
+                                json!({"command": "camera.lookAt", "params": {"id": id, "target": self.orbit.target.to_array()}}),
+                            ];
+                            if self.keyed(&scene, &id) {
+                                steps.push(json!({"command": "keyframe.set", "params": {"id": id, "property": "transform", "frame": frame.round()}}));
+                            }
+                            if let Err(e) = hub::dispatch(&self.hub, json!({"batch": steps})) {
+                                self.toast(format!("Could not match the view: {}", e.message));
+                            }
+                        }
+                        ui.checkbox(&mut self.safe_areas, "Safe areas")
+                            .on_hover_text("Action / title safe frames in the camera view");
+                    });
+                    // Dutch angle: roll the camera about its view axis
+                    let t = local_at(&scene, &id, frame).unwrap_or(e.transform);
+                    let mut e3 = t.euler_degrees();
+                    ui.horizontal(|ui| {
+                        ui.label("Roll");
+                        let r = ui
+                            .add(egui::Slider::new(&mut e3[2], -45.0..=45.0).suffix("°").max_decimals(0))
+                            .on_hover_text("Tilt the horizon (a Dutch angle)");
+                        if r.drag_started() {
+                            self.gesture += 1;
+                        }
+                        if r.changed() {
+                            let mut p = json!({"id": id, "rotationEuler": e3});
+                            if self.keyed(&scene, &id) {
+                                p["keyframeAt"] = json!(frame.round());
+                            }
+                            self.run_merged(&format!("roll:{id}"), "entity.setTransform", p);
+                        }
+                        if ui.small_button("Level").clicked() {
+                            e3[2] = 0.0;
+                            self.run("entity.setTransform", json!({"id": id, "rotationEuler": e3}));
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Reference");
+                        if ui
+                            .button("Load picture…")
+                            .on_hover_text(
+                                "Lay a storyboard frame or a reference photo over this camera's view to match it",
+                            )
+                            .clicked()
+                        {
+                            self.reference_for = Some(id.clone());
+                            crate::files::pick(&self.incoming, ui.ctx());
+                        }
+                        if let Some(r) = scene.references.get(&id) {
+                            let mut o = r.opacity;
+                            let resp = ui.add(egui::Slider::new(&mut o, 0.0..=1.0).show_value(false));
+                            if resp.drag_started() {
+                                self.gesture += 1;
+                            }
+                            if resp.changed() {
+                                self.run_merged(
+                                    &format!("ref:{id}"),
+                                    "camera.setReference",
+                                    json!({"camera": id, "opacity": o}),
+                                );
+                            }
+                            if ui.small_button("✕").on_hover_text("Remove the reference").clicked() {
+                                self.run("camera.setReference", json!({"camera": id, "clear": true}));
+                            }
+                        }
+                    });
                     let mut focal = lens.focal_length_mm;
                     let focal_animated = scene.timeline.track(&id, TrackProperty::FocalLength).is_some();
                     ui.horizontal(|ui| {
@@ -949,17 +2787,220 @@ impl EditorApp {
                     }
                 });
             }
+            EntityKind::Light(l) => self.light_section(ui, &id, l),
+            EntityKind::Image(img) => {
+                let img = img.clone();
+                section(ui, "Image", true, |ui| {
+                    let mut billboard = img.billboard;
+                    if ui
+                        .checkbox(&mut billboard, "Always face the camera (billboard)")
+                        .on_hover_text("For cut-out people, trees and signs")
+                        .changed()
+                    {
+                        self.run("image.set", json!({"id": id, "billboard": billboard}));
+                    }
+                    let mut h = img.size[1];
+                    ui.horizontal(|ui| {
+                        ui.label("Height");
+                        let r = ui.add(egui::DragValue::new(&mut h).range(0.01..=500.0).speed(0.01).suffix(" m"));
+                        if r.drag_started() {
+                            self.gesture += 1;
+                        }
+                        if r.changed() {
+                            self.run_merged(&format!("img:{id}"), "image.set", json!({"id": id, "height": h}));
+                        }
+                    });
+                    if let Some(a) = scene.assets.get(&img.asset) {
+                        ui.weak(format!("{} × {} px · {:.2} × {:.2} m", a.width, a.height, img.size[0], img.size[1]));
+                    }
+                });
+            }
             EntityKind::Empty => {}
         }
     }
 
+    /// A bone of an imported skeleton: plain rotation sliders.
+    fn bone_section(&mut self, ui: &mut egui::Ui, scene: &Scene, id: &str, frame: f32) {
+        let animated = self.keyed(scene, id);
+        section(ui, "Bone", true, |ui| {
+            ui.weak("Drag the model's surface in the view to bend this bone, or turn the coloured rings.");
+            let mut r = local_at(scene, id, frame).map(|t| t.euler_degrees()).unwrap_or_default();
+            let (mut changed, mut started) = (false, false);
+            egui::Grid::new("bone_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                for (i, label) in ["X", "Y", "Z"].iter().enumerate() {
+                    ui.label(*label);
+                    let resp = ui.add(egui::Slider::new(&mut r[i], -180.0..=180.0).suffix("°").max_decimals(0));
+                    changed |= resp.changed();
+                    started |= resp.drag_started();
+                    ui.end_row();
+                }
+            });
+            if started {
+                self.gesture += 1;
+            }
+            if changed {
+                let mut p = json!({"id": id, "rotationEuler": r});
+                if animated {
+                    p["keyframeAt"] = json!(frame.round());
+                }
+                self.run_merged(&format!("bone:{id}"), "entity.setTransform", p);
+            }
+            if ui.button("Select model").clicked() {
+                self.select(Some(root_of(scene, id)));
+            }
+        });
+    }
+
+    fn light_section(&mut self, ui: &mut egui::Ui, id: &str, l: &shotstage_core::LightData) {
+        use shotstage_core::LightKind;
+        section(ui, "Light", true, |ui| {
+            let mut n = *l;
+            let mut started = false;
+            egui::Grid::new("light_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                ui.label("Kind");
+                ui.horizontal(|ui| {
+                    for (k, label) in [
+                        (LightKind::Sun, "Sun"),
+                        (LightKind::Point, "Point"),
+                        (LightKind::Spot, "Spot"),
+                        (LightKind::Area, "Area"),
+                    ] {
+                        ui.selectable_value(&mut n.kind, k, label);
+                    }
+                });
+                ui.end_row();
+                ui.label("Colour");
+                ui.horizontal(|ui| {
+                    started |= ui.color_edit_button_rgb(&mut n.color).clicked();
+                    for (label, c) in
+                        [("Warm", [1.0, 0.8, 0.6]), ("Neutral", [1.0, 1.0, 1.0]), ("Cool", [0.75, 0.85, 1.0])]
+                    {
+                        if ui.small_button(label).clicked() {
+                            n.color = c;
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label("Intensity");
+                let r = ui.add(egui::Slider::new(&mut n.intensity, 0.0..=20.0).logarithmic(true).max_decimals(2));
+                started |= r.drag_started();
+                ui.end_row();
+                if n.kind == LightKind::Spot {
+                    ui.label("Cone");
+                    started |= ui.add(egui::Slider::new(&mut n.cone_degrees, 5.0..=170.0).suffix("°")).drag_started();
+                    ui.end_row();
+                }
+                if matches!(n.kind, LightKind::Spot | LightKind::Area) {
+                    ui.label("Softness");
+                    started |= ui.add(egui::Slider::new(&mut n.softness, 0.0..=1.0)).drag_started();
+                    ui.end_row();
+                }
+                if n.kind == LightKind::Area {
+                    ui.label("Size");
+                    ui.horizontal(|ui| {
+                        for v in n.size.iter_mut() {
+                            started |= ui
+                                .add(egui::DragValue::new(v).range(0.05..=20.0).speed(0.01).suffix(" m"))
+                                .drag_started();
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            if started {
+                self.gesture += 1;
+            }
+            if n != *l {
+                self.run_merged(
+                    &format!("light:{id}"),
+                    "light.set",
+                    json!({"id": id, "kind": n.kind, "color": n.color, "intensity": n.intensity,
+                        "coneDegrees": n.cone_degrees, "softness": n.softness, "size": n.size}),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if let Some(target) = self.light_target()
+                    && ui.button("Aim at selection's group").on_hover_text("camera.lookAt").clicked()
+                {
+                    self.run("camera.lookAt", json!({"id": id, "target": target}));
+                }
+                if ui.button("Aim at origin").clicked() {
+                    self.run("camera.lookAt", json!({"id": id, "target": [0, 0.8, 0]}));
+                }
+            });
+            ui.weak("A light shines along its -Z. Scenes with lights are lit by them; toggle Studio light in the view toolbar to compare.");
+        });
+    }
+
+    /// What a light should aim at: the subject last framed, else nothing.
+    fn light_target(&self) -> Option<Value> {
+        self.last_subject.as_ref().filter(|s| self.scene().contains(s)).map(|s| json!(s))
+    }
+
+    /// Several objects selected: group, align, distribute, delete.
+    fn multi_section(&mut self, ui: &mut egui::Ui, scene: &Scene, primary: &str) {
+        let ids: Vec<String> = std::iter::once(primary.to_string()).chain(self.also.iter().cloned()).collect();
+        ui.heading(format!("{} objects", ids.len()));
+        ui.weak(
+            ids.iter().map(|i| scene.get(i).map(|e| e.name.clone()).unwrap_or_default()).collect::<Vec<_>>().join(", "),
+        );
+        ui.weak("Shift+click adds or removes objects; click one alone to select just it.");
+        ui.add_space(4.0);
+        section(ui, "Arrange", true, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Group").on_hover_text("Ctrl/Cmd+G").clicked() {
+                    self.group_selection();
+                }
+                if ui.button("Delete all").clicked() {
+                    let steps: Vec<Value> =
+                        ids.iter().map(|i| json!({"command": "entity.delete", "params": {"id": i}})).collect();
+                    let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
+                    self.also.clear();
+                }
+            });
+            egui::Grid::new("align_grid").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
+                for (axis, label) in [("x", "Align X"), ("z", "Align Z"), ("y", "Align Y")] {
+                    ui.label(label);
+                    for (to, t) in [("min", "min"), ("center", "centre"), ("max", "max")] {
+                        if ui.small_button(t).clicked() {
+                            self.run("entity.align", json!({"ids": ids, "axis": axis, "to": to}));
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+            if ids.len() >= 3 {
+                ui.horizontal(|ui| {
+                    ui.label("Distribute");
+                    for axis in ["x", "z"] {
+                        if ui.small_button(axis.to_uppercase()).clicked() {
+                            self.run("entity.distribute", json!({"ids": ids, "axis": axis}));
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    fn group_selection(&mut self) {
+        let Some(primary) = self.selected() else { return };
+        let ids: Vec<String> = std::iter::once(primary).chain(self.also.drain(..)).collect();
+        match hub::dispatch(&self.hub, json!({"command": "entity.group", "params": {"ids": ids}})) {
+            Ok(o) => {
+                self.select(o.result["id"].as_str().map(str::to_string));
+                self.toast("Grouped: they now move together (Ctrl+Shift+G to ungroup)");
+            }
+            Err(e) => self.toast(format!("Could not group: {}", e.message)),
+        }
+    }
+
     fn person_section(&mut self, ui: &mut egui::Ui, scene: &Scene, root: &str, frame: f32) {
-        let animated = rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
+        let animated = self.auto_key || rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
         section(ui, "Pose", true, |ui| {
             ui.weak("Click a body part to select its joint, then drag it (or the rings) to bend it.");
             ui.horizontal_wrapped(|ui| {
                 for p in rig::POSES {
-                    if ui.button(p.name).on_hover_text(p.description).clicked() {
+                    if ui.button(humanize(p.name)).on_hover_text(p.description).clicked() {
                         let mut req = json!({"id": root, "pose": p.name, "frame": frame});
                         if animated {
                             req["keyframeAt"] = json!(frame.round());
@@ -969,6 +3010,18 @@ impl EditorApp {
                 }
             });
         });
+        if let Some(cam) = camera_id_at(scene, frame) {
+            ui.horizontal(|ui| {
+                if ui.button("Look at camera").on_hover_text("Turn the head and neck towards the shot camera").clicked()
+                {
+                    let mut req = json!({"id": root, "target": cam, "frame": frame});
+                    if animated {
+                        req["keyframeAt"] = json!(frame.round());
+                    }
+                    self.run("person.lookAt", req);
+                }
+            });
+        }
         section(ui, "Hair", true, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for style in rig::HAIR_STYLES {
@@ -1021,7 +3074,7 @@ impl EditorApp {
         let Ok(root) = rig::person_root(scene, id) else { return };
         let legs =
             joint.starts_with("hip") || joint.starts_with("knee") || joint.starts_with("ankle") || joint == "pelvis";
-        let animated = is_animated(scene, id);
+        let animated = self.keyed(scene, id);
         let set = |this: &mut Self, values: Value, merge: Option<&str>| {
             let mut req = json!({"id": root, "joints": values, "frame": frame, "drop": legs});
             if animated {
@@ -1077,79 +3130,96 @@ impl EditorApp {
     fn bottom(&mut self, ui: &mut egui::Ui) {
         let scene = self.scene();
         let t = scene.timeline.clone();
+        let fps = t.fps.max(1.0);
         ui.add_space(3.0);
         ui.horizontal(|ui| {
+            if ui.button("⏮").on_hover_text("To the start (Home)").clicked() {
+                self.hub.borrow_mut().frame = t.start as f32;
+            }
             if ui
-                .add_sized([64.0, 22.0], egui::Button::new(if self.playing { "⏸ Pause" } else { "▶ Play" }))
+                .add_sized([62.0, 22.0], egui::Button::new(if self.playing { "⏸ Pause" } else { "▶ Play" }))
                 .on_hover_text("Space")
                 .clicked()
             {
                 self.playing = !self.playing;
             }
-            let mut f = self.frame();
-            // keep room for the controls on the right
-            let w = (ui.available_width() - 560.0).max(120.0);
-            ui.spacing_mut().slider_width = w;
-            ui.add(egui::Slider::new(&mut f, t.start as f32..=t.end as f32).step_by(1.0).show_value(false));
-            if f != self.frame() {
-                self.hub.borrow_mut().frame = f;
+            if ui.button("⏭").on_hover_text("To the end (End)").clicked() {
+                self.hub.borrow_mut().frame = t.end as f32;
             }
-            ui.monospace(format!("{:>4.0} / {}", self.frame(), t.end));
-            ui.weak(format!("{:.1} s", (self.frame() - t.start as f32) / t.fps));
+            let has_cam = camera_id_at(&scene, t.start as f32).is_some();
+            if ui
+                .add_enabled(has_cam, egui::Button::new("🎥 Preview shot"))
+                .on_hover_text("Play from the start, looking through the shot camera")
+                .clicked()
+            {
+                self.hub.borrow_mut().frame = t.start as f32;
+                self.look_through = true;
+                self.hub.borrow_mut().look_through = true;
+                self.playing = true;
+            }
             ui.separator();
-            let (mut fps, mut start, mut end) = (t.fps, t.start, t.end);
-            let a = ui.add(egui::DragValue::new(&mut fps).range(1.0..=120.0).suffix(" fps"));
+            ui.monospace(format!("{:>4.0}", self.frame()));
+            ui.weak(format!("/ {} · {:.2} s", t.end, (self.frame() - t.start as f32) / fps));
+            ui.separator();
+            let sel = self.selected();
+            if ui
+                .add_enabled(sel.is_some(), egui::Button::new("◆ Key"))
+                .on_hover_text("Keyframe the selection at this frame (K)")
+                .clicked()
+            {
+                self.key_selection();
+            }
+            ui.toggle_value(&mut self.auto_key, "Auto-key")
+                .on_hover_text("Every move, turn or pose change is keyed at the current frame");
+            ui.separator();
+            let (mut fps2, mut start, mut end) = (t.fps, t.start, t.end);
+            let a = ui.add(egui::DragValue::new(&mut fps2).range(1.0..=120.0).suffix(" fps"));
             let b = ui.add(egui::DragValue::new(&mut start).range(0..=end));
             ui.label("–");
             let c = ui.add(egui::DragValue::new(&mut end).range(start..=100_000));
             if a.changed() || b.changed() || c.changed() {
-                self.run("timeline.set", json!({"fps": fps, "start": start, "end": end}));
+                self.run("timeline.set", json!({"fps": fps2, "start": start, "end": end}));
             }
-            ui.separator();
-            let shots = match t.shots.as_slice() {
-                [] => "no shots".to_string(),
-                [one] => format!("{} {}–{}", one.name, one.start, one.end),
-                many => format!("{} shots", many.len()),
-            };
-            let all = t
-                .shots
-                .iter()
-                .map(|s| format!("{} {}–{} via {}", s.name, s.start, s.end, s.camera))
-                .collect::<Vec<_>>();
-            ui.weak(shots).on_hover_text(if all.is_empty() {
-                "Shots: frame ranges seen through one camera".to_string()
-            } else {
-                all.join("\n")
-            });
-            if let Some(cam) = scene.active_camera.clone()
+            // the selected camera, else the active one
+            let sel_cam = self
+                .selected()
+                .filter(|id| matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_))))
+                .or(scene.active_camera.clone());
+            if let Some(cam) = sel_cam {
+                let name = scene.get(&cam).map(|e| e.name.clone()).unwrap_or(cam.clone());
+                let tip = if t.shots.is_empty() {
+                    format!("A shot through {name} over the whole timeline")
+                } else {
+                    format!("Cut to {name} at the playhead (select another camera to cut to it)")
+                };
+                if ui.small_button("+ Shot").on_hover_text(tip).clicked() {
+                    if t.shots.is_empty() {
+                        self.run("shot.create", json!({"camera": cam, "start": t.start, "end": t.end}));
+                    } else if let Some(r) = self.run(
+                        "shot.cut",
+                        json!({"camera": cam, "frame": self.frame().round().max(0.0) as u32, "name": name}),
+                    ) {
+                        self.toast(format!("Cut to {name} at frame {}", r["start"]));
+                    }
+                }
+            }
+            if self.tl_view.is_some()
                 && ui
-                    .small_button("+ Shot")
-                    .on_hover_text("A shot through the active camera over the full range")
+                    .small_button("Fit")
+                    .on_hover_text(
+                        "Show the whole timeline (or double-click the ruler; pinch or Cmd/Ctrl+scroll on it to zoom)",
+                    )
                     .clicked()
             {
-                self.run("shot.create", json!({"camera": cam, "start": t.start, "end": t.end}));
+                self.tl_view = None;
             }
+            ui.toggle_value(&mut self.show_board, "Storyboard")
+                .on_hover_text("Every shot as a picture through its camera; click one to go there");
             ui.separator();
             ui.toggle_value(&mut self.show_console, "Console")
                 .on_hover_text("Type commands: the same API as window.shotstage, the CLI and MCP");
         });
-        // keyframe ticks for the selection
-        if let Some(id) = self.selected() {
-            let frames: Vec<f32> =
-                t.tracks.iter().filter(|tr| tr.entity == id).flat_map(|tr| tr.keys.iter().map(|k| k.frame)).collect();
-            if !frames.is_empty() {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 10.0), Sense::hover());
-                let p = ui.painter_at(rect);
-                p.rect_filled(rect, 2.0, Color32::from_gray(38));
-                let span = (t.end - t.start).max(1) as f32;
-                for f in frames {
-                    let x = rect.left() + (f - t.start as f32) / span * rect.width();
-                    p.circle_filled(egui::pos2(x, rect.center().y), 3.5, ACCENT);
-                }
-                let x = rect.left() + (self.frame() - t.start as f32) / span * rect.width();
-                p.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], (1.5, Color32::WHITE));
-            }
-        }
+        self.track_strip(ui, &scene);
         if self.show_console {
             ui.separator();
             ui.horizontal(|ui| {
@@ -1183,6 +3253,598 @@ impl EditorApp {
             });
         }
         ui.add_space(2.0);
+    }
+
+    /// Animated objects as rows of keyframe diamonds under a ruler you can scrub. Drag a
+    /// diamond to retime it, right-click it for its easing, double-click a row to add a key.
+    fn track_strip(&mut self, ui: &mut egui::Ui, scene: &Scene) {
+        let t = &scene.timeline;
+        let (full0, full1) = (t.start as f32, t.end.max(t.start + 1) as f32);
+        let mut rows = timeline_rows(scene);
+        let sel_root = self.selected().map(|s| root_of(scene, &s));
+        if let Some(r) = &sel_root
+            && !rows.iter().any(|row| &row.id == r)
+            && let Ok(e) = scene.get(r)
+        {
+            rows.insert(0, TrackRow { id: r.clone(), label: e.name.clone(), tracks: vec![], frames: vec![] });
+        }
+        let label_w = 130.0;
+        let row_h = 18.0;
+        let full = ui.available_width();
+        // ruler
+        let (ruler, ruler_resp) = ui.allocate_exact_size(Vec2::new(full, 18.0), Sense::click_and_drag());
+        let area = Rect::from_min_max(egui::pos2(ruler.left() + label_w, ruler.top()), ruler.max);
+        // the visible frames: zoom with a pinch or Cmd/Ctrl+scroll over the timeline, pan with a
+        // sideways scroll; it follows the playhead while playing
+        let clamp_view = |(a, b): (f32, f32)| {
+            let span = (b - a).clamp(12.0_f32.min(full1 - full0), full1 - full0);
+            let a = a.clamp(full0, full1 - span);
+            (a, a + span)
+        };
+        let (mut t0, mut t1) = self.tl_view.map(clamp_view).unwrap_or((full0, full1));
+        if let Some(h) =
+            ui.input(|i| i.pointer.hover_pos()).filter(|h| h.x >= area.left() && ui.max_rect().contains(*h))
+        {
+            let (zoom, dx) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.x));
+            let at = t0 + (h.x - area.left()) / area.width() * (t1 - t0);
+            if zoom != 1.0 && zoom.is_finite() && zoom > 0.0 {
+                (t0, t1) = clamp_view((at - (at - t0) / zoom, at + (t1 - at) / zoom));
+            }
+            if dx != 0.0 && (t1 - t0) < full1 - full0 {
+                let df = -dx / area.width() * (t1 - t0);
+                (t0, t1) = clamp_view((t0 + df, t1 + df));
+            }
+        }
+        let now = self.frame();
+        if self.playing && (now > t1 || now < t0) {
+            (t0, t1) = clamp_view((now, now + (t1 - t0)));
+        }
+        self.tl_view = ((t1 - t0) < full1 - full0 - 0.5).then_some((t0, t1));
+        let x_of = |f: f32| area.left() + (f - t0) / (t1 - t0) * area.width();
+        let f_of = |x: f32| (t0 + (x - area.left()) / area.width() * (t1 - t0)).clamp(t0, t1).round();
+        let p = ui.painter_at(ruler);
+        p.rect_filled(ruler, 2.0, Color32::from_gray(30));
+        let fps = t.fps.max(1.0);
+        let secs = (t1 - t0) / fps;
+        let every = [0.25f32, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+            .into_iter()
+            .find(|s| secs / s <= area.width() / 60.0)
+            .unwrap_or(120.0);
+        // seconds from the timeline start; ticks from the first one in view
+        let mut s = (((t0 - full0) / fps) / every).ceil() * every;
+        while s <= (t1 - full0) / fps + 1e-3 {
+            let x = x_of(full0 + s * fps);
+            p.line_segment(
+                [egui::pos2(x, ruler.bottom() - 6.0), egui::pos2(x, ruler.bottom())],
+                (1.0, Color32::from_gray(110)),
+            );
+            p.text(
+                egui::pos2(x + 2.0, ruler.top() + 4.0),
+                egui::Align2::LEFT_TOP,
+                format!("{s}s"),
+                egui::FontId::proportional(10.0),
+                Color32::from_gray(150),
+            );
+            s += every;
+        }
+        p.text(
+            egui::pos2(ruler.left() + 4.0, ruler.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Timeline",
+            egui::FontId::proportional(11.0),
+            Color32::from_gray(170),
+        );
+        if ruler_resp.double_clicked() {
+            self.tl_view = None;
+        }
+        if (ruler_resp.dragged() || ruler_resp.clicked())
+            && let Some(pos) = ruler_resp.interact_pointer_pos()
+            && pos.x >= area.left()
+        {
+            self.playing = false;
+            self.hub.borrow_mut().frame = f_of(pos.x);
+        }
+        if ruler_resp.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+        let shots = t.shots.clone();
+        ruler_resp.context_menu(|ui| {
+            if shots.is_empty() {
+                ui.weak("No shots yet: + Shot makes one through the selected or active camera");
+            }
+            for s in &shots {
+                ui.menu_button(format!("{} · {}–{} · {}", s.name, s.start, s.end, s.camera), |ui| {
+                    if ui.button("Look through its camera").clicked() {
+                        self.run("camera.setActive", json!({"id": s.camera}));
+                        self.select(Some(s.camera.clone()));
+                        self.hub.borrow_mut().frame = s.start as f32;
+                        self.look_through = true;
+                        self.hub.borrow_mut().look_through = true;
+                        ui.close();
+                    }
+                    if ui.button("Delete shot").clicked() {
+                        self.run("shot.delete", json!({"id": s.id}));
+                        ui.close();
+                    }
+                });
+            }
+        });
+        // shots: one bar each; drag to move, drag an edge to trim, double-click to look through
+        let (srow, sresp) = ui.allocate_exact_size(Vec2::new(full, 18.0), Sense::click_and_drag());
+        {
+            let p = ui.painter_at(srow);
+            p.rect_filled(srow, 0.0, Color32::from_gray(26));
+            p.text(
+                egui::pos2(srow.left() + 6.0, srow.center().y),
+                egui::Align2::LEFT_CENTER,
+                "Shots",
+                egui::FontId::proportional(11.5),
+                Color32::from_gray(170),
+            );
+            let colors = [
+                Color32::from_rgb(70, 130, 220),
+                Color32::from_rgb(90, 170, 110),
+                Color32::from_rgb(210, 150, 60),
+                Color32::from_rgb(170, 100, 200),
+            ];
+            if t.shots.is_empty() {
+                p.text(
+                    egui::pos2(area.left() + 6.0, srow.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    if scene.entities.iter().any(|e| matches!(e.kind, EntityKind::Camera(_))) {
+                        "No shots: + Shot (above) or right-click here"
+                    } else {
+                        "No camera yet: + Camera in the view toolbar puts one where you look from"
+                    },
+                    egui::FontId::proportional(11.0),
+                    Color32::from_gray(110),
+                );
+            }
+            for (i, sh) in t.shots.iter().enumerate() {
+                let r = Rect::from_min_max(
+                    egui::pos2(x_of(sh.start as f32).max(area.left()), srow.top() + 2.0),
+                    egui::pos2(x_of(sh.end as f32 + 1.0).min(area.right()), srow.bottom() - 2.0),
+                );
+                if r.width() <= 0.0 {
+                    continue; // scrolled out of view
+                }
+                let active = self.shot_drag.as_ref().is_some_and(|d| d.id == sh.id);
+                p.rect_filled(r, 3.0, if active { colors[i % 4].gamma_multiply(1.3) } else { colors[i % 4] });
+                let cam = scene.get(&sh.camera).map(|e| e.name.as_str()).unwrap_or(&sh.camera);
+                p.text(
+                    r.left_center() + Vec2::new(5.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{} · {cam}", sh.name),
+                    egui::FontId::proportional(10.5),
+                    Color32::WHITE,
+                );
+            }
+        }
+        let shot_at = |x: f32| -> Option<(String, u8)> {
+            t.shots.iter().find_map(|sh| {
+                let (a, b) = (x_of(sh.start as f32), x_of(sh.end as f32 + 1.0));
+                if (x - a).abs() < 5.0 {
+                    Some((sh.id.clone(), 1))
+                } else if (x - b).abs() < 5.0 {
+                    Some((sh.id.clone(), 2))
+                } else if x > a && x < b {
+                    Some((sh.id.clone(), 0))
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(h) = sresp.hover_pos() {
+            match shot_at(h.x) {
+                Some((_, 1 | 2)) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+                Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
+                None => {}
+            }
+        }
+        if sresp.drag_started()
+            && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(sresp.interact_pointer_pos())
+            && let Some((id, part)) = shot_at(pos.x)
+            && let Some(sh) = t.shots.iter().find(|s| s.id == id)
+        {
+            let key = self.new_key("shot");
+            self.shot_drag = Some(ShotDrag { id, part, grab: f_of(pos.x), start: sh.start, end: sh.end, key });
+        }
+        // also on release, so a quick flick still lands where the pointer ended
+        if (sresp.dragged() || sresp.drag_stopped())
+            && let (Some(d), Some(pos)) = (self.shot_drag.clone(), ui.input(|i| i.pointer.latest_pos()))
+        {
+            let delta = (f_of(pos.x) - d.grab) as i64;
+            let (mut a, mut b) = (d.start as i64, d.end as i64);
+            match d.part {
+                1 => a = (a + delta).clamp(0, b),
+                2 => b = (b + delta).max(a),
+                _ => {
+                    let shift = delta.max(-a);
+                    a += shift;
+                    b += shift;
+                }
+            }
+            self.run_key(&d.key, "shot.set", json!({"id": d.id, "start": a, "end": b}));
+        }
+        if sresp.drag_stopped() {
+            self.shot_drag = None;
+        }
+        if sresp.double_clicked()
+            && let Some(pos) = sresp.interact_pointer_pos()
+            && let Some((id, _)) = shot_at(pos.x)
+            && let Some(sh) = t.shots.iter().find(|s| s.id == id)
+        {
+            self.hub.borrow_mut().frame = sh.start as f32;
+            self.look_through = true;
+            self.hub.borrow_mut().look_through = true;
+        }
+        if sresp.secondary_clicked() {
+            self.key_menu = sresp.interact_pointer_pos().map(|p| ("__shots__".to_string(), f_of(p.x)));
+        }
+        let cams: Vec<(String, String)> = scene
+            .entities
+            .iter()
+            .filter(|e| matches!(e.kind, EntityKind::Camera(_)))
+            .map(|e| (e.id.clone(), e.name.clone()))
+            .collect();
+        let menu_frame = self.key_menu.clone().filter(|(r, _)| r == "__shots__").map(|(_, f)| f);
+        sresp.context_menu(|ui| {
+            let Some(fr) = menu_frame else { return };
+            let under = t.shots.iter().find(|s| fr >= s.start as f32 && fr <= s.end as f32).cloned();
+            match under {
+                Some(sh) => {
+                    ui.weak(format!("{} · frames {}–{}", sh.name, sh.start, sh.end));
+                    ui.menu_button("Camera", |ui| {
+                        for (cid, cname) in &cams {
+                            if ui.selectable_label(*cid == sh.camera, cname).clicked() {
+                                self.run("shot.set", json!({"id": sh.id, "camera": cid}));
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui.button("Split at the playhead").clicked() {
+                        let f = self.frame().round() as u32;
+                        if f > sh.start && f <= sh.end {
+                            let _ = hub::dispatch(&self.hub, json!({"batch": [
+                                {"command": "shot.set", "params": {"id": sh.id, "end": f - 1}},
+                                {"command": "shot.create", "params": {"camera": sh.camera, "start": f, "end": sh.end, "name": format!("{} b", sh.name)}},
+                            ]}));
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Delete shot").clicked() {
+                        self.run("shot.delete", json!({"id": sh.id}));
+                        ui.close();
+                    }
+                }
+                None => {
+                    ui.weak(format!("frame {fr:.0}"));
+                    for (cid, cname) in &cams {
+                        if ui.button(format!("New shot here through {cname}")).clicked() {
+                            let a = fr.round().max(0.0) as u32;
+                            let next = t.shots.iter().map(|s| s.start).filter(|s| *s > a).min().unwrap_or(t.end + 1);
+                            self.run("shot.create", json!({"camera": cid, "start": a, "end": (a + (t.fps * 3.0) as u32).min(next.saturating_sub(1)).max(a)}));
+                            ui.close();
+                        }
+                    }
+                    if cams.is_empty() {
+                        ui.weak("Add a camera first");
+                    }
+                }
+            }
+        });
+        let mut playhead_bottom = srow.bottom();
+        egui::ScrollArea::vertical().id_salt("tracks").max_height(row_h * 5.0 + 2.0).auto_shrink([false, true]).show(ui, |ui| {
+            if rows.is_empty() {
+                ui.weak("No animation yet: select something and press ◆ Key, or use a preset under Animate on the right.");
+            }
+            for (ri, row) in rows.iter().enumerate() {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(full, row_h), Sense::click_and_drag());
+                playhead_bottom = rect.bottom();
+                let p = ui.painter_at(rect);
+                let selected = sel_root.as_deref() == Some(row.id.as_str());
+                p.rect_filled(rect, 0.0, if selected { Color32::from_rgb(34, 44, 60) } else if ri % 2 == 0 { Color32::from_gray(24) } else { Color32::from_gray(28) });
+                p.text(egui::pos2(rect.left() + 6.0, rect.center().y), egui::Align2::LEFT_CENTER, &row.label, egui::FontId::proportional(11.5), if selected { Color32::WHITE } else { Color32::from_gray(190) });
+                // segments between keys show their easing
+                for w in row.frames.windows(2) {
+                    let y = rect.center().y;
+                    let (a, b) = (x_of(w[0]).max(area.left()), x_of(w[1]).min(area.right()));
+                    if a < b {
+                        p.line_segment([egui::pos2(a, y), egui::pos2(b, y)], (2.0, Color32::from_gray(60)));
+                    }
+                }
+                let near = resp.hover_pos().and_then(|h| row.frames.iter().copied().find(|f| (x_of(*f) - h.x).abs() < 6.0));
+                for f in row.frames.iter().filter(|f| (t0 - 0.5..=t1 + 0.5).contains(*f)) {
+                    let c = egui::pos2(x_of(*f), rect.center().y);
+                    let hot = near == Some(*f) || self.key_drag.as_ref().is_some_and(|d| d.row == row.id && (d.frame - f).abs() < 0.5);
+                    let r = if hot { 6.0 } else { 4.5 };
+                    let pts = vec![c + Vec2::new(0.0, -r), c + Vec2::new(r, 0.0), c + Vec2::new(0.0, r), c + Vec2::new(-r, 0.0)];
+                    p.add(egui::Shape::convex_polygon(pts, if hot { Color32::WHITE } else { ACCENT }, (1.0, Color32::from_gray(20))));
+                }
+                // the bar between the first and last key: drag it to slide the whole animation
+                let span = row.frames.first().zip(row.frames.last()).filter(|(a, b)| b > a).map(|(a, b)| (*a, *b));
+                let on_bar = |x: f32| span.is_some_and(|(a, b)| x > x_of(a) + 6.0 && x < x_of(b) - 6.0);
+                if resp.hovered() && near.is_some() {
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                } else if resp.hover_pos().is_some_and(|h| on_bar(h.x)) {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                }
+                let ids: Vec<String> = {
+                    let mut v: Vec<String> = row.tracks.iter().map(|(id, _)| id.clone()).collect();
+                    v.dedup();
+                    v
+                };
+                if resp.drag_started() {
+                    let grab = ui.input(|i| i.pointer.press_origin());
+                    if let Some(f) = near {
+                        let key = self.new_key("retime");
+                        self.key_drag = Some(KeyDrag { row: row.id.clone(), frame: f, key, all: false });
+                    } else if let Some(g) = grab.filter(|g| on_bar(g.x)) {
+                        let key = self.new_key("slide");
+                        self.key_drag = Some(KeyDrag { row: row.id.clone(), frame: f_of(g.x), key, all: true });
+                    }
+                }
+                if (resp.dragged() || resp.drag_stopped())
+                    && let (Some(d), Some(pos)) = (self.key_drag.clone(), ui.input(|i| i.pointer.latest_pos()))
+                    && d.row == row.id
+                    && d.all
+                {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    let first = row.frames.first().copied().unwrap_or(0.0);
+                    let delta = (f_of(pos.x) - d.frame).max(-first);
+                    if delta.abs() >= 1.0 {
+                        self.run_key(&d.key, "keyframe.retime", json!({"ids": ids, "offset": delta}));
+                        self.key_drag = Some(KeyDrag { frame: d.frame + delta, ..d });
+                    }
+                } else if (resp.dragged() || resp.drag_stopped())
+                    && let (Some(d), Some(pos)) = (self.key_drag.clone(), ui.input(|i| i.pointer.latest_pos()))
+                    && d.row == row.id
+                {
+                    let to = f_of(pos.x);
+                    if (to - d.frame).abs() >= 1.0 && !row.frames.iter().any(|f| (*f - to).abs() < 0.5) {
+                        for (id, prop) in &row.tracks {
+                            let has = scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - d.frame).abs() < 1e-3));
+                            if has {
+                                self.run_key(&d.key, "keyframe.move", json!({"id": id, "property": prop, "from": d.frame, "to": to}));
+                            }
+                        }
+                        self.key_drag = Some(KeyDrag { frame: to, ..d });
+                        self.hub.borrow_mut().frame = to;
+                    }
+                }
+                if resp.drag_stopped() {
+                    self.key_drag = None;
+                }
+                if resp.clicked() {
+                    self.select(Some(row.id.clone()));
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        self.hub.borrow_mut().frame = near.unwrap_or(f_of(pos.x));
+                        self.playing = false;
+                    }
+                }
+                if resp.double_clicked() && near.is_none() {
+                    self.key_selection();
+                }
+                if resp.secondary_clicked() {
+                    self.key_menu = near.map(|f| (row.id.clone(), f));
+                }
+                let menu_for = self.key_menu.clone().filter(|(r, _)| *r == row.id);
+                resp.context_menu(|ui| {
+                    let Some((_, f)) = menu_for.clone() else {
+                        // the whole row
+                        let Some((first, last)) = row.frames.first().zip(row.frames.last()).map(|(a, b)| (*a, *b)) else { return };
+                        ui.weak(format!("{}: frames {first:.0}–{last:.0}", row.label));
+                        let now = self.frame().round();
+                        let go = |ui: &mut egui::Ui, label: &str, tip: &str, params: Value| {
+                            if ui.button(label).on_hover_text(tip).clicked() {
+                                let mut params = params;
+                                params["ids"] = json!(ids);
+                                let _ = hub::dispatch(&self.hub, json!({"command": "keyframe.retime", "params": params}));
+                                ui.close();
+                            }
+                        };
+                        go(ui, "Start at the playhead", "Slide every key so the animation begins here", json!({"offset": now - first}));
+                        go(ui, "Faster", "Play it in two thirds of the time", json!({"scale": 2.0 / 3.0}));
+                        go(ui, "Slower", "Take half as long again", json!({"scale": 1.5}));
+                        ui.weak("Tip: drag the bar between the keys to slide it all.");
+                        return;
+                    };
+                    ui.weak(format!("Key at frame {f:.0}"));
+                    ui.label("Ease into the next key");
+                    for (label, interp) in [("Smooth (ease)", "ease"), ("Ease in", "easeIn"), ("Ease out", "easeOut"), ("Linear", "linear"), ("Overshoot", "overshoot"), ("Hold (step)", "step")] {
+                        if ui.button(label).clicked() {
+                            let steps: Vec<Value> = row.tracks.iter().filter(|(id, prop)| scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - f).abs() < 1e-3)))
+                                .map(|(id, prop)| json!({"command": "keyframe.setInterp", "params": {"id": id, "property": prop, "frame": f, "interp": interp}})).collect();
+                            let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Delete key").clicked() {
+                        let steps: Vec<Value> = row.tracks.iter().filter(|(id, prop)| scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - f).abs() < 1e-3)))
+                            .map(|(id, prop)| json!({"command": "keyframe.delete", "params": {"id": id, "property": prop, "frame": f}})).collect();
+                        let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
+                        ui.close();
+                    }
+                });
+            }
+        });
+        // playhead across the ruler and the rows
+        let x = x_of(self.frame());
+        ui.painter().line_segment(
+            [egui::pos2(x, ruler.top()), egui::pos2(x, playhead_bottom)],
+            (1.5, Color32::from_rgb(255, 120, 90)),
+        );
+    }
+
+    /// One card per shot: its picture at the middle frame, number, name, length and camera.
+    /// Clicking a card puts the playhead at the shot's start and looks through its camera.
+    fn storyboard_strip(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        let scene = self.scene();
+        let shots = scene.timeline.shots.clone();
+        if let Some(rs) = frame.wgpu_render_state() {
+            let board = self.board.get_or_insert_with(|| crate::storyboard::Storyboard::new(&rs.device));
+            let look = crate::storyboard::Look {
+                revision: self.hub.borrow().session.revision(),
+                pass: self.pass,
+                studio_light: self.studio_light,
+                shadows: self.shadows,
+            };
+            // hold the pictures while something is being dragged (the scene changes every frame
+            // then); they catch up when the drag ends
+            let dragging = !matches!(self.drag, Gesture::Idle | Gesture::Cancelled) || self.palette.is_some();
+            if !dragging && board.update(rs, &scene, &look, 2) {
+                ui.ctx().request_repaint();
+            }
+        }
+        ui.add_space(4.0);
+        if shots.is_empty() {
+            ui.weak("No shots yet: add one with + Shot, or right-click the Shots row on the timeline.");
+            ui.add_space(4.0);
+            return;
+        }
+        let now = self.frame();
+        let fps = scene.timeline.fps.max(1.0);
+        let card = Vec2::new(160.0, 90.0);
+        ui.horizontal(|ui| {
+            ui.weak(format!("{} shots", shots.len()));
+            if ui
+                .small_button("Export…")
+                .on_hover_text("Save every shot's picture as one HTML page (open it, print it or send it)")
+                .clicked()
+            {
+                self.export_board();
+            }
+        });
+        egui::ScrollArea::horizontal().id_salt("storyboard").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (i, sh) in shots.iter().enumerate() {
+                    let current = (sh.start as f32..=sh.end as f32 + 0.999).contains(&now);
+                    let (rect, resp) = ui.allocate_exact_size(card + Vec2::new(0.0, 18.0), Sense::click());
+                    let pic = Rect::from_min_size(rect.min, card);
+                    let p = ui.painter_at(rect);
+                    p.rect_filled(pic, 3.0, Color32::from_gray(16));
+                    if let Some((tex, uv, aspect)) = self.board.as_ref().and_then(|b| b.get(i)) {
+                        // keep the camera's aspect inside the card
+                        let mut size = card;
+                        if size.x / size.y > aspect {
+                            size.x = size.y * aspect;
+                        } else {
+                            size.y = size.x / aspect;
+                        }
+                        p.image(tex, Rect::from_center_size(pic.center(), size), uv, Color32::WHITE);
+                    }
+                    let stroke = if current {
+                        (2.0, ACCENT)
+                    } else if resp.hovered() {
+                        (1.0, Color32::from_gray(160))
+                    } else {
+                        (1.0, Color32::from_gray(60))
+                    };
+                    p.rect_stroke(pic, 3.0, stroke, egui::StrokeKind::Inside);
+                    let secs = (sh.end + 1 - sh.start) as f32 / fps;
+                    p.text(
+                        pic.left_bottom() + Vec2::new(2.0, 2.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{} · {} · {secs:.1}s", i + 1, sh.name),
+                        egui::FontId::proportional(11.0),
+                        if current { Color32::WHITE } else { Color32::from_gray(190) },
+                    );
+                    let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+                    resp.context_menu(|ui| {
+                        ui.weak(format!("{} · {cam}", sh.name));
+                        if ui
+                            .button(format!("Select {cam}"))
+                            .on_hover_text("To move it, change its lens or animate it")
+                            .clicked()
+                        {
+                            self.also.clear();
+                            self.select(Some(sh.camera.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Go to its middle frame").on_hover_text("The frame this picture shows").clicked() {
+                            self.playing = false;
+                            self.look_through = true;
+                            let mut h = self.hub.borrow_mut();
+                            h.frame = (sh.start + sh.end) as f32 / 2.0;
+                            h.look_through = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Delete shot").clicked() {
+                            self.run("shot.delete", json!({"id": sh.id}));
+                            ui.close();
+                        }
+                    });
+                    let resp = resp.on_hover_text(format!(
+                        "{}: frames {}–{} through {cam}. Click to go there, double-click to play it; right-click for more.",
+                        sh.name, sh.start, sh.end
+                    ));
+                    if resp.clicked() || resp.double_clicked() {
+                        self.hub.borrow_mut().frame = sh.start as f32;
+                        self.playing = resp.double_clicked();
+                        self.look_through = true;
+                        self.hub.borrow_mut().look_through = true;
+                    }
+                }
+            });
+        });
+        ui.add_space(2.0);
+    }
+
+    /// Every shot through its camera at its middle frame, saved as one HTML page.
+    fn export_board(&mut self) {
+        let scene = self.scene();
+        let fps = scene.timeline.fps.max(1.0);
+        let panels = scene
+            .timeline
+            .shots
+            .iter()
+            .enumerate()
+            .map(|(i, sh)| {
+                let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+                crate::files::Panel {
+                    heading: format!("{} · {}", i + 1, sh.name),
+                    note: format!(
+                        "{cam} · frames {}–{} · {:.1}s",
+                        sh.start,
+                        sh.end,
+                        (sh.end + 1 - sh.start) as f32 / fps
+                    ),
+                    camera: sh.camera.clone(),
+                    frame: (sh.start + sh.end) as f32 / 2.0,
+                }
+            })
+            .collect();
+        crate::files::save_storyboard(&self.hub, panels, 960, &self.saved);
+    }
+
+    /// Keyframe the selection at the playhead (a whole person: every joint).
+    fn key_selection(&mut self) {
+        let Some(id) = self.selected() else { return };
+        let scene = self.scene();
+        let f = self.frame().round();
+        let mut steps = vec![];
+        let ids: Vec<String> = match rig::person_root(&scene, &id) {
+            Ok(root) if root == id => {
+                std::iter::once(root.clone()).chain(rig::JOINTS.iter().map(|j| format!("{root}_{j}"))).collect()
+            }
+            _ => vec![id.clone()],
+        };
+        for e in &ids {
+            steps.push(json!({"command": "keyframe.set", "params": {"id": e, "property": "transform", "frame": f}}));
+            if matches!(scene.get(e).map(|x| &x.kind), Ok(EntityKind::Camera(_))) {
+                steps.push(
+                    json!({"command": "keyframe.set", "params": {"id": e, "property": "focalLength", "frame": f}}),
+                );
+            }
+        }
+        match hub::dispatch(&self.hub, json!({"batch": steps})) {
+            Ok(_) => {
+                self.toast(format!("Keyed {} at frame {f:.0}", scene.get(&id).map(|e| e.name.clone()).unwrap_or(id)))
+            }
+            Err(e) => self.toast(format!("Could not key: {}", e.message)),
+        }
     }
 
     fn viewport(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -1225,7 +3887,9 @@ impl EditorApp {
                 i.pointer.any_released(),
             )
         });
-        let inside = pointer.filter(|p| rect.contains(*p));
+        // (the camera preview in the corner sits on top: no hovering through it)
+        let pip_rect = self.pip.as_ref().and_then(|p| p.rect);
+        let inside = pointer.filter(|p| rect.contains(*p) && !pip_rect.is_some_and(|r| r.contains(*p)));
         let eye = view.view.inverse().w_axis.truncate();
         let clean = cam.is_some();
 
@@ -1284,7 +3948,7 @@ impl EditorApp {
         // rotation rings.
         let gizmo = selected.as_ref().filter(|s| !clean && !scene.get(s).is_ok_and(|e| e.locked)).and_then(|id| {
             let o = world_at(&scene, id, f).ok()?.w_axis.truncate();
-            let joint = rig::joint_name(&scene, id).is_some();
+            let joint = rig::is_joint(&scene, id);
             let len = (eye - o).length().max(0.1) * if joint { 0.09 } else { 0.14 };
             let c = project(rect, &view, o)?;
             let axes: Vec<Option<Pos2>> = if joint {
@@ -1313,6 +3977,55 @@ impl EditorApp {
                 .collect();
             Some((id.clone(), o, len, c, axes, rings, joint))
         });
+        // The motion path of the selection (its group, or the camera): a line through every frame
+        // and a dot per key you can drag.
+        let path = selected.as_ref().filter(|_| !clean).and_then(|s| {
+            let id = if matches!(scene.get(s).map(|e| &e.kind), Ok(EntityKind::Camera(_))) {
+                s.clone()
+            } else {
+                root_of(&scene, s)
+            };
+            let track = scene.timeline.track(&id, TrackProperty::Transform).filter(|t| t.keys.len() >= 2)?;
+            let (a, b) = (track.keys.first()?.frame, track.keys.last()?.frame);
+            let n = ((b - a).ceil() as usize).clamp(2, 400);
+            let line: Vec<Pos2> = (0..=n)
+                .filter_map(|i| {
+                    project(
+                        rect,
+                        &view,
+                        world_at(&scene, &id, a + (b - a) * i as f32 / n as f32).ok()?.w_axis.truncate(),
+                    )
+                })
+                .collect();
+            let keys: Vec<(f32, Pos2, Vec3)> = track
+                .keys
+                .iter()
+                .filter_map(|k| {
+                    let w = world_at(&scene, &id, k.frame).ok()?.w_axis.truncate();
+                    Some((k.frame, project(rect, &view, w)?, w))
+                })
+                .collect();
+            Some((id, line, keys))
+        });
+        // a selected light's aim point: the surface it shines at, draggable
+        let aim: Option<(String, Pos2)> = selected.as_ref().filter(|_| !clean).and_then(|s| {
+            let EntityKind::Light(l) = &scene.get(s).ok()?.kind else { return None };
+            if l.kind == shotstage_core::LightKind::Point {
+                return None;
+            }
+            let w = world_at(&scene, s, f).ok()?;
+            let (o, d) = (w.w_axis.truncate(), w.transform_vector3(Vec3::NEG_Z).normalize_or_zero());
+            let opts = RayOptions { ground: true, ..Default::default() };
+            let hit = raycast(&scene, f, o, d, &opts).map(|h| Vec3::from_array(h.point)).unwrap_or(o + d * 3.0);
+            Some((s.clone(), project(rect, &view, hit)?))
+        });
+        let path_key_at = |p: Pos2| -> Option<(String, f32, Vec3)> {
+            let (id, _, keys) = path.as_ref()?;
+            keys.iter()
+                .filter(|(_, sp, _)| (*sp - p).length() < 8.0)
+                .min_by(|a, b| (a.1 - p).length().total_cmp(&(b.1 - p).length()))
+                .map(|(f, _, w)| (id.clone(), *f, *w))
+        };
         let handle_at = |p: Pos2| -> Option<Handle> {
             let (_, _, _, c, axes, rings, joint) = gizmo.as_ref()?;
             if !joint && (p - (*c + Vec2::new(30.0, -30.0))).length() < 8.0 {
@@ -1345,7 +4058,11 @@ impl EditorApp {
                 let root = root_of(&scene, &hit);
                 let in_group =
                     selected.as_ref().is_some_and(|s| *s != root && spatial::subtree(&scene, &root).contains(s));
-                Some(if in_group { rig::joint_of(&scene, &hit).unwrap_or(hit) } else { root })
+                if !in_group {
+                    return Some(root);
+                }
+                let point = pick_point(&scene, f, o, d).map(|p| p.1).unwrap_or(o);
+                Some(joint_at(&scene, &hit, point, f).unwrap_or(hit))
             });
         }
 
@@ -1356,16 +4073,26 @@ impl EditorApp {
                 let (o, d) = ray_at(rect, &view, start);
                 let hit = pick_grabbable(&scene, f, o, d);
                 // with a joint of this person selected, dragging a body part bends it
+                let hit_point = pick_point(&scene, f, o, d).map(|p| p.1).unwrap_or(o);
                 let pose_joint = hit
                     .as_ref()
                     .filter(|h| {
-                        selected.as_ref().is_some_and(|s| {
-                            rig::joint_name(&scene, s).is_some() && root_of(&scene, s) == root_of(&scene, h)
-                        })
+                        selected
+                            .as_ref()
+                            .is_some_and(|s| rig::is_joint(&scene, s) && root_of(&scene, s) == root_of(&scene, h))
                     })
-                    .and_then(|h| rig::joint_of(&scene, h))
+                    .and_then(|h| joint_at(&scene, h, hit_point, f))
                     .map(|j| drive_joint(&scene, &j));
-                self.drag = if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
+                self.drag = if let Some(id) =
+                    aim.as_ref().filter(|(_, sp)| (*sp - start).length() < 9.0).map(|(id, _)| id.clone())
+                {
+                    let key = self.new_key("aim");
+                    Gesture::LightAim { id, key }
+                } else if let Some((id, frame, origin)) = path_key_at(start) {
+                    let key = self.new_key("path");
+                    self.hub.borrow_mut().frame = frame;
+                    Gesture::PathKey { id, frame, origin, key }
+                } else if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
                     let key = self.new_key("gizmo");
                     match h {
                         Handle::Axis(i) => {
@@ -1411,11 +4138,16 @@ impl EditorApp {
                     let centre = spatial::bounds(&scene, &target, f).ok().flatten().map(|b| b.center()).unwrap_or(grab);
                     let offset = Vec3::new(centre.x - grab.x, 0.0, centre.z - grab.z);
                     Gesture::Move { id: target, grab, offset, key, lift: None }
+                } else if cam.is_none() && modifiers.command {
+                    Gesture::Marquee { start }
                 } else if cam.is_none() {
                     Gesture::Navigate
                 } else {
                     Gesture::Idle
                 };
+            }
+            if esc && matches!(self.drag, Gesture::Marquee { .. }) {
+                self.drag = Gesture::Cancelled;
             }
             if esc && !matches!(self.drag, Gesture::Idle | Gesture::Navigate | Gesture::Cancelled) {
                 self.run("history.undo", json!({}));
@@ -1435,7 +4167,7 @@ impl EditorApp {
                         if let Some(t) = closest_on_line(base, Vec3::Y, o, d) {
                             let mut p =
                                 json!({"id": id, "position": (base + Vec3::Y * (t - t0)).to_array(), "frame": f});
-                            if is_animated(&scene, &id) {
+                            if self.keyed(&scene, &id) {
                                 p["keyframeAt"] = json!(f.round());
                             }
                             self.run_key(&key, "entity.moveTo", p);
@@ -1451,12 +4183,13 @@ impl EditorApp {
                             self.place_on_ray(&key, &id, (o, d), offset, modifiers.command);
                         }
                         self.drag = Gesture::Move { id: id.clone(), grab, offset, key: key.clone(), lift: None };
-                        if scroll != 0.0 {
-                            self.run_key(
-                                &key,
-                                "entity.rotate",
-                                json!({"id": id, "degrees": scroll.signum() * 15.0, "frame": f}),
-                            );
+                        // scrolling turns it 15° per ~40 points of scroll (smoothed wheel notches
+                        // and trackpad swipes arrive spread over many frames)
+                        self.turn_acc += scroll;
+                        let steps = (self.turn_acc / 40.0).trunc();
+                        if steps != 0.0 {
+                            self.turn_acc -= steps * 40.0;
+                            self.run_key(&key, "entity.rotate", json!({"id": id, "degrees": steps * 15.0, "frame": f}));
                         }
                     }
                 }
@@ -1467,7 +4200,7 @@ impl EditorApp {
                             step = (step / self.snap_step).round() * self.snap_step;
                         }
                         let mut p = json!({"id": id, "position": (start + axis * step).to_array(), "frame": f});
-                        if is_animated(&scene, &id) {
+                        if self.keyed(&scene, &id) {
                             p["keyframeAt"] = json!(f.round());
                         }
                         self.run_key(&key, "entity.moveTo", p);
@@ -1501,11 +4234,49 @@ impl EditorApp {
                         let t = (grab - o).dot(n) / denom;
                         if t > 0.0 {
                             let mut p = json!({"id": joint, "target": (o + d * t).to_array(), "frame": f});
-                            if is_animated(&scene, &joint) {
+                            if self.keyed(&scene, &joint) {
                                 p["keyframeAt"] = json!(f.round());
                             }
                             self.run_key(&key, "pose.aim", p);
                         }
+                    }
+                }
+                Gesture::LightAim { id, key } if resp.dragged() => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    let opts = RayOptions { ground: true, eye: Some(o), ..Default::default() };
+                    if let Some(h) = raycast(&scene, f, o, d, &opts) {
+                        self.run_key(&key, "camera.lookAt", json!({"id": id, "target": h.point}));
+                    }
+                }
+                Gesture::PathKey { id, frame, origin, key } if resp.dragged() => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    // slide on the horizontal plane through the key; Shift moves it up and down
+                    let to = if modifiers.shift {
+                        closest_on_line(origin, Vec3::Y, o, d).map(|_| {
+                            let t0 = closest_on_line(origin, Vec3::Y, o, d).unwrap_or(0.0);
+                            origin + Vec3::Y * t0
+                        })
+                    } else if d.y.abs() > 1e-4 {
+                        let t = (origin.y - o.y) / d.y;
+                        (t > 0.0).then(|| o + d * t)
+                    } else {
+                        None
+                    };
+                    if let Some(to) = to
+                        && let Some(k) = scene
+                            .timeline
+                            .track(&id, TrackProperty::Transform)
+                            .and_then(|tr| tr.keys.iter().find(|k| (k.frame - frame).abs() < 1e-3))
+                        && let shotstage_core::KeyValue::Transform(mut t) = k.value
+                    {
+                        let parent = scene
+                            .get(&id)
+                            .ok()
+                            .and_then(|e| e.parent.clone())
+                            .and_then(|p| world_at(&scene, &p, frame).ok())
+                            .unwrap_or(Mat4::IDENTITY);
+                        t.translation = parent.inverse().transform_point3(to).to_array();
+                        self.run_key(&key, "keyframe.set", json!({"id": id, "property": "transform", "frame": frame, "value": {"kind": "transform", "value": t}, "interp": k.interp}));
                     }
                 }
                 Gesture::Scale { id, key } if resp.dragged() => {
@@ -1514,7 +4285,7 @@ impl EditorApp {
                     if let Ok(t) = local_at(&scene, &id, f) {
                         let sc = (t.scale() * k).to_array();
                         let mut p = json!({"id": id, "scale": sc});
-                        if is_animated(&scene, &id) {
+                        if self.keyed(&scene, &id) {
                             p["keyframeAt"] = json!(f.round());
                         }
                         self.run_key(&key, "entity.setTransform", p);
@@ -1527,8 +4298,21 @@ impl EditorApp {
                 }
                 _ => {}
             }
+            // the selection rectangle: drawn while dragging, applied on release
+            self.marquee = None;
+            if let Gesture::Marquee { start } = self.drag
+                && let Some(now) = ui.input(|i| i.pointer.latest_pos())
+            {
+                let r = Rect::from_two_pos(start, now).intersect(rect);
+                if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                    self.select_in_rect(r, rect, &view, f);
+                } else {
+                    self.marquee = Some(r);
+                }
+            }
             if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
                 self.drag = Gesture::Idle;
+                self.turn_acc = 0.0;
             }
         }
         if cam.is_none() && self.palette.is_none() {
@@ -1543,8 +4327,27 @@ impl EditorApp {
                 let k = self.orbit.distance * 0.0015;
                 self.orbit.target += (-inv.x_axis.xyz() * d.x + inv.y_axis.xyz() * d.y) * k;
             }
-            if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && scroll != 0.0 {
-                self.orbit.distance = (self.orbit.distance * (1.0 - scroll * 0.0015)).clamp(0.3, 500.0);
+            // two fingers on a trackpad orbit (Shift: pan) and pinching zooms; a mouse wheel zooms
+            let (trackpad, delta) = ui.input(|i| (wheel_from_trackpad(&i.events), i.smooth_scroll_delta));
+            if let Some(t) = trackpad {
+                self.wheel_trackpad = t;
+            }
+            let orbit_scroll = match self.scroll_mode {
+                ScrollMode::Auto => self.wheel_trackpad,
+                ScrollMode::Zoom => false,
+                ScrollMode::Orbit => true,
+            };
+            if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && delta != Vec2::ZERO {
+                if !orbit_scroll {
+                    self.orbit.distance = (self.orbit.distance * (1.0 - delta.y * 0.0015)).clamp(0.3, 500.0);
+                } else if modifiers.shift {
+                    let inv = self.orbit.view().inverse();
+                    let k = self.orbit.distance * 0.0015;
+                    self.orbit.target += (-inv.x_axis.xyz() * delta.x + inv.y_axis.xyz() * delta.y) * k;
+                } else {
+                    self.orbit.yaw -= delta.x * 0.006;
+                    self.orbit.pitch = (self.orbit.pitch + delta.y * 0.006).clamp(-1.5, 1.5);
+                }
             }
             // trackpad pinch (and Ctrl+wheel) arrives as a zoom factor, not as scrolling
             let pinch = ui.input(|i| i.zoom_delta());
@@ -1567,17 +4370,49 @@ impl EditorApp {
             && let Some(pos) = resp.interact_pointer_pos().filter(|p| rect.contains(*p))
         {
             let (o, d) = ray_at(rect, &view, pos);
-            let sel = pick(&scene, f, o, d).map(|hit| {
-                let root = root_of(&scene, &hit);
-                // first click takes the whole group; clicking inside a selected group picks the part
-                match &selected {
-                    Some(s) if spatial::subtree(&scene, &root).contains(s) => {
-                        rig::joint_of(&scene, &hit).unwrap_or(hit)
+            // lights and cameras are small: pick them by their icon on screen first
+            let icon = (!clean)
+                .then(|| {
+                    scene
+                        .entities
+                        .iter()
+                        .filter(|e| matches!(e.kind, EntityKind::Light(_) | EntityKind::Camera(_)))
+                        .filter(|e| cam.as_deref() != Some(e.id.as_str()))
+                        .filter_map(|e| {
+                            let p = project(rect, &view, world_at(&scene, &e.id, f).ok()?.w_axis.truncate())?;
+                            let dist = (p - pos).length();
+                            (dist < 14.0).then(|| (dist, e.id.clone()))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, id)| id)
+                })
+                .flatten();
+            let sel = icon.or_else(|| {
+                pick_point(&scene, f, o, d).map(|(hit, point)| {
+                    let root = root_of(&scene, &hit);
+                    // first click takes the whole group; clicking inside a selected group picks the part
+                    match &selected {
+                        Some(s) if spatial::subtree(&scene, &root).contains(s) => {
+                            joint_at(&scene, &hit, point, f).unwrap_or(hit)
+                        }
+                        _ => root,
                     }
-                    _ => root,
-                }
+                })
             });
-            self.select(sel);
+            if let Some(s) = sel.clone().filter(|_| modifiers.shift && self.selected().is_some()) {
+                // Shift+click: add to (or take out of) the selection
+                if self.selected().as_ref() != Some(&s) {
+                    match self.also.iter().position(|a| *a == s) {
+                        Some(i) => {
+                            self.also.remove(i);
+                        }
+                        None => self.also.push(s),
+                    }
+                }
+            } else {
+                self.also.clear();
+                self.select(sel);
+            }
         }
         if self.hovered.is_some() && matches!(self.drag, Gesture::Idle) && self.palette.is_none() {
             ui.ctx().set_cursor_icon(CursorIcon::Grab);
@@ -1602,6 +4437,10 @@ impl EditorApp {
             looking_through: cam.clone(),
             hovered: if clean { None } else { self.hovered.clone() },
             footprint: dragged_id,
+            studio_light: self.studio_light,
+            eye: None,
+            also_selected: if clean { vec![] } else { self.also.clone() },
+            no_shadows: !self.shadows,
         };
         let pass = self.pass;
         let (Some(rs), Some(renderer)) = (frame.wgpu_render_state(), self.renderer.as_mut()) else {
@@ -1629,13 +4468,117 @@ impl EditorApp {
             let id = egui_renderer.register_native_texture(&rs.device, view_tex, wgpu::FilterMode::Linear);
             self.texture = Some((id, generation));
         }
+        // the shot camera's view in the corner, re-rendered only when what it shows changes
+        let pip_cam = (!clean && self.cam_preview && self.palette.is_none()).then(|| camera_id_at(&scene, f)).flatten();
+        let mut pip_show = None;
+        if let Some(p) = self.pip.as_mut() {
+            p.rect = None;
+        }
+        if let Some(c) = pip_cam
+            && let (Ok(lens), Ok(world)) = (camera_data_at(&scene, &c, f), world_at(&scene, &c, f))
+        {
+            let a = lens.aspect.clamp(0.3, 4.0);
+            let w = (full.width() * 0.24).clamp(150.0, 300.0);
+            let size = Vec2::new(w, w / a);
+            let prect = Rect::from_min_size(full.right_bottom() - size - Vec2::splat(12.0), size);
+            let ppx = ((size.x * ppp).round() as u32, (size.y * ppp).round() as u32);
+            let pip = self.pip.get_or_insert_with(|| Pip {
+                renderer: Renderer::new(&rs.device),
+                tex: None,
+                rect: None,
+                key: None,
+                at: 0.0,
+            });
+            let key = format!(
+                "{}|{f}|{c}|{:?}|{ppx:?}|{}|{}",
+                self.hub.borrow().session.revision(),
+                pass as u32,
+                self.studio_light,
+                self.shadows
+            );
+            let now = ui.input(|i| i.time);
+            if pip.key.as_deref() != Some(key.as_str()) {
+                // at most ~20 times a second while something is being dragged
+                if now - pip.at >= 0.05 || pip.key.is_none() {
+                    let view =
+                        View { view: world.inverse(), proj: lens.projection(a), depth_near: 0.0, depth_far: 0.0 };
+                    let mut ov = shotstage_render::clean_overlay(&c);
+                    ov.studio_light = self.studio_light;
+                    ov.no_shadows = !self.shadows;
+                    pip.renderer.render(&rs.device, &rs.queue, &scene, f, view, pass, &ov, ppx);
+                    pip.key = Some(key);
+                    pip.at = now;
+                    let generation = pip.renderer.target_generation;
+                    if pip.tex.is_none_or(|(_, g)| g != generation)
+                        && let Some(v) = pip.renderer.color_view()
+                    {
+                        let mut egui_renderer = rs.renderer.write();
+                        if let Some((old, _)) = pip.tex.take() {
+                            egui_renderer.free_texture(&old);
+                        }
+                        pip.tex = Some((
+                            egui_renderer.register_native_texture(&rs.device, v, wgpu::FilterMode::Linear),
+                            generation,
+                        ));
+                    }
+                } else {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+            if let Some((tex, _)) = pip.tex {
+                pip.rect = Some(prect);
+                let name = scene.get(&c).map(|e| e.name.clone()).unwrap_or(c.clone());
+                pip_show = Some((tex, prect, name));
+            }
+        }
+        if let Some((tex, prect, name)) = pip_show {
+            let r = egui::Area::new(egui::Id::unique("cam_preview"))
+                .order(egui::Order::Middle)
+                .fixed_pos(prect.min)
+                .show(ui.ctx(), |ui| {
+                    let (r, p) = ui.allocate_painter(prect.size(), Sense::click());
+                    p.image(
+                        tex,
+                        r.rect,
+                        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    let stroke = if r.hovered() { (1.5, ACCENT) } else { (1.0, Color32::from_white_alpha(60)) };
+                    p.rect_stroke(r.rect, 3.0, stroke, egui::StrokeKind::Outside);
+                    let label = p.layout_no_wrap(name, egui::FontId::proportional(11.0), Color32::WHITE);
+                    let lr = Rect::from_min_size(r.rect.min + Vec2::new(4.0, 4.0), label.size() + Vec2::new(8.0, 4.0));
+                    p.rect_filled(lr, 3.0, Color32::from_black_alpha(140));
+                    p.galley(lr.min + Vec2::new(4.0, 2.0), label, Color32::WHITE);
+                    r.on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Shot camera at the playhead: click to look through it")
+                })
+                .inner;
+            if r.clicked() {
+                self.look_through = true;
+                self.hub.borrow_mut().look_through = true;
+            }
+        }
         let painter = ui.painter_at(full);
         painter.rect_filled(full, 0.0, Color32::from_gray(10));
         if let Some((id, _)) = self.texture {
             painter.image(id, rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
+        if let Some(m) = self.marquee {
+            painter.rect(m, 0.0, ACCENT.gamma_multiply(0.12), (1.0, ACCENT), egui::StrokeKind::Inside);
+        }
         if let Some(c) = &cam {
             painter.rect_stroke(rect, 0.0, (1.0, Color32::from_rgb(90, 150, 255)), egui::StrokeKind::Inside);
+            if self.safe_areas {
+                // action safe (93 %) and title safe (90 %), plus a centre cross
+                for (k, a) in [(0.93, 70u8), (0.9, 50u8)] {
+                    let r = Rect::from_center_size(rect.center(), rect.size() * k);
+                    painter.rect_stroke(r, 0.0, (1.0, Color32::from_white_alpha(a)), egui::StrokeKind::Inside);
+                }
+                let c = rect.center();
+                let s = (1.0, Color32::from_white_alpha(70));
+                painter.line_segment([c - Vec2::new(10.0, 0.0), c + Vec2::new(10.0, 0.0)], s);
+                painter.line_segment([c - Vec2::new(0.0, 10.0), c + Vec2::new(0.0, 10.0)], s);
+            }
             // rule-of-thirds guides
             for i in 1..3 {
                 let x = rect.left() + rect.width() * i as f32 / 3.0;
@@ -1644,13 +4587,68 @@ impl EditorApp {
                 painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], s);
                 painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], s);
             }
+            if let Some(r) = scene.references.get(c).cloned()
+                && let Some(tex) = self.reference_texture(ui.ctx(), &scene, &r.asset)
+            {
+                // fit the picture inside the frame, keeping its aspect
+                let sz = tex.size_vec2();
+                let k = (rect.width() / sz.x).min(rect.height() / sz.y);
+                let img = Rect::from_center_size(rect.center(), sz * k);
+                let a = (r.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+                painter.image(
+                    tex.id(),
+                    img,
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::from_white_alpha(a),
+                );
+            }
+            let hud = shotstage_core::eval::describe_shot(&scene, c, f, None)
+                .map(|d| format!(" · {}", d.summary))
+                .unwrap_or_default();
             painter.text(
                 rect.left_top() + Vec2::new(8.0, 6.0),
                 egui::Align2::LEFT_TOP,
-                format!("{c} · frame {f:.0}"),
+                format!("{} · frame {f:.0}{hud}", scene.get(c).map(|e| e.name.as_str()).unwrap_or(c)),
                 egui::FontId::monospace(12.0),
                 Color32::from_white_alpha(180),
             );
+        }
+        if let Some((id, sp)) = &aim
+            && let Some(lp) = world_at(&scene, id, f).ok().and_then(|w| project(rect, &view, w.w_axis.truncate()))
+        {
+            let lit = matches!(&self.drag, Gesture::LightAim { .. })
+                || ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| (p - *sp).length() < 9.0);
+            let col = Color32::from_rgb(255, 210, 90);
+            painter.add(egui::Shape::dashed_line(&[lp, *sp], (1.0, col.gamma_multiply(0.7)), 6.0, 4.0));
+            painter.circle_stroke(*sp, if lit { 9.0 } else { 7.0 }, (2.0, col));
+            painter.circle_filled(*sp, 2.5, col);
+            if lit {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                painter.text(
+                    *sp + Vec2::new(12.0, -12.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "drag to aim",
+                    egui::FontId::proportional(11.0),
+                    col,
+                );
+            }
+        }
+        if let Some((id, line, keys)) = &path {
+            let cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));
+            let col = if cam { Color32::from_rgb(90, 170, 255) } else { Color32::from_rgb(255, 170, 80) };
+            painter.add(egui::Shape::line(line.clone(), (1.5, col.gamma_multiply(0.8))));
+            let hot = ui
+                .input(|i| i.pointer.hover_pos())
+                .and_then(|p| keys.iter().find(|(_, sp, _)| (*sp - p).length() < 8.0).map(|k| k.0));
+            for (f, sp, _) in keys {
+                let lit =
+                    hot == Some(*f) || matches!(&self.drag, Gesture::PathKey { frame, .. } if (frame - f).abs() < 1e-3);
+                painter.circle_filled(*sp, if lit { 6.0 } else { 4.0 }, if lit { Color32::WHITE } else { col });
+                painter.circle_stroke(*sp, if lit { 6.0 } else { 4.0 }, (1.0, Color32::from_gray(20)));
+            }
+            if hot.is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            }
         }
         if let Some((_, _, _, c, axes, rings, joint)) = &gizmo {
             let hot = self.hot_handle;
@@ -1685,6 +4683,208 @@ impl EditorApp {
             }
         }
         self.toolbar(ui, full, cam.is_some() || camera_id_at(&scene, f).is_some());
+        if !clean {
+            self.view_cube(ui, full);
+            // name of what the pointer would grab
+            if let (Some(h), Some(p)) = (&self.hovered, inside)
+                && matches!(self.drag, Gesture::Idle)
+                && self.palette.is_none()
+                && let Ok(e) = scene.get(h)
+            {
+                let font = egui::FontId::proportional(11.5);
+                let g = painter.layout_no_wrap(e.name.clone(), font, Color32::WHITE);
+                let r = Rect::from_min_size(p + Vec2::new(14.0, 14.0), g.size() + Vec2::new(10.0, 6.0));
+                painter.rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(20, 22, 28, 200));
+                painter.galley(r.min + Vec2::new(5.0, 3.0), g, Color32::WHITE);
+            }
+        }
+        // nothing to offer when the scene already is the autosave (a page that builds its scene)
+        if self.restore_offer.as_ref().is_some_and(|(saved, _)| **saved == *scene) {
+            self.restore_offer = None;
+        }
+        if let Some(n) = self.restore_offer.as_ref().map(|o| o.1) {
+            egui::Area::new(egui::Id::unique("restore_offer"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(full.center_top() + Vec2::new(-170.0, 104.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                        ui.set_width(340.0);
+                        ui.strong("Pick up where you left off?");
+                        ui.weak(format!("Your last scene ({n} objects) was saved automatically."));
+                        ui.horizontal(|ui| {
+                            if ui.button("Restore it").clicked()
+                                && let Some((saved, _)) = self.restore_offer.take()
+                                && let Ok(scene) = serde_json::to_value(&*saved)
+                            {
+                                let _ = hub::dispatch(
+                                    &self.hub,
+                                    json!({"command": "scene.load", "params": {"scene": scene}}),
+                                );
+                                self.toast("Restored your last scene (Undo goes back)");
+                            }
+                            if ui.button("Start fresh").clicked() {
+                                self.restore_offer = None;
+                            }
+                        });
+                    });
+                });
+        } else if scene.entities.is_empty() && self.palette.is_none() {
+            self.welcome(ui, full);
+        }
+        // files dragged over the window
+        if ui.input(|i| !i.raw.hovered_files.is_empty()) {
+            painter.rect_filled(full.shrink(6.0), 8.0, Color32::from_rgba_unmultiplied(40, 98, 170, 60));
+            painter.text(
+                full.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop to import (glb, gltf, obj, stl, fbx, blend)",
+                egui::FontId::proportional(18.0),
+                Color32::WHITE,
+            );
+        }
+        let now = ui.input(|i| i.time);
+        if let Some((msg, t0)) = &mut self.toast {
+            if t0.is_nan() {
+                *t0 = now;
+            }
+            let age = now - *t0;
+            if age < 5.0 {
+                let alpha = ((5.0 - age).min(1.0) * 230.0) as u8;
+                let font = egui::FontId::proportional(13.0);
+                let galley = painter.layout(msg.clone(), font, Color32::from_white_alpha(alpha), full.width() - 80.0);
+                let r = Rect::from_center_size(
+                    egui::pos2(full.center().x, full.bottom() - 30.0 - galley.size().y / 2.0),
+                    galley.size() + Vec2::new(24.0, 14.0),
+                );
+                painter.rect_filled(r, 6.0, Color32::from_rgba_unmultiplied(28, 30, 36, alpha));
+                painter.galley(r.min + Vec2::new(12.0, 7.0), galley, Color32::WHITE);
+                ui.ctx().request_repaint();
+            } else {
+                self.toast = None;
+            }
+        }
+    }
+
+    /// An egui texture of an image asset (decoded once).
+    fn reference_texture(&mut self, ctx: &egui::Context, scene: &Scene, key: &str) -> Option<egui::TextureHandle> {
+        use base64::Engine as _;
+        let asset = scene.assets.get(key)?;
+        let identity = asset.data.as_ptr() as usize ^ asset.data.len();
+        if let Some((id, t)) = self.ref_textures.get(key)
+            && *id == identity
+        {
+            return Some(t.clone());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(asset.data.as_bytes()).ok()?;
+        let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &img);
+        let tex = ctx.load_texture(format!("ref:{key}"), color, egui::TextureOptions::LINEAR);
+        self.ref_textures.insert(key.to_string(), (identity, tex.clone()));
+        Some(tex)
+    }
+
+    /// Axis gizmo at the top-right: shows which way the view faces; click an axis (or a button)
+    /// to look from that side.
+    fn view_cube(&mut self, ui: &egui::Ui, full: Rect) {
+        let size = Vec2::new(92.0, 124.0);
+        let view = self.orbit.view();
+        let (yaw, pitch) = (self.orbit.yaw, self.orbit.pitch);
+        let mut pick: Option<(f32, f32)> = None;
+        egui::Area::new(egui::Id::unique("view_cube"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(full.right() - size.x - 6.0, full.top() + 8.0))
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+                let painter = ui.painter_at(rect);
+                let c = egui::pos2(rect.center().x, rect.top() + 46.0);
+                painter.circle_filled(c, 42.0, Color32::from_rgba_unmultiplied(20, 22, 28, 150));
+                let axes = [
+                    (Vec3::X, "X", Color32::from_rgb(235, 80, 80), (std::f32::consts::FRAC_PI_2, 0.0)),
+                    (Vec3::Y, "Y", Color32::from_rgb(110, 210, 90), (yaw, 1.45)),
+                    (Vec3::Z, "Z", Color32::from_rgb(80, 140, 255), (0.0, 0.0)),
+                    (Vec3::NEG_X, "", Color32::from_rgb(160, 70, 70), (-std::f32::consts::FRAC_PI_2, 0.0)),
+                    (Vec3::NEG_Z, "", Color32::from_rgb(70, 100, 170), (std::f32::consts::PI, 0.0)),
+                ];
+                // far axes first so the near ones draw on top
+                let mut items: Vec<CubeAxis> = axes
+                    .iter()
+                    .map(|(a, l, col, target)| {
+                        let v = view.transform_vector3(*a);
+                        (v.z, c + Vec2::new(v.x, -v.y) * 30.0, *l, *col, *target)
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let pointer = resp.hover_pos();
+                for (_, p, label, col, target) in &items {
+                    painter.line_segment([c, *p], (2.0, *col));
+                    let hot = pointer.is_some_and(|q| (q - *p).length() < 9.0);
+                    painter.circle_filled(*p, if hot { 9.0 } else { 7.0 }, if hot { Color32::WHITE } else { *col });
+                    if !label.is_empty() {
+                        painter.text(
+                            *p,
+                            egui::Align2::CENTER_CENTER,
+                            *label,
+                            egui::FontId::proportional(10.0),
+                            Color32::from_gray(20),
+                        );
+                    }
+                    if hot && resp.clicked() {
+                        pick = Some(*target);
+                    }
+                }
+                // a reset to a pleasant three-quarter view under the gizmo
+                let r = Rect::from_center_size(egui::pos2(c.x, rect.bottom() - 12.0), Vec2::new(46.0, 18.0));
+                let hot = pointer.is_some_and(|q| r.contains(q));
+                painter.rect_filled(
+                    r,
+                    4.0,
+                    if hot { Color32::from_rgb(60, 66, 80) } else { Color32::from_rgba_unmultiplied(20, 22, 28, 170) },
+                );
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "3/4",
+                    egui::FontId::proportional(11.0),
+                    Color32::WHITE,
+                );
+                if hot && resp.clicked() {
+                    pick = Some((0.6, 0.35));
+                }
+                let _ = pitch;
+                resp.on_hover_text("Click an axis to look along it (Y: from above) · 3/4: the default view");
+            });
+        if let Some((y, p)) = pick {
+            (self.orbit.yaw, self.orbit.pitch) = (y, p);
+        }
+    }
+
+    /// The empty-scene card: start from a template or drag blocks in.
+    fn welcome(&mut self, ui: &egui::Ui, full: Rect) {
+        egui::Area::new(egui::Id::unique("welcome"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .constrain_to(full)
+            .default_pos(full.center())
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16)).show(ui, |ui| {
+                    ui.set_max_width(360.0);
+                    ui.heading("Start a scene");
+                    ui.weak("Pick a ready set (everything stays editable), or drag blocks in from the left.");
+                    ui.add_space(6.0);
+                    egui::Grid::new("welcome_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+                        for (i, (name, label, desc)) in shotstage_commands::templates::TEMPLATES.iter().enumerate() {
+                            if ui.add_sized([170.0, 34.0], egui::Button::new(*label)).on_hover_text(*desc).clicked() {
+                                self.apply_template(name, label);
+                            }
+                            if i % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.weak("Tip: drop a .glb / .fbx model or a picture on the view to bring it in. Cmd/Ctrl+K searches every block, move and action.");
+                });
+            });
     }
 
     /// Floating view options at the top-left of the viewport.
@@ -1694,30 +4894,125 @@ impl EditorApp {
             .fixed_pos(full.left_top() + Vec2::new(8.0, 8.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    // wrap rather than spill over the side panels or under the view cube
+                    ui.set_max_width((full.width() - 28.0 - 100.0).max(160.0));
+                    ui.horizontal_wrapped(|ui| {
                         ui.selectable_value(&mut self.pass, Pass::Clay, "Clay").on_hover_text("Clay shading");
                         ui.selectable_value(&mut self.pass, Pass::Depth, "Depth")
                             .on_hover_text("Depth pass (near = white)");
                         ui.selectable_value(&mut self.pass, Pass::Normal, "Normal").on_hover_text("Normal pass");
-                        ui.separator();
+                        ui.add_space(6.0);
                         ui.toggle_value(&mut self.snap, "Snap")
                             .on_hover_text("Snap dragged blocks to a grid (hold Ctrl to place freely)");
                         ui.add_enabled(
                             self.snap,
                             egui::DragValue::new(&mut self.snap_step).range(0.01..=5.0).speed(0.01).suffix(" m"),
                         );
-                        ui.separator();
-                        ui.add_enabled_ui(has_cam, |ui| {
-                            ui.toggle_value(&mut self.look_through, "🎥 Camera view")
-                                .on_hover_text("Look through the shot camera (the clean reference frame)")
-                        });
+                        ui.add_space(6.0);
+                        // (a plain button: an enabled_ui wrapper would wrap its text letter by letter)
+                        if ui
+                            .add_enabled(has_cam, egui::Button::selectable(self.look_through, "🎥 Camera view"))
+                            .on_hover_text("Look through the shot camera (the clean reference frame)")
+                            .clicked()
+                        {
+                            self.look_through = !self.look_through;
+                        }
                         if !has_cam {
                             self.look_through = false;
                         }
-                        ui.separator();
+                        if ui
+                            .add_enabled(has_cam, egui::Button::new("📷 Save frame"))
+                            .on_hover_text("Save the shot camera's view at this frame as a PNG (1920 px wide)")
+                            .clicked()
+                        {
+                            crate::files::save_frame(&self.hub, 1920, &self.saved);
+                        }
+                        if !self.look_through
+                            && ui.button("+ Camera").on_hover_text("A new camera right where you are looking from").clicked()
+                        {
+                            self.camera_from_view();
+                        }
+                        ui.menu_button("View ▾", |ui| {
+                            ui.checkbox(&mut self.shadows, "Shadows")
+                                .on_hover_text("Shadows from the key light (snapshots always have them)");
+                            ui.checkbox(&mut self.studio_light, "Studio light").on_hover_text(
+                                "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
+                            );
+                            ui.checkbox(&mut self.safe_areas, "Safe areas in camera view")
+                                .on_hover_text("Action / title safe frames and a centre cross when looking through a camera");
+                            ui.checkbox(&mut self.cam_preview, "Camera preview in the corner")
+                                .on_hover_text("A small live view of the shot camera while you work in the free view");
+                            ui.separator();
+                            ui.label("Two-finger scroll / mouse wheel");
+                            ui.horizontal(|ui| {
+                                for (m, label, tip) in [
+                                    (ScrollMode::Auto, "Auto", "Trackpad orbits, mouse wheel zooms"),
+                                    (ScrollMode::Orbit, "Orbit", "Scrolling orbits (Shift: pan); pinch or Ctrl+scroll zooms"),
+                                    (ScrollMode::Zoom, "Zoom", "Scrolling always zooms"),
+                                ] {
+                                    ui.selectable_value(&mut self.scroll_mode, m, label).on_hover_text(tip);
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text("Shadows, lighting, camera preview and navigation");
                         ui.label(egui::RichText::new(" ? ").strong()).on_hover_text(HELP);
                     });
                 });
             });
+    }
+}
+
+#[cfg(test)]
+mod quick_tests {
+    use super::*;
+
+    fn item(label: &str, kind: &'static str, hint: &str) -> QuickItem {
+        QuickItem { label: label.into(), kind, hint: hint.into(), run: QuickRun::Action(QuickAction::Undo) }
+    }
+
+    #[test]
+    fn humanizes_names() {
+        assert_eq!(humanize("holdBasket"), "Hold basket");
+        assert_eq!(humanize("tPose"), "T pose");
+        assert_eq!(humanize("stand"), "Stand");
+    }
+
+    #[test]
+    fn ranks_prefix_then_word_then_hint() {
+        let items = [
+            item("Orbit left", "Camera move", "circle the subject"),
+            item("Push in", "Camera move", "move toward the subject"),
+            item("Slow push", "Camera move", ""),
+            item("Apples", "Add", "a crate of apples"),
+        ];
+        assert_eq!(rank_quick(&items, "push"), vec![1, 2]);
+        assert_eq!(rank_quick(&items, "subject"), vec![0, 1]);
+        assert_eq!(rank_quick(&items, "crate apples"), vec![3]);
+        assert_eq!(rank_quick(&items, "zzz"), Vec::<usize>::new());
+        assert_eq!(rank_quick(&items, "").len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    fn wheel(unit: egui::MouseWheelUnit, delta: Vec2, source: egui::MouseWheelSource) -> egui::Event {
+        egui::Event::MouseWheel { unit, delta, phase: egui::TouchPhase::Move, source, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn tells_trackpad_from_wheel() {
+        use egui::{MouseWheelSource as S, MouseWheelUnit as U};
+        assert_eq!(wheel_from_trackpad(&[]), None);
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, 3.0), S::Trackpad)]), Some(true));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Line, Vec2::new(0.0, 1.0), S::Wheel)]), Some(false));
+        // the web does not say: guess from the movement
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(1.5, 0.0), S::Unknown)]), Some(true));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, 2.25), S::Unknown)]), Some(true));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, -100.0), S::Unknown)]), Some(false));
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, 4.0), S::Unknown)]), None);
+        assert_eq!(wheel_from_trackpad(&[wheel(U::Line, Vec2::new(0.0, 1.0), S::Unknown)]), Some(false));
     }
 }

@@ -4,11 +4,20 @@
 //! [`Session::dispatch`] / [`Session::batch`], so they can do exactly the same things.
 //! Parameters are untrusted: bad input returns a [`CommandError`], never a panic.
 
+pub mod arrange;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod blender;
 mod builtin;
+pub mod clipboard;
+pub mod images;
+pub mod lights;
+pub mod model;
+pub mod motion;
 mod placement;
 pub mod prefabs;
 pub mod rig;
 pub mod snapshot;
+pub mod templates;
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -286,7 +295,9 @@ impl Session {
         }
         let changed = self.scene != before;
         if changed {
-            self.push_undo("batch", before);
+            // named after its first step, so History reads "Delete" rather than "batch"
+            let label = calls.first().map(|c| c.command.as_str()).unwrap_or("batch");
+            self.push_undo(label, before);
         }
         self.last_merge = None;
         Ok(self.outcome(json!(results), changed))

@@ -5,6 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::CameraData;
+use crate::image::{Asset, ImageData};
+use crate::light::LightData;
 use crate::mesh::{MeshSource, Modifier};
 use crate::timeline::Timeline;
 use crate::{CoreError, Result};
@@ -75,6 +77,10 @@ pub enum EntityKind {
     },
     /// A shot camera.
     Camera(CameraData),
+    /// A light (optional: scenes without lights use the studio clay light).
+    Light(LightData),
+    /// A picture on a card (reference, billboard, backdrop, decal).
+    Image(ImageData),
 }
 
 fn default_color() -> [f32; 3] {
@@ -87,6 +93,8 @@ impl EntityKind {
             EntityKind::Empty => "empty",
             EntityKind::Mesh { .. } => "mesh",
             EntityKind::Camera(_) => "camera",
+            EntityKind::Light(_) => "light",
+            EntityKind::Image(_) => "image",
         }
     }
 }
@@ -124,11 +132,33 @@ pub struct Scene {
     /// The camera the viewport and exports look through, if any.
     #[serde(default)]
     pub active_camera: Option<String>,
+    /// Images used by image entities, by key.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub assets: std::collections::BTreeMap<String, Asset>,
+    /// Reference pictures laid over a camera's view to match a shot, by camera id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub references: std::collections::BTreeMap<String, CameraReference>,
+}
+
+/// A picture shown over a camera's view (a storyboard frame, a reference photo).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CameraReference {
+    /// Asset key.
+    pub asset: String,
+    /// 0..1.
+    pub opacity: f32,
 }
 
 impl Default for Scene {
     fn default() -> Self {
-        Self { version: SCENE_VERSION, entities: Vec::new(), timeline: Timeline::default(), active_camera: None }
+        Self {
+            version: SCENE_VERSION,
+            entities: Vec::new(),
+            timeline: Timeline::default(),
+            active_camera: None,
+            assets: Default::default(),
+            references: Default::default(),
+        }
     }
 }
 
@@ -185,6 +215,7 @@ impl Scene {
         self.entities.retain(|e| !doomed.contains(&e.id));
         self.timeline.tracks.retain(|t| !doomed.contains(&t.entity));
         self.timeline.shots.retain(|s| !doomed.contains(&s.camera));
+        self.references.retain(|cam, _| !doomed.contains(cam));
         if self.active_camera.as_ref().is_some_and(|c| doomed.contains(c)) {
             self.active_camera = None;
         }

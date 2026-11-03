@@ -7,6 +7,10 @@
 //! shotstage serve --scene shot.json          # JSON lines on stdin/stdout
 //! shotstage mcp --scene shot.json            # MCP server on stdio
 //! shotstage snapshot --scene shot.json -o frame.png --pass depth
+//! shotstage import chair.glb --scene shot.json --fit-height 0.9
+//! shotstage export set.fbx --scene shot.json     # glb, gltf, obj, stl; fbx through Blender
+//! shotstage storyboard --scene shot.json -o board/  # first / middle / last frame of every shot
+//! shotstage render --scene shot.json -o frames/ --pass clay,depth --video   # every frame
 //! ```
 
 mod mcp;
@@ -87,6 +91,98 @@ enum Cmd {
         #[arg(long)]
         height: Option<u32>,
     },
+    /// Import a model file (glb, gltf, obj, stl; fbx and blend through a local Blender).
+    Import {
+        file: PathBuf,
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Group id. Default: from the file name.
+        #[arg(long)]
+        id: Option<String>,
+        /// Bottom centre position `x,y,z` in metres.
+        #[arg(long, value_delimiter = ',', num_args = 3)]
+        position: Option<Vec<f32>>,
+        /// Uniform scale.
+        #[arg(long)]
+        scale: Option<f32>,
+        /// Scale to this height in metres.
+        #[arg(long)]
+        fit_height: Option<f32>,
+        /// File unit for obj / stl: m, cm, mm, in or auto.
+        #[arg(long)]
+        unit: Option<String>,
+        /// Up axis of the file: y or z.
+        #[arg(long)]
+        up_axis: Option<String>,
+    },
+    /// Render every frame through the shot cameras (following the shots, else the active camera)
+    /// as numbered PNGs per pass, plus camera.json; with --video also an MP4 per pass (ffmpeg).
+    Render {
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Output folder (created if missing).
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Passes: clay, depth, normal (comma separated).
+        #[arg(long, value_delimiter = ',', default_value = "clay")]
+        pass: Vec<String>,
+        #[arg(long, default_value_t = 1280)]
+        width: u32,
+        /// First frame. Default: the timeline start.
+        #[arg(long)]
+        start: Option<u32>,
+        /// Last frame. Default: the timeline end.
+        #[arg(long)]
+        end: Option<u32>,
+        /// Also encode clay.mp4 / depth.mp4 / normal.mp4 with ffmpeg (if it is installed).
+        #[arg(long)]
+        video: bool,
+    },
+    /// Render the first, middle and last frame of every shot (clay and depth) into a folder,
+    /// with storyboard.json (shot descriptions and camera data) and index.html to look at.
+    Storyboard {
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Output folder (created if missing).
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Image width in pixels.
+        #[arg(long, default_value_t = 960)]
+        width: u32,
+        /// Also render the depth pass of every frame.
+        #[arg(long)]
+        depth: bool,
+    },
+    /// Export the scene (or some entities) to a model file; the format comes from the extension.
+    Export {
+        file: PathBuf,
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Only these entity ids (comma separated).
+        #[arg(long, value_delimiter = ',')]
+        ids: Option<Vec<String>>,
+        #[arg(long)]
+        frame: Option<f32>,
+    },
+}
+
+/// A shot name usable in a file name.
+fn compact_name(name: &str) -> String {
+    let s: String =
+        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(32).collect();
+    if s.is_empty() { "shot".into() } else { s }
+}
+
+fn format_of(path: &Path) -> Result<String, String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    shotstage_commands::model::ModelFormat::from_extension(&ext)
+        .map(|f| f.extension().to_string())
+        .ok_or_else(|| format!("unknown model format `.{ext}`: use glb, gltf, obj, stl, fbx or blend"))
+}
+
+/// Drop null fields so optional params stay unset.
+fn compact(v: Value) -> Value {
+    Value::Object(v.as_object().cloned().unwrap_or_default().into_iter().filter(|(_, v)| !v.is_null()).collect())
 }
 
 /// Lazily created GPU for `render.snapshot`.
@@ -105,7 +201,8 @@ impl Gpu {
             SnapshotPass::Depth => Pass::Depth,
             SnapshotPass::Normal => Pass::Normal,
         };
-        let view = View { view: plan.view, proj: plan.proj, depth_near: 0.0, depth_far: 0.0 };
+        let [depth_near, depth_far] = plan.depth_range.unwrap_or([0.0, 0.0]);
+        let view = View { view: plan.view, proj: plan.proj, depth_near, depth_far };
         let png = gpu
             .png(scene, plan.frame, view, pass, &plan.camera, (plan.width, plan.height))
             .map_err(|e| CommandError::new("failed", e))?;
@@ -246,6 +343,223 @@ fn real_main() -> Result<ExitCode, String> {
         Cmd::Mcp { scene } => {
             let session = scene.open()?;
             mcp::serve(session, scene.scene.clone().filter(|_| !scene.dry_run))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Import { file, scene, id, position, scale, fit_height, unit, up_axis } => {
+            let mut session = scene.open()?;
+            let format = format_of(&file)?;
+            let bytes = std::fs::read(&file).map_err(|e| format!("reading {}: {e}", file.display()))?;
+            let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("model").to_string();
+            let mut params = compact(json!({ "format": format, "name": name, "id": id, "position": position,
+                "scale": scale, "fitHeight": fit_height, "unit": unit, "upAxis": up_axis }));
+            params["data"] = json!(shotstage_commands::model::encode(&bytes));
+            if format == "obj" {
+                // pick up colours from the .mtl next to it
+                let mtl = file.with_extension("mtl");
+                if let Ok(text) = std::fs::read_to_string(&mtl) {
+                    params["mtl"] = json!(text);
+                }
+            }
+            finish(session.dispatch("model.import", params), &mut session, &scene)
+        }
+        Cmd::Export { file, scene, ids, frame } => {
+            let mut session = scene.open()?;
+            let format = format_of(&file)?;
+            let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("scene").to_string();
+            let params = compact(json!({ "format": format, "ids": ids, "frame": frame, "name": name }));
+            match session.dispatch("model.export", params) {
+                Ok(o) => {
+                    let mut r = o.result;
+                    let write = |path: &Path, bytes: &[u8]| {
+                        std::fs::write(path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
+                    };
+                    if let Some(d) = r.get("data").and_then(Value::as_str) {
+                        use base64::Engine as _;
+                        let bytes = base64::engine::general_purpose::STANDARD.decode(d).map_err(|e| e.to_string())?;
+                        write(&file, &bytes)?;
+                    } else if let Some(t) = r.get("text").and_then(Value::as_str) {
+                        write(&file, t.as_bytes())?;
+                    }
+                    if let Some(m) = r.get("mtl").and_then(Value::as_str) {
+                        write(&file.with_extension("mtl"), m.as_bytes())?;
+                    }
+                    if let Some(o) = r.as_object_mut() {
+                        o.remove("data");
+                        o.remove("text");
+                        o.remove("mtl");
+                    }
+                    r["file"] = json!(file.display().to_string());
+                    print_json(&json!({ "ok": true, "result": r }));
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    print_json(&error_json(&e));
+                    Ok(ExitCode::from(1))
+                }
+            }
+        }
+        Cmd::Render { scene, out, pass, width, start, end, video } => {
+            let session = scene.open()?;
+            let t = session.scene().timeline.clone();
+            let (a, b) = (start.unwrap_or(t.start), end.unwrap_or(t.end));
+            if b < a {
+                return Err("end must be >= start".into());
+            }
+            for p in &pass {
+                if !["clay", "depth", "normal"].contains(&p.as_str()) {
+                    return Err(format!("unknown pass `{p}`: use clay, depth or normal"));
+                }
+                std::fs::create_dir_all(out.join(p)).map_err(|e| e.to_string())?;
+            }
+            let mut gpu = Gpu::default();
+            // one depth range for the whole sequence (camera to the farthest corner of the scene)
+            let sc = session.scene();
+            let corners = sc
+                .entities
+                .iter()
+                .filter(|e| e.parent.is_none())
+                .filter_map(|e| shotstage_core::spatial::bounds(sc, &e.id, a as f32).ok().flatten())
+                .reduce(|x, y| shotstage_core::spatial::Aabb::union(Some(x), Some(y)).expect("both"));
+            let far = (a..=b)
+                .step_by(4)
+                .filter_map(|f| {
+                    let cam = shotstage_core::eval::camera_id_at(sc, f as f32)?;
+                    let eye = shotstage_core::eval::world_at(sc, &cam, f as f32).ok()?.w_axis.truncate();
+                    let bx = corners?;
+                    Some(
+                        (0..8)
+                            .map(|i| {
+                                let c = glam::Vec3::new(
+                                    if i & 1 == 0 { bx.min.x } else { bx.max.x },
+                                    if i & 2 == 0 { bx.min.y } else { bx.max.y },
+                                    if i & 4 == 0 { bx.min.z } else { bx.max.z },
+                                );
+                                (c - eye).length()
+                            })
+                            .fold(0.0f32, f32::max),
+                    )
+                })
+                .fold(0.0f32, f32::max)
+                .max(1.0);
+            let mut cams = vec![];
+            for f in a..=b {
+                let cam = shotstage_core::eval::camera_id_at(session.scene(), f as f32)
+                    .ok_or("no camera: add one (or a shot) first")?;
+                for p in &pass {
+                    let (_, png) = gpu
+                        .snapshot_png(
+                            session.scene(),
+                            json!({ "camera": cam, "frame": f, "pass": p, "width": width, "depthRange": [0.0, far] }),
+                        )
+                        .map_err(|e| e.message)?;
+                    std::fs::write(out.join(p).join(format!("{:05}.png", f - a)), png).map_err(|e| e.to_string())?;
+                }
+                cams.push(json!({ "frame": f, "camera": cam }));
+                if (f - a) % 24 == 0 {
+                    eprintln!("frame {f} / {b}");
+                }
+            }
+            // per-frame camera data for camera-conditioned models
+            let mut traj = vec![];
+            for c in cams.iter() {
+                let (f, cam) =
+                    (c["frame"].as_u64().unwrap_or(0) as u32, c["camera"].as_str().unwrap_or_default().to_string());
+                let lens =
+                    shotstage_core::eval::camera_data_at(session.scene(), &cam, f as f32).map_err(|e| e.to_string())?;
+                let h = (width as f32 / lens.aspect).round() as u32;
+                let one = shotstage_core::eval::camera_trajectory(session.scene(), &cam, f, f, width, h)
+                    .map_err(|e| e.to_string())?;
+                traj.push(json!({ "camera": cam, "data": one.first() }));
+            }
+            std::fs::write(
+                out.join("camera.json"),
+                serde_json::to_string_pretty(&json!({ "fps": t.fps, "frames": traj })).unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())?;
+            let mut videos = vec![];
+            if video {
+                for p in &pass {
+                    let mp4 = out.join(format!("{p}.mp4"));
+                    let status = std::process::Command::new("ffmpeg")
+                        .args(["-y", "-loglevel", "error", "-framerate", &t.fps.to_string(), "-i"])
+                        .arg(out.join(p).join("%05d.png"))
+                        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+                        .arg(&mp4)
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => videos.push(mp4.display().to_string()),
+                        Ok(_) => eprintln!("ffmpeg could not encode {p}.mp4"),
+                        Err(_) => {
+                            eprintln!("ffmpeg was not found: the PNG frames are there to encode yourself");
+                            break;
+                        }
+                    }
+                }
+            }
+            print_json(
+                &json!({ "ok": true, "result": { "folder": out.display().to_string(), "frames": b - a + 1, "passes": pass, "videos": videos } }),
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Storyboard { scene, out, width, depth } => {
+            let mut session = scene.open()?;
+            std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
+            let t = session.scene().timeline.clone();
+            // every shot, or the whole timeline through the active camera
+            let shots: Vec<(String, String, u32, u32)> = if t.shots.is_empty() {
+                match session.scene().active_camera.clone() {
+                    Some(c) => vec![("shot".into(), c, t.start, t.end)],
+                    None => return Err("the scene has no shots and no active camera".into()),
+                }
+            } else {
+                t.shots.iter().map(|s| (s.name.clone(), s.camera.clone(), s.start, s.end)).collect()
+            };
+            let mut gpu = Gpu::default();
+            let mut board = vec![];
+            let mut html = String::from(
+                "<!doctype html><meta charset=utf-8><title>Storyboard</title><style>body{font:14px system-ui;background:#16171a;color:#ddd;margin:24px}h2{margin:28px 0 6px}.row{display:flex;gap:12px}figure{margin:0}img{width:100%;border-radius:6px;display:block}figcaption{color:#999;font-size:12px;margin-top:4px}</style><h1>Storyboard</h1>",
+            );
+            for (i, (name, cam, a, b)) in shots.iter().enumerate() {
+                let mid = (a + b) / 2;
+                let mut frames = vec![];
+                html.push_str(&format!("<h2>{} · {name}</h2><div class=row>", i + 1));
+                for (label, f) in [("first", *a), ("middle", mid), ("last", *b)] {
+                    let mut files = vec![];
+                    for pass in if depth { vec!["clay", "depth"] } else { vec!["clay"] } {
+                        let file = format!("{:02}_{}_{label}_{pass}.png", i + 1, compact_name(name));
+                        let (_, png) = gpu
+                            .snapshot_png(
+                                session.scene(),
+                                json!({ "camera": cam, "frame": f, "pass": pass, "width": width }),
+                            )
+                            .map_err(|e| e.message)?;
+                        std::fs::write(out.join(&file), png).map_err(|e| e.to_string())?;
+                        files.push(file);
+                    }
+                    let d = session
+                        .dispatch("camera.describe", json!({ "id": cam, "frame": f }))
+                        .map(|o| o.result)
+                        .unwrap_or(Value::Null);
+                    let summary = d["summary"].as_str().unwrap_or_default().to_string();
+                    html.push_str(&format!(
+                        "<figure><img src=\"{}\"><figcaption>{label} · frame {f} · {summary}</figcaption></figure>",
+                        files[0]
+                    ));
+                    frames.push(json!({ "position": label, "frame": f, "images": files, "describe": d }));
+                }
+                html.push_str("</div>");
+                let traj = session
+                    .dispatch("camera.trajectory", json!({ "id": cam, "start": a, "end": b }))
+                    .map(|o| o.result["frames"].clone())
+                    .unwrap_or(Value::Null);
+                board.push(json!({ "shot": name, "camera": cam, "start": a, "end": b,
+                    "seconds": (b - a + 1) as f32 / t.fps, "frames": frames, "trajectory": traj }));
+            }
+            let doc = json!({ "fps": t.fps, "shots": board });
+            std::fs::write(out.join("storyboard.json"), serde_json::to_string_pretty(&doc).unwrap_or_default())
+                .map_err(|e| e.to_string())?;
+            std::fs::write(out.join("index.html"), html).map_err(|e| e.to_string())?;
+            print_json(&json!({ "ok": true, "result": { "folder": out.display().to_string(), "shots": shots.len() } }));
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Snapshot { scene, out, camera, frame, pass, width, height } => {

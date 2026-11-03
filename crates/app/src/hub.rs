@@ -25,6 +25,8 @@ pub struct Hub {
     pub pass: shotstage_render::Pass,
     /// Viewport shows the shot camera instead of the free orbit view.
     pub look_through: bool,
+    /// The scene as of a revision, shared by the UI until it changes (no copy per call).
+    pub(crate) scene_cache: Option<(u64, Rc<shotstage_core::Scene>)>,
     /// GPU of the editor window, used for snapshots.
     pub(crate) gpu: Option<eframe::egui_wgpu::RenderState>,
     /// Offscreen renderer for snapshots (separate from the viewport's).
@@ -50,7 +52,8 @@ impl Hub {
         let plan = shotstage_commands::snapshot::plan(self.session.scene(), params, Some(self.frame))?;
         let rs = self.gpu.clone().ok_or_else(|| CommandError::new("unsupported", "the editor has no GPU"))?;
         let renderer = self.snap_renderer.get_or_insert_with(|| Renderer::new(&rs.device));
-        let view = View { view: plan.view, proj: plan.proj, depth_near: 0.0, depth_far: 0.0 };
+        let [depth_near, depth_far] = plan.depth_range.unwrap_or([0.0, 0.0]);
+        let view = View { view: plan.view, proj: plan.proj, depth_near, depth_far };
         renderer.render(
             &rs.device,
             &rs.queue,

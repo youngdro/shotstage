@@ -326,3 +326,32 @@ fn product_shots_frame_small_subjects() {
         run(&mut s, "prefab.create", json!({"kind": p.key, "position": [10, 0, 10]}));
     }
 }
+
+#[test]
+fn lights_and_presets() {
+    let mut s = Session::default();
+    run(&mut s, "prefab.create", json!({"kind": "woman", "id": "w"}));
+    run(&mut s, "entity.create", json!({"type": "camera", "id": "cam", "position": [0, 1.5, 4]}));
+    run(&mut s, "camera.lookAt", json!({"id": "cam", "target": "w"}));
+    // a single light, then edited
+    let r = run(&mut s, "entity.create", json!({"type": "light", "light": {"kind": "spot", "coneDegrees": 30}}));
+    let id = r["id"].as_str().unwrap().to_string();
+    run(&mut s, "light.set", json!({"id": id, "intensity": 2.5, "color": [1, 0.8, 0.6]}));
+    assert!(s.dispatch("light.set", json!({"id": id, "intensity": -1})).is_err());
+    assert!(s.dispatch("light.set", json!({"id": "w", "intensity": 1})).is_err());
+    assert_eq!(shotstage_core::eval::lights_at(s.scene(), 0.0).len(), 1);
+    // a preset replaces the previous preset, is one undo step, and puts the key on the camera's side
+    let r = run(&mut s, "light.preset", json!({"preset": "threePoint", "subject": "w"}));
+    assert_eq!(r["lights"].as_array().unwrap().len(), 3);
+    run(&mut s, "light.preset", json!({"preset": "rembrandt", "subject": "w"}));
+    assert_eq!(shotstage_core::eval::lights_at(s.scene(), 0.0).len(), 1 + 2);
+    run(&mut s, "history.undo", json!({}));
+    assert_eq!(shotstage_core::eval::lights_at(s.scene(), 0.0).len(), 1 + 3);
+    run(&mut s, "light.preset", json!({"preset": "clear"}));
+    assert!(shotstage_core::eval::lights_at(s.scene(), 0.0).is_empty());
+    // the softbox prefab is a real light
+    run(&mut s, "prefab.create", json!({"kind": "softbox", "position": [2, 0, 2]}));
+    assert_eq!(shotstage_core::eval::lights_at(s.scene(), 0.0).len(), 1);
+    let list = run(&mut s, "light.list", json!({}));
+    assert!(list["presets"].as_array().unwrap().len() >= 6);
+}

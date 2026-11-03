@@ -73,6 +73,42 @@ pub enum MeshSource {
     Primitive { primitive: Primitive },
     /// Explicit geometry (imported, applied modifiers, merged, or edited).
     Data { mesh: Mesh },
+    /// Imported geometry bound to a skeleton: `mesh` is the rest pose, and every vertex follows
+    /// up to four joint entities (see [`crate::eval::posed_mesh`]).
+    Skinned { mesh: Mesh, skin: Skin },
+}
+
+/// How a skinned mesh follows its joints (glTF skinning).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Skin {
+    /// Joint entity ids.
+    pub joints: Vec<String>,
+    /// One column-major inverse bind matrix per joint.
+    pub inverse_bind: Vec<[f32; 16]>,
+    /// Per vertex: four indices into `joints`.
+    pub vertex_joints: Vec<[u16; 4]>,
+    /// Per vertex: the four weights (they are normalised when used).
+    pub vertex_weights: Vec<[f32; 4]>,
+}
+
+impl Skin {
+    pub fn validate(&self, vertices: usize) -> Result<()> {
+        if self.joints.is_empty() || self.joints.len() != self.inverse_bind.len() {
+            return Err(CoreError::Invalid("a skin needs one inverse bind matrix per joint".into()));
+        }
+        if self.vertex_joints.len() != vertices || self.vertex_weights.len() != vertices {
+            return Err(CoreError::Invalid("a skin needs joints and weights for every vertex".into()));
+        }
+        let n = self.joints.len() as u16;
+        if self.vertex_joints.iter().flatten().any(|j| *j >= n) {
+            return Err(CoreError::Invalid("a skin weight refers to a joint that does not exist".into()));
+        }
+        if self.inverse_bind.iter().flatten().chain(self.vertex_weights.iter().flatten()).any(|v| !v.is_finite()) {
+            return Err(CoreError::Invalid("skin data must be finite".into()));
+        }
+        Ok(())
+    }
 }
 
 /// Non-destructive modifiers, evaluated top to bottom.
@@ -305,6 +341,11 @@ impl MeshSource {
                 mesh.validate()?;
                 Ok(mesh.clone())
             }
+            MeshSource::Skinned { mesh, skin } => {
+                mesh.validate()?;
+                skin.validate(mesh.positions.len())?;
+                Ok(mesh.clone())
+            }
         }
     }
 }
@@ -516,6 +557,50 @@ impl Mesh {
         out
     }
 
+    /// Triangulate with normals smoothed across edges flatter than `angle_degrees` and kept
+    /// sharp across steeper ones: spheres and capsules look round, boxes keep crisp corners.
+    pub fn triangulate_auto_smooth(&self, angle_degrees: f32) -> TriMesh {
+        let pos: Vec<Vec3> = self.positions.iter().map(|p| Vec3::from_array(*p)).collect();
+        let face_normal = |f: &[u32]| {
+            let mut n = Vec3::ZERO;
+            for i in 0..f.len() {
+                let a = pos[f[i] as usize];
+                let b = pos[f[(i + 1) % f.len()] as usize];
+                n += Vec3::new((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+            }
+            n
+        };
+        // area-weighted face normals (Newell's vector is twice the area) and, per vertex, its faces
+        let weighted: Vec<Vec3> = self.faces.iter().map(|f| face_normal(f)).collect();
+        let unit: Vec<Vec3> = weighted.iter().map(|n| n.normalize_or_zero()).collect();
+        let mut around: Vec<Vec<u32>> = vec![Vec::new(); pos.len()];
+        for (fi, f) in self.faces.iter().enumerate() {
+            for &v in f {
+                around[v as usize].push(fi as u32);
+            }
+        }
+        let cos = angle_degrees.to_radians().cos();
+        let mut t = TriMesh::default();
+        for (fi, f) in self.faces.iter().enumerate() {
+            let base = t.positions.len() as u32;
+            for &v in f {
+                let mut n = Vec3::ZERO;
+                for &g in &around[v as usize] {
+                    if unit[g as usize].dot(unit[fi]) >= cos {
+                        n += weighted[g as usize];
+                    }
+                }
+                let n = n.normalize_or_zero();
+                t.positions.push(self.positions[v as usize]);
+                t.normals.push(if n == Vec3::ZERO { unit[fi].to_array() } else { n.to_array() });
+            }
+            for i in 1..f.len() as u32 - 1 {
+                t.indices.extend_from_slice(&[base, base + i, base + i + 1]);
+            }
+        }
+        t
+    }
+
     /// Fan-triangulate faces. `smooth` averages normals per vertex; otherwise faces are flat.
     pub fn triangulate(&self, smooth: bool) -> TriMesh {
         let pos: Vec<Vec3> = self.positions.iter().map(|p| Vec3::from_array(*p)).collect();
@@ -584,6 +669,22 @@ mod tests {
 
     fn cube() -> Mesh {
         Primitive::Cube { size: [2.0; 3] }.build().unwrap()
+    }
+
+    #[test]
+    fn auto_smooth_keeps_box_corners_sharp_and_spheres_round() {
+        let t = cube().triangulate_auto_smooth(40.0);
+        for (p, n) in t.positions.iter().zip(&t.normals) {
+            // every cube normal is one of the face axes
+            let n = Vec3::from_array(*n);
+            assert!((n.abs().max_element() - 1.0).abs() < 1e-5, "{p:?} {n}");
+        }
+        let s =
+            Primitive::Sphere { radius: 1.0, segments: 16, rings: 8 }.build().unwrap().triangulate_auto_smooth(40.0);
+        for (p, n) in s.positions.iter().zip(&s.normals) {
+            // round: the normal points along the position
+            assert!(Vec3::from_array(*p).normalize().dot(Vec3::from_array(*n)) > 0.97);
+        }
     }
 
     #[test]

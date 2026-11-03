@@ -24,6 +24,16 @@ pub enum PrefabKind {
     Doorway,
     Car,
     Tree,
+    Desk,
+    Monitor,
+    Laptop,
+    OfficeChair,
+    Bench,
+    StreetLamp,
+    Bicycle,
+    TrafficCone,
+    Fence,
+    Plant,
     Lamp,
     Crate,
     ProduceStand,
@@ -43,6 +53,9 @@ pub enum PrefabKind {
     Scale,
     PriceSign,
     Pallet,
+    Phone,
+    ShoppingBag,
+    Handbag,
     Bottle,
     Jar,
     Can,
@@ -136,6 +149,16 @@ pub const PREFABS: &[PrefabInfo] = &[
     info!(Doorway, "doorway", "doorway", "Doorway", Furniture, "Wall 4 m wide with a 0.9 × 2.1 m opening"),
     info!(Car, "car", "car", "Car", Furniture, "Car 4.4 m long"),
     info!(Tree, "tree", "tree", "Tree", Furniture, "Tree, about 3.9 m tall"),
+    info!(Desk, "desk", "desk", "Desk", Furniture, "Office desk 1.4 × 0.7 m, 0.74 m high"),
+    info!(Monitor, "monitor", "monitor", "Monitor", Furniture, "Desktop monitor 60 cm on a stand"),
+    info!(Laptop, "laptop", "laptop", "Laptop", Furniture, "Open laptop 33 cm"),
+    info!(OfficeChair, "officeChair", "office_chair", "Desk chair", Furniture, "Swivel desk chair"),
+    info!(Bench, "bench", "bench", "Bench", Furniture, "Park bench 1.6 m"),
+    info!(StreetLamp, "streetLamp", "street_lamp", "Street lamp", Furniture, "Street lamp 4 m"),
+    info!(Bicycle, "bicycle", "bicycle", "Bicycle", Furniture, "Bicycle 1.7 m long, front at +Z"),
+    info!(TrafficCone, "trafficCone", "cone", "Cone", Furniture, "Traffic cone 70 cm"),
+    info!(Fence, "fence", "fence", "Fence", Furniture, "Picket fence section 2 m"),
+    info!(Plant, "plant", "plant", "Plant", Furniture, "Potted plant 1 m"),
     info!(
         ProduceStand,
         "produceStand",
@@ -193,6 +216,12 @@ pub const PREFABS: &[PrefabInfo] = &[
     info!(PriceSign, "priceSign", "price_sign", "Sign", Retail, "Price sign on a stand, 1.3 m"),
     info!(Pallet, "pallet", "pallet", "Pallet", Retail, "Pallet 1.2 × 1.0 m stacked with cartons"),
     info!(
+        Phone,
+        "phone", "phone", "Phone", Retail, "Smartphone 7 × 15 cm (screen faces +Z); hold it with Hold in hand"
+    ),
+    info!(ShoppingBag, "shoppingBag", "bag", "Bag", Retail, "Paper shopping bag with handles, 32 cm"),
+    info!(Handbag, "handbag", "handbag", "Handbag", Retail, "Handbag with a strap, 28 cm"),
+    info!(
         Bottle,
         "bottle",
         "bottle",
@@ -233,7 +262,11 @@ pub const PREFABS: &[PrefabInfo] = &[
     ),
     info!(
         Softbox,
-        "softbox", "softbox", "Softbox", Product, "Softbox on a light stand, head at 1.8 m, aimed forward (+Z)"
+        "softbox",
+        "softbox",
+        "Softbox",
+        Product,
+        "Softbox on a light stand, head at 1.8 m, aimed forward (+Z); it is a real area light"
     ),
     info!(Reflector, "reflector", "reflector", "Reflector", Product, "Round reflector card 80 cm on a stand"),
     info!(LeafBranch, "leafBranch", "branch", "Leaves", Product, "Small branch with leaves, 35 cm"),
@@ -264,10 +297,22 @@ pub struct Part {
     pub scale: [f32; 3],
     pub color: [f32; 3],
     pub modifiers: Vec<Modifier>,
+    /// Makes the part a light (`prim` is then ignored).
+    pub light: Option<shotstage_core::LightData>,
 }
 
 pub fn part(name: &'static str, prim: Primitive, pos: [f32; 3], color: [f32; 3]) -> Part {
-    Part { name, parent: None, prim: Some(prim), pos, rot: [0.0; 3], scale: [1.0; 3], color, modifiers: vec![] }
+    Part {
+        name,
+        parent: None,
+        prim: Some(prim),
+        pos,
+        rot: [0.0; 3],
+        scale: [1.0; 3],
+        color,
+        modifiers: vec![],
+        light: None,
+    }
 }
 
 fn cube(x: f32, y: f32, z: f32) -> Primitive {
@@ -400,6 +445,91 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
             }
             v
         }
+        Desk => {
+            let mut v = vec![part("top", cube(1.4, 0.04, 0.7), [0.0, 0.72, 0.0], WHITE)];
+            v.push(part("side_l", cube(0.04, 0.7, 0.66), [0.66, 0.35, 0.0], METAL));
+            v.push(part("side_r", cube(0.04, 0.7, 0.66), [-0.66, 0.35, 0.0], METAL));
+            v.push(part("drawers", cube(0.4, 0.5, 0.6), [0.42, 0.45, 0.0], WHITE));
+            v
+        }
+        Monitor => vec![
+            part("foot", cube(0.22, 0.015, 0.16), [0.0, 0.0075, 0.0], DARK),
+            part("neck", cube(0.04, 0.2, 0.03), [0.0, 0.11, -0.03], DARK),
+            part("screen", cube(0.6, 0.36, 0.03), [0.0, 0.36, 0.0], DARK),
+            part("glass", cube(0.57, 0.33, 0.002), [0.0, 0.36, 0.016], [0.25, 0.35, 0.5]),
+        ],
+        Laptop => vec![
+            part("base", cube(0.33, 0.015, 0.23), [0.0, 0.0075, 0.0], STEEL),
+            Part { rot: [-15.0, 0.0, 0.0], ..part("lid", cube(0.33, 0.22, 0.008), [0.0, 0.11, -0.13], STEEL) },
+            Part {
+                rot: [-15.0, 0.0, 0.0],
+                ..part("screen", cube(0.3, 0.19, 0.002), [0.0, 0.11, -0.124], [0.25, 0.35, 0.5])
+            },
+        ],
+        OfficeChair => vec![
+            part("base", Primitive::Cylinder { radius: 0.3, height: 0.04, segments: 5 }, [0.0, 0.06, 0.0], DARK),
+            part("column", cyl(0.025, 0.36), [0.0, 0.26, 0.0], METAL),
+            part("seat", cube(0.48, 0.08, 0.46), [0.0, 0.48, 0.0], DARK),
+            Part { rot: [-8.0, 0.0, 0.0], ..part("back", cube(0.44, 0.52, 0.06), [0.0, 0.8, -0.22], DARK) },
+        ],
+        Bench => {
+            let mut v = vec![
+                part("seat", cube(1.6, 0.05, 0.42), [0.0, 0.44, 0.0], WOOD),
+                Part { rot: [-12.0, 0.0, 0.0], ..part("back", cube(1.6, 0.36, 0.04), [0.0, 0.66, -0.2], WOOD) },
+            ];
+            v.extend(legs4(["leg_1", "leg_2", "leg_3", "leg_4"], 1.5, 0.4, 0.42, 0.05, METAL));
+            v
+        }
+        StreetLamp => vec![
+            part("base", cyl(0.14, 0.3), [0.0, 0.15, 0.0], METAL),
+            part("pole", cyl(0.05, 3.6), [0.0, 2.1, 0.0], METAL),
+            part("arm", cube(0.06, 0.06, 0.6), [0.0, 3.85, 0.27], METAL),
+            part("head", cube(0.3, 0.12, 0.45), [0.0, 3.82, 0.6], DARK),
+        ],
+        Bicycle => {
+            let wheel = |n: &'static str, z: f32| Part {
+                rot: [0.0, 0.0, 90.0],
+                ..part(
+                    n,
+                    Primitive::Torus { major_radius: 0.33, minor_radius: 0.025, major_segments: 28, minor_segments: 6 },
+                    [0.0, 0.35, z],
+                    DARK,
+                )
+            };
+            vec![
+                wheel("wheel_f", 0.55),
+                wheel("wheel_b", -0.55),
+                Part { rot: [40.0, 0.0, 0.0], ..part("down_tube", cube(0.04, 0.04, 0.75), [0.0, 0.55, 0.15], RED) },
+                part("top_tube", cube(0.04, 0.04, 0.6), [0.0, 0.8, 0.05], RED),
+                Part { rot: [-15.0, 0.0, 0.0], ..part("seat_tube", cube(0.04, 0.55, 0.04), [0.0, 0.62, -0.2], RED) },
+                part("saddle", cube(0.12, 0.04, 0.25), [0.0, 0.92, -0.25], DARK),
+                part("bars", cube(0.55, 0.03, 0.03), [0.0, 0.98, 0.42], DARK),
+                Part { rot: [-20.0, 0.0, 0.0], ..part("fork", cube(0.04, 0.6, 0.04), [0.0, 0.66, 0.48], RED) },
+            ]
+        }
+        TrafficCone => vec![
+            part("base", cube(0.38, 0.03, 0.38), [0.0, 0.015, 0.0], [0.9, 0.35, 0.1]),
+            part(
+                "cone",
+                Primitive::Cone { radius: 0.15, height: 0.67, segments: 20 },
+                [0.0, 0.365, 0.0],
+                [0.95, 0.45, 0.12],
+            ),
+            part("stripe", cyl(0.09, 0.08), [0.0, 0.45, 0.0], WHITE),
+        ],
+        Fence => vec![
+            part("rail_top", cube(2.0, 0.06, 0.03), [0.0, 0.75, 0.0], WHITE),
+            part("rail_low", cube(2.0, 0.06, 0.03), [0.0, 0.3, 0.0], WHITE),
+            Part {
+                modifiers: vec![array(11, [0.19, 0.0, 0.0])],
+                ..part("pickets", cube(0.08, 0.95, 0.025), [-0.95, 0.475, 0.025], WHITE)
+            },
+        ],
+        Plant => vec![
+            part("pot", cyl(0.17, 0.3), [0.0, 0.15, 0.0], [0.7, 0.4, 0.3]),
+            part("soil", cyl(0.15, 0.02), [0.0, 0.25, 0.0], [0.3, 0.22, 0.15]),
+            Part { scale: [0.6, 0.75, 0.6], ..part("leaves", ball(16), [0.0, 0.66, 0.0], GREEN) },
+        ],
         Tree => vec![
             part("trunk", cyl(0.15, 2.0), [0.0, 1.0, 0.0], [0.45, 0.32, 0.22]),
             part(
@@ -623,6 +753,36 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
             part("board", cube(0.6, 0.4, 0.02), [0.0, 1.15, 0.0], [0.95, 0.85, 0.3]),
             part("label", cube(0.5, 0.12, 0.022), [0.0, 1.22, 0.0], RED),
         ],
+        Phone => vec![
+            part("body", cube(0.072, 0.15, 0.008), [0.0, 0.075, 0.0], DARK),
+            part("screen", cube(0.066, 0.138, 0.001), [0.0, 0.075, 0.0045], [0.25, 0.35, 0.5]),
+        ],
+        ShoppingBag => vec![
+            part("bag", cube(0.32, 0.28, 0.14), [0.0, 0.14, 0.0], CARDBOARD),
+            Part {
+                rot: [0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 0.4],
+                ..part(
+                    "handles",
+                    Primitive::Torus { major_radius: 0.07, minor_radius: 0.006, major_segments: 16, minor_segments: 6 },
+                    [0.0, 0.3, 0.0],
+                    WOOD,
+                )
+            },
+        ],
+        Handbag => vec![
+            part("bag", cube(0.28, 0.2, 0.1), [0.0, 0.1, 0.0], [0.5, 0.18, 0.18]),
+            part("flap", cube(0.28, 0.08, 0.105), [0.0, 0.16, 0.002], [0.42, 0.14, 0.14]),
+            Part {
+                scale: [1.0, 1.0, 0.3],
+                ..part(
+                    "strap",
+                    Primitive::Torus { major_radius: 0.11, minor_radius: 0.008, major_segments: 20, minor_segments: 6 },
+                    [0.0, 0.22, 0.0],
+                    DARK,
+                )
+            },
+        ],
         Pallet => vec![
             part("deck", cube(1.2, 0.04, 1.0), [0.0, 0.124, 0.0], WOOD),
             Part {
@@ -771,11 +931,18 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
         }
         Softbox => {
             let mut v = light_stand(1.8);
-            v.push(Part {
-                rot: [90.0, 0.0, 0.0],
-                ..part("box", Primitive::Cone { radius: 0.42, height: 0.35, segments: 4 }, [0.0, 1.8, 0.1], DARK)
-            });
+            v.push(part("box", cube(0.62, 0.62, 0.3), [0.0, 1.8, 0.12], DARK));
             v.push(part("diffuser", cube(0.58, 0.58, 0.01), [0.0, 1.8, 0.28], WHITE));
+            // the panel lights the scene: an area light facing the front (+Z)
+            v.push(Part {
+                rot: [0.0, 180.0, 0.0],
+                light: Some(shotstage_core::LightData {
+                    kind: shotstage_core::LightKind::Area,
+                    size: [0.58, 0.58],
+                    ..Default::default()
+                }),
+                ..part("light", cube(0.1, 0.1, 0.1), [0.0, 1.8, 0.3], WHITE)
+            });
             v
         }
         Reflector => {

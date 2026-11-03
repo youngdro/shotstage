@@ -69,7 +69,17 @@ fn ball() -> Primitive {
 }
 
 fn joint(name: &'static str, parent: Option<&'static str>, pos: [f32; 3]) -> Part {
-    Part { name, parent, prim: None, pos, rot: [0.0; 3], scale: [1.0; 3], color: [1.0; 3], modifiers: vec![] }
+    Part {
+        name,
+        parent,
+        prim: None,
+        pos,
+        rot: [0.0; 3],
+        scale: [1.0; 3],
+        color: [1.0; 3],
+        modifiers: vec![],
+        light: None,
+    }
 }
 
 fn mesh(
@@ -80,7 +90,17 @@ fn mesh(
     scale: [f32; 3],
     color: [f32; 3],
 ) -> Part {
-    Part { name, parent: Some(parent), prim: Some(prim), pos, rot: [0.0; 3], scale, color, modifiers: vec![] }
+    Part {
+        name,
+        parent: Some(parent),
+        prim: Some(prim),
+        pos,
+        rot: [0.0; 3],
+        scale,
+        color,
+        modifiers: vec![],
+        light: None,
+    }
 }
 
 /// Hair parts for a style, children of the `head` joint.
@@ -459,8 +479,52 @@ pub fn joint_of(scene: &Scene, id: &str) -> Option<String> {
     joint_name(scene, &parent).map(|_| parent)
 }
 
+/// Joints of imported skeletons: every entity a skinned mesh follows.
+pub fn skin_joints(scene: &Scene) -> std::collections::HashSet<String> {
+    scene
+        .entities
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } => Some(skin.joints.iter().cloned()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// A joint of a person prefab or of an imported skeleton.
+pub fn is_joint(scene: &Scene, id: &str) -> bool {
+    joint_name(scene, id).is_some() || skin_joints(scene).contains(id)
+}
+
+/// The joint nearest to a world point on a skinned mesh (measured to each bone, from a joint to
+/// its first child joint).
+pub fn joint_near(scene: &Scene, mesh: &str, point: Vec3, frame: f32) -> Option<String> {
+    let EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } = &scene.get(mesh).ok()?.kind else {
+        return None;
+    };
+    let pos = |id: &str| world_at(scene, id, frame).ok().map(|m| m.w_axis.truncate());
+    let mut best: Option<(f32, String)> = None;
+    for j in &skin.joints {
+        let Some(a) = pos(j) else { continue };
+        let child = scene.children(Some(j)).find(|c| skin.joints.contains(&c.id)).and_then(|c| pos(&c.id));
+        let d = match child {
+            Some(b) => {
+                let ab = b - a;
+                let t = ((point - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+                (a + ab * t - point).length()
+            }
+            None => (a - point).length(),
+        };
+        if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((d, j.clone()));
+        }
+    }
+    best.map(|(_, j)| j)
+}
+
 /// Rest height of the pelvis, from the leg chain (works for any body size).
-fn pelvis_rest(scene: &Scene, root: &str) -> CmdResult<f32> {
+pub(crate) fn pelvis_rest(scene: &Scene, root: &str) -> CmdResult<f32> {
     let y = |j: &str| -> CmdResult<f32> { Ok(scene.get(&format!("{root}_{j}"))?.transform.translation[1]) };
     let knee = y("knee_l")?;
     let scale = (knee.abs() / 0.43).max(1e-3);
@@ -552,12 +616,16 @@ fn bone_direction(scene: &Scene, joint: &str) -> Vec3 {
         .find(|e| matches!(e.kind, EntityKind::Empty))
         .or_else(|| kids.iter().find(|e| !e.name.starts_with("hair") && e.name != "nose"))
         .map(|e| e.transform.translation());
-    pick.map(|v| v.normalize_or_zero()).filter(|v| *v != Vec3::ZERO).unwrap_or(Vec3::NEG_Y)
+    // person limbs hang along -Y; imported (Blender) bones point along their +Y
+    let rest = if joint_name(scene, joint).is_some() { Vec3::NEG_Y } else { Vec3::Y };
+    pick.map(|v| v.normalize_or_zero()).filter(|v| *v != Vec3::ZERO).unwrap_or(rest)
 }
 
 fn pose_aim(scene: &mut Scene, p: AimParams) -> CmdResult<Value> {
-    let joint = joint_of(scene, &p.id)
-        .ok_or_else(|| CommandError::new("failed", format!("`{}` is not a joint or body part of a person", p.id)))?;
+    let joint =
+        joint_of(scene, &p.id).or_else(|| skin_joints(scene).contains(&p.id).then(|| p.id.clone())).ok_or_else(
+            || CommandError::new("failed", format!("`{}` is not a joint of a person or of an imported skeleton", p.id)),
+        )?;
     let frame = frame_ok(p.frame.unwrap_or(scene.timeline.start as f32))?;
     let target = finite3(p.target, "target")?;
     let world = world_at(scene, &joint, frame)?;

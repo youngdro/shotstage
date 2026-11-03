@@ -2,8 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use shotstage_core::eval::{camera_data_at, world_at};
-use shotstage_core::mesh::evaluate_mesh;
+use shotstage_core::eval::{camera_data_at, posed_tris, world_at};
 use shotstage_core::spatial::{self, RayOptions, is_hidden};
 use shotstage_core::{EntityKind, Scene};
 
@@ -36,12 +35,40 @@ pub struct Overlay {
     pub hovered: Option<String>,
     /// Entity being dragged: its footprint and a drop line to the ground are drawn.
     pub footprint: Option<String>,
+    /// Ignore the scene's lights and use the flat studio clay light.
+    pub studio_light: bool,
+    /// Viewer position, so billboards can turn towards it (set by the renderer).
+    pub eye: Option<[f32; 3]>,
+    /// More selected entities (multi-selection), highlighted like `selected`.
+    pub also_selected: Vec<String>,
+    /// Turn shadows off (they are on by default).
+    pub no_shadows: bool,
 }
+
+/// Vertex of a textured image card.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ImageVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    /// Multiplies the picture (selection / hover highlight).
+    pub tint: [f32; 3],
+}
+
+/// One image card to draw with its asset's texture.
+pub struct ImageQuad {
+    pub asset: String,
+    pub vertices: [ImageVertex; 6],
+}
+
+pub use shotstage_core::image::card_world as image_world;
 
 #[derive(Default)]
 pub struct Geometry {
     pub triangles: Vec<Vertex>,
     pub lines: Vec<LineVertex>,
+    pub images: Vec<ImageQuad>,
 }
 
 const SELECT: [f32; 3] = [1.0, 0.62, 0.18];
@@ -53,7 +80,10 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         grid(&mut g.lines);
     }
     let group = |id: &Option<String>| id.as_deref().map(|i| spatial::subtree(scene, i)).unwrap_or_default();
-    let (selected_set, hovered_set) = (group(&overlay.selected), group(&overlay.hovered));
+    let (mut selected_set, hovered_set) = (group(&overlay.selected), group(&overlay.hovered));
+    for a in &overlay.also_selected {
+        selected_set.extend(spatial::subtree(scene, a));
+    }
     for (index, e) in scene.entities.iter().enumerate() {
         if is_hidden(scene, &e.id) {
             continue;
@@ -62,9 +92,8 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         let selected = selected_set.contains(&e.id);
         let hovered = !selected && hovered_set.contains(&e.id);
         match &e.kind {
-            EntityKind::Mesh { source, modifiers, color } => {
-                let Ok(mesh) = evaluate_mesh(source, modifiers) else { continue };
-                let tri = mesh.triangulate(false);
+            EntityKind::Mesh { color, .. } => {
+                let Ok(tri) = posed_tris(scene, &e.id, frame) else { continue };
                 let normal_m = world.inverse().transpose();
                 let c = if selected {
                     mix(*color, SELECT, 0.45)
@@ -86,13 +115,47 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                     });
                 }
             }
+            EntityKind::Image(img) => {
+                let w = image_world(world, img.billboard, overlay.eye.map(Vec3::from_array));
+                let (hw, hh) = (img.size[0] / 2.0, img.size[1] / 2.0);
+                let tint = if selected {
+                    [1.0, 0.82, 0.6]
+                } else if hovered {
+                    [1.12, 1.12, 1.12]
+                } else {
+                    [1.0; 3]
+                };
+                let n = w.transform_vector3(Vec3::Z).normalize_or_zero().to_array();
+                let v = |x: f32, y: f32, u: f32, vv: f32| ImageVertex {
+                    pos: w.transform_point3(Vec3::new(x, y, 0.0)).to_array(),
+                    normal: n,
+                    uv: [u, vv],
+                    tint,
+                };
+                let (a, b, c, d) =
+                    (v(-hw, -hh, 0.0, 1.0), v(hw, -hh, 1.0, 1.0), v(hw, hh, 1.0, 0.0), v(-hw, hh, 0.0, 0.0));
+                g.images.push(ImageQuad { asset: img.asset.clone(), vertices: [a, b, c, a, c, d] });
+                if selected && overlay.cameras {
+                    for (p, q) in [(a.pos, b.pos), (b.pos, c.pos), (c.pos, d.pos), (d.pos, a.pos)] {
+                        line(&mut g.lines, Vec3::from_array(p), Vec3::from_array(q), SELECT);
+                    }
+                }
+            }
+            EntityKind::Light(l) if overlay.cameras => {
+                let warm = [l.color[0] * 0.6 + 0.4, l.color[1] * 0.6 + 0.35, l.color[2] * 0.4 + 0.15];
+                light_icon(&mut g.lines, world, l, if selected { SELECT } else { warm });
+            }
             EntityKind::Camera(_) if overlay.cameras && overlay.looking_through.as_deref() != Some(e.id.as_str()) => {
                 if let Ok(lens) = camera_data_at(scene, &e.id, frame) {
                     frustum(&mut g.lines, world, lens.hfov(), lens.vfov(), if selected { SELECT } else { CAMERA });
                 }
             }
             // group roots and a person's joints stay invisible unless selected
-            EntityKind::Empty if overlay.cameras && (selected || scene.children(Some(&e.id)).next().is_none()) => {
+            EntityKind::Empty
+                if overlay.cameras
+                    && (overlay.selected.as_deref() == Some(e.id.as_str())
+                        || scene.children(Some(&e.id)).next().is_none()) =>
+            {
                 let c = if selected { SELECT } else { [0.8, 0.8, 0.8] };
                 for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
                     line(&mut g.lines, world.transform_point3(-axis * 0.25), world.transform_point3(axis * 0.25), c);
@@ -120,6 +183,52 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         line(&mut g.lines, mid - Vec3::Z * s, mid + Vec3::Z * s, SELECT);
     }
     g
+}
+
+/// Wire icon of a light: a small star at the light, plus its beam (sun arrow, spot cone, area
+/// panel) along its -Z.
+fn light_icon(out: &mut Vec<LineVertex>, world: Mat4, l: &shotstage_core::LightData, c: [f32; 3]) {
+    use shotstage_core::LightKind;
+    let p = |x: f32, y: f32, z: f32| world.transform_point3(Vec3::new(x, y, z));
+    let r = 0.08;
+    for (a, b) in
+        [(p(-r, 0.0, 0.0), p(r, 0.0, 0.0)), (p(0.0, -r, 0.0), p(0.0, r, 0.0)), (p(0.0, 0.0, -r), p(0.0, 0.0, r))]
+    {
+        line(out, a, b, c);
+    }
+    let ring = |out: &mut Vec<LineVertex>, rad: f32, z: f32| {
+        for i in 0..16 {
+            let (a0, a1) = (i as f32 / 16.0 * std::f32::consts::TAU, (i + 1) as f32 / 16.0 * std::f32::consts::TAU);
+            line(out, p(a0.cos() * rad, a0.sin() * rad, z), p(a1.cos() * rad, a1.sin() * rad, z), c);
+        }
+    };
+    match l.kind {
+        LightKind::Point => ring(out, r * 1.6, 0.0),
+        LightKind::Sun => {
+            ring(out, r * 1.6, 0.0);
+            line(out, p(0.0, 0.0, 0.0), p(0.0, 0.0, -0.8), c);
+            line(out, p(0.0, 0.0, -0.8), p(0.05, 0.0, -0.68), c);
+            line(out, p(0.0, 0.0, -0.8), p(-0.05, 0.0, -0.68), c);
+        }
+        LightKind::Spot => {
+            let len = 0.6;
+            let rad = (l.cone_degrees.to_radians() / 2.0).tan().min(4.0) * len;
+            for a in [0.0f32, 90.0, 180.0, 270.0] {
+                let a = a.to_radians();
+                line(out, p(0.0, 0.0, 0.0), p(a.cos() * rad, a.sin() * rad, -len), c);
+            }
+            ring(out, rad, -len);
+        }
+        LightKind::Area => {
+            let (w, h) = (l.size[0] / 2.0, l.size[1] / 2.0);
+            let q = [p(-w, -h, 0.0), p(w, -h, 0.0), p(w, h, 0.0), p(-w, h, 0.0)];
+            for i in 0..4 {
+                line(out, q[i], q[(i + 1) % 4], c);
+            }
+            line(out, q[0], q[2], c);
+            line(out, p(0.0, 0.0, 0.0), p(0.0, 0.0, -0.4), c);
+        }
+    }
 }
 
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {

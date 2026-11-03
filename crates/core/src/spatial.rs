@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::{CameraData, look_rotation};
 use crate::eval::world_at;
-use crate::mesh::evaluate_mesh;
 use crate::scene::{EntityKind, Scene};
 use crate::{CoreError, Result};
 
@@ -42,7 +41,7 @@ impl Aabb {
         }
         Some(Self { min, max })
     }
-    fn union(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+    pub fn union(a: Option<Self>, b: Option<Self>) -> Option<Self> {
         match (a, b) {
             (Some(a), Some(b)) => Some(Self { min: a.min.min(b.min), max: a.max.max(b.max) }),
             (a, b) => a.or(b),
@@ -86,10 +85,12 @@ pub fn subtree(scene: &Scene, id: &str) -> Vec<String> {
 /// World bounds of one entity's own geometry (meshes only).
 pub fn own_bounds(scene: &Scene, id: &str, frame: f32) -> Result<Option<Aabb>> {
     let e = scene.get(id)?;
-    let EntityKind::Mesh { source, modifiers, .. } = &e.kind else { return Ok(None) };
+    if !matches!(e.kind, EntityKind::Mesh { .. } | EntityKind::Image(_)) {
+        return Ok(None);
+    }
     let world = world_at(scene, id, frame)?;
-    let mesh = evaluate_mesh(source, modifiers)?;
-    Ok(Aabb::of_points(mesh.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p)))))
+    let tri = crate::eval::posed_tris(scene, id, frame)?;
+    Ok(Aabb::of_points(tri.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p)))))
 }
 
 /// World bounds of an entity together with its children (what moves when it moves).
@@ -166,6 +167,8 @@ pub struct RayOptions<'a> {
     pub only: &'a [String],
     /// Fall back to the ground plane y = 0 when no mesh is hit.
     pub ground: bool,
+    /// The viewer, so billboard images are hit where they are drawn (turned to face it).
+    pub eye: Option<Vec3>,
 }
 
 /// Closest visible mesh hit along a world-space ray.
@@ -177,35 +180,41 @@ pub fn raycast(scene: &Scene, frame: f32, origin: Vec3, dir: Vec3, opts: &RayOpt
     let ignored: Vec<String> = opts.ignore.iter().flat_map(|i| subtree(scene, i)).collect();
     let mut best: Option<Hit> = None;
     for e in &scene.entities {
-        let EntityKind::Mesh { source, modifiers, .. } = &e.kind else { continue };
+        if !matches!(e.kind, EntityKind::Mesh { .. } | EntityKind::Image(_)) {
+            continue;
+        }
         if ignored.contains(&e.id) || (!opts.only.is_empty() && !opts.only.contains(&e.id)) || is_hidden(scene, &e.id) {
             continue;
         }
-        let (Ok(world), Ok(mesh)) = (world_at(scene, &e.id, frame), evaluate_mesh(source, modifiers)) else { continue };
-        // cheap reject: the ray against the mesh's local bounding box
-        let Some(local) = Aabb::of_points(mesh.positions.iter().map(|p| Vec3::from_array(*p))) else { continue };
+        let (Ok(world), Ok(tri)) = (world_at(scene, &e.id, frame), crate::eval::posed_tris(scene, &e.id, frame)) else {
+            continue;
+        };
+        let world = match &e.kind {
+            EntityKind::Image(img) => crate::image::card_world(world, img.billboard, opts.eye),
+            _ => world,
+        };
+        // test in the mesh's own space: no per-vertex transform, and a cheap box reject first
+        let Some(local) = Aabb::of_points(tri.positions.iter().map(|p| Vec3::from_array(*p))) else { continue };
         let inv = world.inverse();
-        if !ray_hits_box(inv.transform_point3(origin), inv.transform_vector3(dir), &local) {
+        let (lo, ld) = (inv.transform_point3(origin), inv.transform_vector3(dir));
+        if !ray_hits_box(lo, ld, &local) {
             continue;
         }
-        let tri = mesh.triangulate(false);
-        let pts: Vec<Vec3> = tri.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p))).collect();
+        let normal_m = inv.transpose();
         for t in tri.indices.chunks(3) {
-            let (a, b, c) = (pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]);
-            let Some(dist) = ray_triangle(origin, dir, a, b, c) else { continue };
+            let v = |k: usize| Vec3::from_array(tri.positions[t[k] as usize]);
+            let (a, b, c) = (v(0), v(1), v(2));
+            let Some(s) = ray_triangle(lo, ld, a, b, c) else { continue };
+            let point = world.transform_point3(lo + ld * s);
+            let dist = (point - origin).length();
             if best.as_ref().is_some_and(|h| h.distance <= dist) {
                 continue;
             }
-            let mut n = (b - a).cross(c - a).normalize_or_zero();
+            let mut n = normal_m.transform_vector3((b - a).cross(c - a)).normalize_or_zero();
             if n.dot(dir) > 0.0 {
                 n = -n;
             }
-            best = Some(Hit {
-                id: Some(e.id.clone()),
-                point: (origin + dir * dist).to_array(),
-                normal: n.to_array(),
-                distance: dist,
-            });
+            best = Some(Hit { id: Some(e.id.clone()), point: point.to_array(), normal: n.to_array(), distance: dist });
         }
     }
     if best.is_none() && opts.ground && dir.y.abs() > 1e-6 {
