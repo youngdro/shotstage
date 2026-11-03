@@ -11,11 +11,11 @@ use shotstage_core::spatial::{
     self, Facing, RayOptions, ShotAngle, ShotSize, Side, beside_position, frame_subject, raycast, rest_position,
 };
 use shotstage_core::{
-    CameraData, Entity, EntityKind, Interp, Key, KeyValue, MeshSource, Modifier, Primitive, Scene, TrackProperty,
-    Transform,
+    CameraData, Entity, EntityKind, Interp, Key, KeyValue, MeshSource, Scene, TrackProperty, Transform,
 };
 
 use crate::builtin::{Target, color, finite3, frame_ok, summary_of, target_point};
+use crate::prefabs::{self, PrefabKind};
 use crate::{CmdResult, Command, CommandError, command};
 
 /// A world-space ray.
@@ -144,23 +144,6 @@ struct FrameParams {
     make_active: Option<bool>,
 }
 
-#[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-enum PrefabKind {
-    Person,
-    Table,
-    Chair,
-    Sofa,
-    Bed,
-    Stairs,
-    Wall,
-    Doorway,
-    Car,
-    Tree,
-    Lamp,
-    Crate,
-}
-
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct PrefabParams {
@@ -174,6 +157,9 @@ struct PrefabParams {
     rotation_y: Option<f32>,
     /// Uniform scale. Default 1 (real-world size).
     scale: Option<f32>,
+    /// Stretch the group to this world size `[width, height, depth]` in metres instead (e.g. to
+    /// match a real product). Overrides `scale`.
+    size: Option<[f32; 3]>,
     /// Then drop it onto whatever is below `position` (a table, the floor). Default true.
     drop: Option<bool>,
 }
@@ -209,6 +195,38 @@ fn edit_pose(
         });
     }
     Ok(t)
+}
+
+/// Store an already computed local transform (keyed like [`edit_pose`]).
+pub(crate) fn store_pose(
+    scene: &mut Scene,
+    id: &str,
+    frame: f32,
+    keyframe_at: Option<f32>,
+    t: Transform,
+) -> CmdResult<Transform> {
+    edit_pose(scene, id, frame, keyframe_at, |cur| *cur = t)
+}
+
+/// Let a group fall onto whatever is below it.
+pub(crate) fn drop_down(scene: &mut Scene, id: &str, frame: f32, keyframe_at: Option<f32>) -> CmdResult<Value> {
+    place(
+        scene,
+        PlaceParams {
+            id: id.to_string(),
+            ray: None,
+            on: None,
+            at: None,
+            next_to: None,
+            side: None,
+            view: None,
+            gap: None,
+            offset: None,
+            snap: None,
+            frame: Some(frame),
+            keyframe_at,
+        },
+    )
 }
 
 fn parent_world(scene: &Scene, id: &str, frame: f32) -> CmdResult<glam::Mat4> {
@@ -412,163 +430,14 @@ fn frame_shot(scene: &mut Scene, p: FrameParams) -> CmdResult<Value> {
     Ok(json!({ "camera": cam, "position": f.eye.to_array(), "distance": f.distance, "describe": d }))
 }
 
-struct Part {
-    name: &'static str,
-    prim: Primitive,
-    pos: [f32; 3],
-    rot: [f32; 3],
-    color: [f32; 3],
-    modifiers: Vec<Modifier>,
-}
-
-fn part(name: &'static str, prim: Primitive, pos: [f32; 3], color: [f32; 3]) -> Part {
-    Part { name, prim, pos, rot: [0.0; 3], color, modifiers: vec![] }
-}
-
-fn cube(x: f32, y: f32, z: f32) -> Primitive {
-    Primitive::Cube { size: [x, y, z] }
-}
-
-fn cyl(r: f32, h: f32) -> Primitive {
-    Primitive::Cylinder { radius: r, height: h, segments: 24 }
-}
-
-const WOOD: [f32; 3] = [0.62, 0.46, 0.32];
-const FABRIC: [f32; 3] = [0.42, 0.5, 0.62];
-const SKIN: [f32; 3] = [0.86, 0.66, 0.52];
-const WALL: [f32; 3] = [0.8, 0.78, 0.74];
-const METAL: [f32; 3] = [0.35, 0.36, 0.4];
-
-/// Prefab parts with real-world sizes, bottom centre at the origin, front facing +Z.
-fn prefab_parts(kind: PrefabKind) -> Vec<Part> {
-    use PrefabKind::*;
-    match kind {
-        Person => vec![
-            part("legs", cube(0.34, 0.86, 0.2), [0.0, 0.43, 0.0], [0.3, 0.32, 0.4]),
-            part("torso", cube(0.42, 0.6, 0.24), [0.0, 1.16, 0.0], SKIN),
-            part("arm_l", cube(0.09, 0.62, 0.1), [0.265, 1.15, 0.0], SKIN),
-            part("arm_r", cube(0.09, 0.62, 0.1), [-0.265, 1.15, 0.0], SKIN),
-            part("head", Primitive::Sphere { radius: 0.12, segments: 20, rings: 10 }, [0.0, 1.6, 0.0], SKIN),
-            part("nose", cube(0.04, 0.04, 0.05), [0.0, 1.6, 0.13], SKIN),
-        ],
-        Table => {
-            let mut v = vec![part("top", cube(1.2, 0.04, 0.8), [0.0, 0.73, 0.0], WOOD)];
-            for (n, x, z) in
-                [("leg_1", 0.55, 0.35), ("leg_2", -0.55, 0.35), ("leg_3", 0.55, -0.35), ("leg_4", -0.55, -0.35)]
-            {
-                v.push(part(n, cube(0.05, 0.71, 0.05), [x, 0.355, z], WOOD));
-            }
-            v
-        }
-        Chair => {
-            let mut v = vec![
-                part("seat", cube(0.45, 0.05, 0.45), [0.0, 0.45, 0.0], WOOD),
-                part("back", cube(0.45, 0.5, 0.04), [0.0, 0.72, -0.205], WOOD),
-            ];
-            for (n, x, z) in
-                [("leg_1", 0.19, 0.19), ("leg_2", -0.19, 0.19), ("leg_3", 0.19, -0.19), ("leg_4", -0.19, -0.19)]
-            {
-                v.push(part(n, cube(0.04, 0.43, 0.04), [x, 0.215, z], WOOD));
-            }
-            v
-        }
-        Sofa => vec![
-            part("base", cube(2.0, 0.42, 0.9), [0.0, 0.21, 0.0], FABRIC),
-            part("back", cube(2.0, 0.45, 0.2), [0.0, 0.645, -0.35], FABRIC),
-            part("arm_l", cube(0.2, 0.62, 0.9), [0.9, 0.31, 0.0], FABRIC),
-            part("arm_r", cube(0.2, 0.62, 0.9), [-0.9, 0.31, 0.0], FABRIC),
-        ],
-        Bed => vec![
-            part("frame", cube(1.6, 0.3, 2.1), [0.0, 0.15, 0.0], WOOD),
-            part("mattress", cube(1.5, 0.22, 2.0), [0.0, 0.41, 0.02], [0.92, 0.92, 0.9]),
-            part("headboard", cube(1.6, 0.7, 0.08), [0.0, 0.65, -1.01], WOOD),
-        ],
-        Stairs => vec![Part {
-            modifiers: vec![Modifier::Array { count: 10, offset: [0.0, 0.18, -0.28] }],
-            ..part("steps", cube(1.0, 0.18, 0.28), [0.0, 0.09, 0.0], WALL)
-        }],
-        Wall => vec![part("wall", cube(4.0, 2.6, 0.12), [0.0, 1.3, 0.0], WALL)],
-        Doorway => vec![
-            part("left", cube(1.55, 2.6, 0.12), [1.225, 1.3, 0.0], WALL),
-            part("right", cube(1.55, 2.6, 0.12), [-1.225, 1.3, 0.0], WALL),
-            part("lintel", cube(0.9, 0.5, 0.12), [0.0, 2.35, 0.0], WALL),
-        ],
-        Car => {
-            let mut v = vec![
-                part("body", cube(1.8, 0.7, 4.4), [0.0, 0.6, 0.0], [0.7, 0.2, 0.18]),
-                part("cabin", cube(1.6, 0.55, 2.2), [0.0, 1.225, -0.25], [0.55, 0.62, 0.7]),
-            ];
-            for (n, x, z) in
-                [("wheel_1", 0.85, 1.4), ("wheel_2", -0.85, 1.4), ("wheel_3", 0.85, -1.4), ("wheel_4", -0.85, -1.4)]
-            {
-                v.push(Part { rot: [0.0, 0.0, 90.0], ..part(n, cyl(0.33, 0.25), [x, 0.33, z], [0.12, 0.12, 0.13]) });
-            }
-            v
-        }
-        Tree => vec![
-            part("trunk", cyl(0.15, 2.0), [0.0, 1.0, 0.0], [0.45, 0.32, 0.22]),
-            part(
-                "crown",
-                Primitive::Sphere { radius: 1.1, segments: 20, rings: 12 },
-                [0.0, 2.8, 0.0],
-                [0.36, 0.56, 0.3],
-            ),
-        ],
-        Lamp => vec![
-            part("base", cyl(0.15, 0.03), [0.0, 0.015, 0.0], METAL),
-            part("pole", cyl(0.02, 1.5), [0.0, 0.78, 0.0], METAL),
-            part(
-                "shade",
-                Primitive::Cone { radius: 0.22, height: 0.3, segments: 24 },
-                [0.0, 1.6, 0.0],
-                [0.95, 0.9, 0.7],
-            ),
-        ],
-        Crate => vec![part("crate", cube(0.6, 0.6, 0.6), [0.0, 0.3, 0.0], WOOD)],
-    }
-}
-
-fn prefab_name(kind: PrefabKind) -> &'static str {
-    use PrefabKind::*;
-    match kind {
-        Person => "person",
-        Table => "table",
-        Chair => "chair",
-        Sofa => "sofa",
-        Bed => "bed",
-        Stairs => "stairs",
-        Wall => "wall",
-        Doorway => "doorway",
-        Car => "car",
-        Tree => "tree",
-        Lamp => "lamp",
-        Crate => "crate",
-    }
-}
-
-pub const PREFABS: &[(&str, &str)] = &[
-    ("person", "Standing figure, 1.72 m, front = +Z (the nose)"),
-    ("table", "Dining table 1.2 × 0.8 m, 0.75 m high"),
-    ("chair", "Dining chair, seat at 0.45 m"),
-    ("sofa", "Three-seat sofa, 2 m wide"),
-    ("bed", "Double bed 1.6 × 2.1 m"),
-    ("stairs", "Straight stairs, 10 steps of 18 cm"),
-    ("wall", "Wall 4 m wide, 2.6 m high"),
-    ("doorway", "Wall 4 m wide with a 0.9 × 2.1 m opening"),
-    ("car", "Car 4.4 m long"),
-    ("tree", "Tree, about 3.9 m tall"),
-    ("lamp", "Floor lamp, 1.75 m"),
-    ("crate", "Box 0.6 m"),
-];
-
 fn prefab_create(scene: &mut Scene, p: PrefabParams) -> CmdResult<Value> {
-    let stem = prefab_name(p.kind);
+    let info = prefabs::info(p.kind);
     let id = match p.id {
         Some(id) => {
             shotstage_core::scene::validate_id(&id)?;
             id
         }
-        None => scene.unique_id(stem),
+        None => scene.unique_id(info.stem),
     };
     let pos = finite3(p.position.unwrap_or([0.0; 3]), "position")?;
     let scale = p.scale.unwrap_or(1.0);
@@ -590,44 +459,50 @@ fn prefab_create(scene: &mut Scene, p: PrefabParams) -> CmdResult<Value> {
         kind: EntityKind::Empty,
     })?;
     let mut parts = vec![];
-    for part in prefab_parts(p.kind) {
+    for part in prefabs::parts(p.kind) {
         let pid = format!("{id}_{}", part.name);
-        let mut t = Transform { translation: part.pos, ..Default::default() };
+        let mut t = Transform { translation: part.pos, scale: part.scale, ..Default::default() };
         t.set_euler_degrees(part.rot);
-        scene.insert(Entity {
-            id: pid.clone(),
-            name: part.name.to_string(),
-            parent: Some(id.clone()),
-            transform: t,
-            visible: true,
-            locked: false,
-            kind: EntityKind::Mesh {
-                source: MeshSource::Primitive { primitive: part.prim },
+        let kind = match part.prim {
+            Some(prim) => EntityKind::Mesh {
+                source: MeshSource::Primitive { primitive: prim },
                 modifiers: part.modifiers,
                 color: color(part.color)?,
             },
+            None => EntityKind::Empty,
+        };
+        let parent = part.parent.map(|q| format!("{id}_{q}")).unwrap_or_else(|| id.clone());
+        scene.insert(Entity {
+            id: pid.clone(),
+            name: part.name.to_string(),
+            parent: Some(parent),
+            transform: t,
+            visible: true,
+            locked: false,
+            kind,
         })?;
         parts.push(pid);
     }
+    if let Some(size) = p.size {
+        let want = finite3(size, "size")?;
+        if want.min_element() <= 0.0 {
+            return Err(CommandError::invalid("size must be positive"));
+        }
+        let frame = scene.timeline.start as f32;
+        if let Some(b) = spatial::bounds(scene, &id, frame)? {
+            // bounds are measured with the yaw applied; stretch in the group's own axes
+            let have = b.size().max(Vec3::splat(1e-4));
+            let (sx, sz) = if (yaw.rem_euclid(180.0) - 90.0).abs() < 45.0 {
+                (want.z / have.x, want.x / have.z)
+            } else {
+                (want.x / have.x, want.z / have.z)
+            };
+            let e = scene.get_mut(&id)?;
+            e.transform.scale = [sx, want.y / have.y, sz].map(|v| v * scale);
+        }
+    }
     if p.drop.unwrap_or(true) {
-        let at = [pos.x, pos.z];
-        place(
-            scene,
-            PlaceParams {
-                id: id.clone(),
-                ray: None,
-                on: None,
-                at: Some(at),
-                next_to: None,
-                side: None,
-                view: None,
-                gap: None,
-                offset: None,
-                snap: None,
-                frame: None,
-                keyframe_at: None,
-            },
-        )?;
+        drop_down(scene, &id, scene.timeline.start as f32, None)?;
         // keep the requested origin; only the height comes from the surface below
         let e = scene.get_mut(&id)?;
         (e.transform.translation[0], e.transform.translation[2]) = (pos.x, pos.z);
@@ -658,9 +533,9 @@ pub fn commands() -> Vec<Command> {
             Ok(serde_json::to_value(hit).unwrap_or(Value::Null))
         }),
         command!("camera.frame", "Point a camera at a subject by shot size (close-up, medium, full, wide...), angle (eye level, high, low...) and side (front, left, back...). Creates a camera if there is none.", mutates: true, FrameParams, frame_shot),
-        command!("prefab.create", "Add a ready-made, real-size block (person, table, chair, sofa, bed, stairs, wall, doorway, car, tree, lamp, crate) as a group, standing on whatever is below.", mutates: true, PrefabParams, prefab_create),
+        command!("prefab.create", "Add a ready-made, real-size block as a group standing on whatever is below: rigged people (man, woman), furniture, fresh-food retail fixtures and produce, product-shoot stand-ins and sets. See prefab.list.", mutates: true, PrefabParams, prefab_create),
         command!("prefab.list", "The prefab kinds prefab.create accepts, with their sizes.", mutates: false, crate::builtin::NoParams,
-            |_, _| Ok(json!(PREFABS.iter().map(|(k, d)| json!({ "kind": k, "description": d })).collect::<Vec<_>>()))),
+            |_, _| Ok(json!(prefabs::PREFABS.iter().map(|p| json!({ "kind": p.key, "category": p.category.key(), "description": p.description })).collect::<Vec<_>>()))),
         Command {
             id: crate::snapshot::SNAPSHOT_COMMAND,
             summary: "Render the view through a camera to a PNG (clay, depth or normal pass) so you can see the shot. Returns {mimeType, data (base64), width, height}. Needs a GPU host (editor, CLI, MCP).",

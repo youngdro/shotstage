@@ -26,19 +26,24 @@
     // A small starter scene, built through the same API agents use: real-size blocks that
     // rest on each other, and a camera framed by shot size instead of coordinates.
     editor.batch([
-      { command: "entity.create", params: { type: "mesh", id: "floor", primitive: { shape: "plane", size: [12, 12] }, color: [0.5, 0.5, 0.52], locked: true } },
-      { command: "prefab.create", params: { kind: "person", id: "actor", name: "Actor", position: [0, 0, 0] } },
-      { command: "prefab.create", params: { kind: "table", id: "table", position: [1.3, 0, -0.7] } },
-      { command: "prefab.create", params: { kind: "chair", id: "chair", position: [1.3, 0, 0], rotationY: 180 } },
-      { command: "prefab.create", params: { kind: "lamp", id: "lamp", position: [1.6, 0, -0.8] } },
-      { command: "entity.place", params: { id: "lamp", nextTo: "table", side: "right", gap: 0.15 } },
-      { command: "prefab.create", params: { kind: "crate", id: "box", scale: 0.4 } },
-      { command: "entity.place", params: { id: "box", on: "table" } },
-      { command: "prefab.create", params: { kind: "doorway", id: "door", position: [0, 0, -2.5] } },
+      // A fresh-food aisle, built through the same API agents use.
+      { command: "entity.create", params: { type: "mesh", id: "floor", primitive: { shape: "plane", size: [14, 14] }, color: [0.62, 0.62, 0.6], locked: true } },
+      { command: "prefab.create", params: { kind: "produceStand", id: "produce", position: [0, 0, -0.6] } },
+      { command: "prefab.create", params: { kind: "watermelonBin", id: "melons", position: [-2.0, 0, -0.4] } },
+      { command: "prefab.create", params: { kind: "openChiller", id: "chiller", position: [0.2, 0, -3.2] } },
+      { command: "prefab.create", params: { kind: "openChiller", id: "chiller_2", position: [1.5, 0, -3.2] } },
+      { command: "prefab.create", params: { kind: "gondolaShelf", id: "shelf", position: [-1.6, 0, -3.2] } },
+      { command: "prefab.create", params: { kind: "priceSign", id: "sign", position: [1.2, 0, -0.3] } },
+      { command: "prefab.create", params: { kind: "woman", id: "shopper", name: "Shopper", position: [0.3, 0, 1.0], rotationY: 180 } },
+      { command: "pose.set", params: { id: "shopper", pose: "reach", joints: { shoulder_r: [-70, 0, -6], elbow_r: [-20, 0, 0] } } },
+      { command: "prefab.create", params: { kind: "basket", id: "basket", position: [0.65, 0, 1.0] } },
+      { command: "prefab.create", params: { kind: "man", id: "clerk", name: "Clerk", position: [-2.0, 0, 0.6], rotationY: 200 } },
+      { command: "pose.set", params: { id: "clerk", pose: "crouch" } },
+      { command: "prefab.create", params: { kind: "cart", id: "cart", position: [2.2, 0, 1.2], rotationY: 200 } },
       { command: "entity.create", params: { type: "camera", id: "cam_a", name: "Cam A" } },
-      { command: "camera.frame", params: { camera: "cam_a", subject: "actor", size: "full", side: "frontRight" } },
-      { command: "camera.dollyMove", params: { id: "cam_a", distance: 1.2, start: 0, end: 72 } },
-      { command: "camera.orbitMove", params: { id: "cam_a", target: "actor", degrees: 40, start: 72, end: 119 } },
+      { command: "camera.frame", params: { camera: "cam_a", subject: "shopper", size: "full", side: "frontRight", focalLengthMm: 35 } },
+      { command: "camera.dollyMove", params: { id: "cam_a", distance: 1.0, start: 0, end: 72 } },
+      { command: "camera.orbitMove", params: { id: "cam_a", target: "shopper", degrees: 30, start: 72, end: 119 } },
       { command: "shot.create", params: { camera: "cam_a", start: 0, end: 119, name: "push-in" } },
     ]);
     editor.on(ev => { if (ev.type === "change") console.debug("shotstage change", ev.revision); });

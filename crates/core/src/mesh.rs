@@ -24,12 +24,45 @@ pub struct Mesh {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "shape", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Primitive {
-    Cube { size: [f32; 3] },
-    Plane { size: [f32; 2] },
-    Sphere { radius: f32, segments: u32, rings: u32 },
-    Cylinder { radius: f32, height: f32, segments: u32 },
-    Cone { radius: f32, height: f32, segments: u32 },
-    Torus { major_radius: f32, minor_radius: f32, major_segments: u32, minor_segments: u32 },
+    Cube {
+        size: [f32; 3],
+    },
+    Plane {
+        size: [f32; 2],
+    },
+    Sphere {
+        radius: f32,
+        segments: u32,
+        rings: u32,
+    },
+    Cylinder {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    Cone {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    Torus {
+        major_radius: f32,
+        minor_radius: f32,
+        major_segments: u32,
+        minor_segments: u32,
+    },
+    /// A cylinder with rounded ends along Y; `height` is the total length (at least 2 × radius).
+    Capsule {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    /// Seamless photo sweep ("infinity cove"): a floor `size.z` deep that curves up with
+    /// `radius` into a back wall `size.y` high (at -Z), `size.x` wide. Faces the inside.
+    Cove {
+        size: [f32; 3],
+        radius: f32,
+    },
 }
 
 /// Where an entity's base geometry comes from.
@@ -174,6 +207,67 @@ impl Primitive {
                     faces.push((0..seg).map(|j| seg + j).collect());
                 }
                 faces.push((0..seg).rev().collect());
+                Ok(Mesh { positions, faces })
+            }
+            Primitive::Cove { size, radius } => {
+                let [w, h, d] =
+                    [check_size(size[0], "size.x")?, check_size(size[1], "size.y")?, check_size(size[2], "size.z")?];
+                let r = check_size(radius, "radius")?.min(h * 0.99).min(d * 0.99);
+                // profile (y, z) from the front edge of the floor, round the bend, up the wall
+                let mut prof = vec![(0.0, d / 2.0)];
+                let n = 12;
+                for i in 0..=n {
+                    let a = std::f32::consts::FRAC_PI_2 * i as f32 / n as f32;
+                    prof.push((r - r * a.cos(), -d / 2.0 + r - r * a.sin()));
+                }
+                prof.push((h, -d / 2.0));
+                let mut positions = Vec::new();
+                for (y, z) in &prof {
+                    positions.push([-w / 2.0, y - h / 2.0, *z]);
+                    positions.push([w / 2.0, y - h / 2.0, *z]);
+                }
+                let faces = (0..prof.len() as u32 - 1).map(|i| vec![2 * i, 2 * i + 1, 2 * i + 3, 2 * i + 2]).collect();
+                Ok(Mesh { positions, faces })
+            }
+            Primitive::Capsule { radius, height, segments } => {
+                let r = check_size(radius, "radius")?;
+                let half = (check_size(height, "height")? / 2.0 - r).max(0.0);
+                let seg = check_segments(segments, 3, "segments")?;
+                let cap = (seg / 4).max(2);
+                // rings from the top pole to the bottom pole: hemisphere, (straight part), hemisphere
+                let mut rings: Vec<(f32, f32)> = Vec::new();
+                for i in 1..=cap {
+                    let a = std::f32::consts::FRAC_PI_2 * i as f32 / cap as f32;
+                    rings.push((r * a.sin(), half + r * a.cos()));
+                }
+                // a capsule no longer than its width is a sphere: skip the duplicate equator
+                for i in (if half > 0.0 { 0 } else { 1 })..cap {
+                    let a = std::f32::consts::FRAC_PI_2 * i as f32 / cap as f32;
+                    rings.push((r * a.cos(), -half - r * a.sin()));
+                }
+                let mut positions = vec![[0.0, half + r, 0.0]];
+                for (rr, y) in &rings {
+                    for j in 0..seg {
+                        let th = TAU * j as f32 / seg as f32;
+                        positions.push([rr * th.cos(), *y, -rr * th.sin()]);
+                    }
+                }
+                positions.push([0.0, -half - r, 0.0]);
+                let bottom = positions.len() as u32 - 1;
+                let n = rings.len() as u32;
+                let ring = |i: u32, j: u32| 1 + i * seg + (j % seg);
+                let mut faces = Vec::new();
+                for j in 0..seg {
+                    faces.push(vec![0, ring(0, j), ring(0, j + 1)]);
+                }
+                for i in 0..n - 1 {
+                    for j in 0..seg {
+                        faces.push(vec![ring(i, j), ring(i + 1, j), ring(i + 1, j + 1), ring(i, j + 1)]);
+                    }
+                }
+                for j in 0..seg {
+                    faces.push(vec![ring(n - 1, j + 1), ring(n - 1, j), bottom]);
+                }
                 Ok(Mesh { positions, faces })
             }
             Primitive::Torus { major_radius, minor_radius, major_segments, minor_segments } => {
@@ -533,6 +627,12 @@ mod tests {
         assert!(Primitive::Sphere { radius: -1.0, segments: 8, rings: 4 }.build().is_err());
         assert!(Primitive::Sphere { radius: 1.0, segments: 100_000, rings: 4 }.build().is_err());
         assert!(Modifier::Subdivide { levels: 9, smooth: true }.apply(&cube()).is_err());
+        let cove = Primitive::Cove { size: [3.0, 2.0, 2.0], radius: 0.5 }.build().unwrap().triangulate(false);
+        assert!(cove.normals.first().unwrap()[1] > 0.99, "floor faces up");
+        assert!(cove.normals.last().unwrap()[2] > 0.99, "wall faces the front");
+        let cap = Primitive::Capsule { radius: 0.5, height: 3.0, segments: 12 }.build().unwrap();
+        let (lo, hi) = cap.bounds().unwrap();
+        assert!((hi.y - 1.5).abs() < 1e-5 && (lo.y + 1.5).abs() < 1e-5 && (hi.x - 0.5).abs() < 1e-5);
         assert!(Mesh { positions: vec![[0.0; 3]], faces: vec![vec![0, 1, 2]] }.validate().is_err());
     }
 
@@ -544,6 +644,8 @@ mod tests {
             Primitive::Cylinder { radius: 1.0, height: 2.0, segments: 12 },
             Primitive::Cone { radius: 1.0, height: 2.0, segments: 12 },
             Primitive::Torus { major_radius: 1.0, minor_radius: 0.25, major_segments: 16, minor_segments: 8 },
+            Primitive::Capsule { radius: 0.5, height: 3.0, segments: 12 },
+            Primitive::Capsule { radius: 0.5, height: 0.2, segments: 8 },
         ] {
             let m = p.build().unwrap();
             m.validate().unwrap();

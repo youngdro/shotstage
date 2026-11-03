@@ -91,7 +91,8 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                     frustum(&mut g.lines, world, lens.hfov(), lens.vfov(), if selected { SELECT } else { CAMERA });
                 }
             }
-            EntityKind::Empty if overlay.cameras => {
+            // group roots and a person's joints stay invisible unless selected
+            EntityKind::Empty if overlay.cameras && (selected || scene.children(Some(&e.id)).next().is_none()) => {
                 let c = if selected { SELECT } else { [0.8, 0.8, 0.8] };
                 for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
                     line(&mut g.lines, world.transform_point3(-axis * 0.25), world.transform_point3(axis * 0.25), c);

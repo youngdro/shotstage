@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::{CameraData, Intrinsics};
-use crate::scene::{EntityKind, Scene, Transform};
+use crate::scene::{Scene, Transform};
 use crate::timeline::{KeyValue, TrackProperty};
 use crate::{CoreError, Result};
 
@@ -159,18 +159,6 @@ pub struct ShotDescription {
     pub summary: String,
 }
 
-/// Height of an entity's bounds in world units (meshes only; others count as 1.7 m tall).
-fn subject_height(scene: &Scene, id: &str, frame: f32) -> Result<f32> {
-    let e = scene.get(id)?;
-    if let EntityKind::Mesh { source, modifiers, .. } = &e.kind {
-        let m = crate::mesh::evaluate_mesh(source, modifiers)?.transformed(world_at(scene, id, frame)?);
-        if let Some((lo, hi)) = m.bounds() {
-            return Ok((hi.y - lo.y).max(0.01));
-        }
-    }
-    Ok(1.7)
-}
-
 pub fn describe_shot(scene: &Scene, camera: &str, frame: f32, subject: Option<&str>) -> Result<ShotDescription> {
     let lens = camera_data_at(scene, camera, frame)?;
     let world = world_at(scene, camera, frame)?;
@@ -193,11 +181,17 @@ pub fn describe_shot(scene: &Scene, camera: &str, frame: f32, subject: Option<&s
     };
     let (mut dist, mut frac, mut size) = (None, None, None);
     if let Some(s) = subject {
-        let target = world_at(scene, s, frame)?.w_axis.truncate();
+        // how much of the frame the subject (with its children: a whole prefab group) covers
+        let b = crate::spatial::bounds(scene, s, frame)?;
+        let origin = world_at(scene, s, frame)?.w_axis.truncate();
+        let b = b.unwrap_or(crate::spatial::Aabb {
+            min: origin - Vec3::new(0.25, 0.85, 0.25),
+            max: origin + Vec3::new(0.25, 0.85, 0.25),
+        });
+        let target = b.center();
         let eye = world.w_axis.truncate();
-        let depth = (target - eye).dot(fwd).max(0.01);
-        let visible_h = 2.0 * depth * (lens.vfov() / 2.0).tan();
-        let fr = subject_height(scene, s, frame)? / visible_h;
+        let rot = world.to_scale_rotation_translation().1;
+        let fr = crate::spatial::frame_fraction(&b, eye, rot, lens.vfov(), lens.aspect);
         dist = Some((target - eye).length());
         frac = Some(fr);
         size = Some(
@@ -242,7 +236,7 @@ pub fn describe_shot(scene: &Scene, camera: &str, frame: f32, subject: Option<&s
 mod tests {
     use super::*;
     use crate::mesh::{MeshSource, Primitive};
-    use crate::scene::Entity;
+    use crate::scene::{Entity, EntityKind};
     use crate::timeline::{Interp, Key};
 
     fn scene() -> Scene {

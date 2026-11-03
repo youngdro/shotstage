@@ -222,7 +222,7 @@ fn frame_by_shot_size_and_turn() {
     assert!((rot * glam::Vec3::Z - glam::Vec3::X).length() < 1e-4, "{e}");
     run(&mut s, "entity.rotate", json!({"id": "hero", "degrees": 90}));
     let hit = run(&mut s, "scene.raycast", json!({"origin": [0, 1.6, 3], "direction": [0, 0, -1]}));
-    assert_eq!(hit["id"], "hero_head");
+    assert_eq!(hit["id"], "hero_skull", "the head mesh hangs off the head joint");
     assert!(run(&mut s, "prefab.list", json!({})).as_array().unwrap().len() >= 10);
 }
 
@@ -237,4 +237,92 @@ fn duplicate_copies_groups() {
     assert_eq!(s.scene().get("chair_1_seat").unwrap().parent.as_deref(), Some("chair_1"));
     let again = run(&mut s, "entity.duplicate", json!({"id": "chair"}));
     assert_eq!(s.scene().entities.len(), 3 * 7, "{again}");
+}
+
+fn world_y(s: &Session, id: &str) -> f32 {
+    shotstage_core::eval::world_at(s.scene(), id, 0.0).unwrap().w_axis.y
+}
+
+#[test]
+fn people_are_rigged_and_posable() {
+    let mut s = Session::default();
+    run(&mut s, "prefab.create", json!({"kind": "woman", "id": "ann"}));
+    let b = run(&mut s, "entity.bounds", json!({"id": "ann"}));
+    let h = b["size"][1].as_f64().unwrap();
+    assert!((1.55..1.72).contains(&h), "a woman is about 1.65 m: {h}");
+    assert!(b["min"][1].as_f64().unwrap().abs() < 0.01, "feet on the ground");
+    // the arm hangs off the shoulder: raising the left arm sideways lifts the hand
+    let hand = world_y(&s, "ann_wrist_l");
+    run(&mut s, "pose.set", json!({"id": "ann_forearm_l", "joints": {"shoulder_l": [0, 0, 90]}, "drop": false}));
+    assert!(world_y(&s, "ann_wrist_l") > hand + 0.4);
+    // sitting lowers the hips but keeps the feet on the floor
+    run(&mut s, "pose.set", json!({"id": "ann", "pose": "sit"}));
+    assert!(world_y(&s, "ann_pelvis") < 0.65, "sitting: {}", world_y(&s, "ann_pelvis"));
+    let b = run(&mut s, "entity.bounds", json!({"id": "ann"}));
+    assert!(b["min"][1].as_f64().unwrap().abs() < 0.01, "{b}");
+    // standing again restores the rest height, and one undo step reverts a pose
+    run(&mut s, "pose.set", json!({"id": "ann", "pose": "stand"}));
+    assert!(world_y(&s, "ann_pelvis") > 0.85);
+    run(&mut s, "history.undo", json!({}));
+    assert!(world_y(&s, "ann_pelvis") < 0.65);
+    // aim the right arm straight forward
+    run(&mut s, "pose.set", json!({"id": "ann", "pose": "stand"}));
+    let sh = shotstage_core::eval::world_at(s.scene(), "ann_shoulder_r", 0.0).unwrap().w_axis.truncate();
+    run(
+        &mut s,
+        "pose.aim",
+        json!({"id": "ann_upper_arm_r", "target": (sh + glam::Vec3::new(0.0, 0.0, 2.0)).to_array()}),
+    );
+    let el = shotstage_core::eval::world_at(s.scene(), "ann_elbow_r", 0.0).unwrap().w_axis.truncate();
+    let dir = (el - sh).normalize();
+    assert!(dir.z > 0.99, "arm points forward: {dir}");
+    // hair
+    let r = run(&mut s, "person.setHair", json!({"id": "ann", "style": "ponytail"}));
+    assert_eq!(r["parts"].as_array().unwrap().len(), 2);
+    run(&mut s, "person.setHair", json!({"id": "ann", "style": "none"}));
+    assert!(!s.scene().contains("ann_hair"));
+    assert!(s.dispatch("pose.set", json!({"id": "ann", "pose": "moonwalk"})).is_err());
+    assert!(s.dispatch("pose.set", json!({"id": "ann", "joints": {"tail": [0, 0, 0]}})).is_err());
+    run(&mut s, "prefab.create", json!({"kind": "table", "id": "t"}));
+    assert!(s.dispatch("pose.set", json!({"id": "t", "pose": "sit"})).is_err());
+    // a duplicated person stays posable
+    let r = run(&mut s, "entity.duplicate", json!({"id": "ann"}));
+    run(&mut s, "pose.set", json!({"id": r["id"], "pose": "wave"}));
+    let list = run(&mut s, "pose.list", json!({}));
+    assert!(list["poses"].as_array().unwrap().len() >= 10);
+}
+
+#[test]
+fn product_shots_frame_small_subjects() {
+    let mut s = Session::default();
+    run(&mut s, "prefab.create", json!({"kind": "productTable", "id": "table"}));
+    run(&mut s, "prefab.create", json!({"kind": "bottle", "id": "hero", "position": [0, 2, 0]}));
+    let b = run(&mut s, "entity.bounds", json!({"id": "hero"}));
+    assert!((b["min"][1].as_f64().unwrap() - 0.75).abs() < 0.01, "the bottle lands on the table: {b}");
+    // match a real product's size
+    run(
+        &mut s,
+        "prefab.create",
+        json!({"kind": "carton", "id": "box", "size": [0.1, 0.3, 0.08], "position": [3, 0, 0]}),
+    );
+    let b = run(&mut s, "entity.bounds", json!({"id": "box"}));
+    assert!(
+        (b["size"][1].as_f64().unwrap() - 0.3).abs() < 1e-3 && (b["size"][0].as_f64().unwrap() - 0.1).abs() < 1e-3,
+        "{b}"
+    );
+    for (size, word) in [("closeUp", "close-up"), ("medium", "medium shot"), ("full", "full shot")] {
+        let r =
+            run(&mut s, "camera.frame", json!({"subject": "hero", "size": size, "angle": "low", "focalLengthMm": 100}));
+        assert_eq!(r["describe"]["shotSize"], word, "{r}");
+        assert_eq!(r["describe"]["angle"], "low angle", "{r}");
+    }
+    // a low, wide subject is sized by its width: a wide shot shows all of it
+    run(&mut s, "prefab.create", json!({"kind": "steppedPodium", "id": "pod", "position": [-3, 0, 0]}));
+    for (size, word) in [("wide", "wide shot"), ("full", "full shot"), ("medium", "medium shot")] {
+        let r = run(&mut s, "camera.frame", json!({"subject": "pod", "size": size, "angle": "high"}));
+        assert_eq!(r["describe"]["shotSize"], word, "{r}");
+    }
+    for p in prefabs::PREFABS {
+        run(&mut s, "prefab.create", json!({"kind": p.key, "position": [10, 0, 10]}));
+    }
 }

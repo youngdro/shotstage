@@ -6,6 +6,8 @@
 
 mod builtin;
 mod placement;
+pub mod prefabs;
+pub mod rig;
 pub mod snapshot;
 
 use schemars::JsonSchema;

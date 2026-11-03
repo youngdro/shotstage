@@ -135,6 +135,28 @@ fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     (t > 1e-6).then_some(t)
 }
 
+/// Slab test; `d` need not be normalised. Grown by a hair so faces on the box still count.
+fn ray_hits_box(o: Vec3, d: Vec3, b: &Aabb) -> bool {
+    let pad = Vec3::splat(1e-4 + 1e-4 * b.size().max_element());
+    let (lo, hi) = (b.min - pad, b.max + pad);
+    let (mut t0, mut t1) = (0.0f32, f32::INFINITY);
+    for i in 0..3 {
+        if d[i].abs() < 1e-12 {
+            if o[i] < lo[i] || o[i] > hi[i] {
+                return false;
+            }
+            continue;
+        }
+        let (a, b) = ((lo[i] - o[i]) / d[i], (hi[i] - o[i]) / d[i]);
+        t0 = t0.max(a.min(b));
+        t1 = t1.min(a.max(b));
+        if t0 > t1 {
+            return false;
+        }
+    }
+    true
+}
+
 /// Options for [`raycast`].
 #[derive(Clone, Debug, Default)]
 pub struct RayOptions<'a> {
@@ -160,6 +182,12 @@ pub fn raycast(scene: &Scene, frame: f32, origin: Vec3, dir: Vec3, opts: &RayOpt
             continue;
         }
         let (Ok(world), Ok(mesh)) = (world_at(scene, &e.id, frame), evaluate_mesh(source, modifiers)) else { continue };
+        // cheap reject: the ray against the mesh's local bounding box
+        let Some(local) = Aabb::of_points(mesh.positions.iter().map(|p| Vec3::from_array(*p))) else { continue };
+        let inv = world.inverse();
+        if !ray_hits_box(inv.transform_point3(origin), inv.transform_vector3(dir), &local) {
+            continue;
+        }
         let tri = mesh.triangulate(false);
         let pts: Vec<Vec3> = tri.positions.iter().map(|p| world.transform_point3(Vec3::from_array(*p))).collect();
         for t in tri.indices.chunks(3) {
@@ -372,6 +400,34 @@ pub struct Framing {
 /// Camera pose that frames `subject` at `size` from `angle` and `azimuth_degrees` (relative to
 /// the subject's front) with `lens`. Tight shots aim near the top of the subject (the head of
 /// a standing figure); wide ones at its centre.
+/// How big a subject reads in frame: its height, or its width across the view (seen along a
+/// horizontal `right` axis) divided by the frame aspect, whichever is larger.
+/// Share of the frame a box covers seen through a camera at `eye` with `rotation`: the larger
+/// of its height share and its width share (1 = it just fills the frame).
+pub fn frame_fraction(b: &Aabb, eye: Vec3, rotation: Quat, vfov: f32, aspect: f32) -> f32 {
+    let inv = rotation.inverse();
+    let t = (vfov / 2.0).tan().max(1e-4);
+    let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for i in 0..8 {
+        let c = Vec3::new(
+            if i & 1 == 0 { b.min.x } else { b.max.x },
+            if i & 2 == 0 { b.min.y } else { b.max.y },
+            if i & 4 == 0 { b.min.z } else { b.max.z },
+        );
+        let p = inv * (c - eye);
+        let z = (-p.z).max(1e-3);
+        let (x, y) = (p.x / z / (t * aspect.max(0.1)), p.y / z / t);
+        (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+    }
+    ((x1 - x0) / 2.0).max((y1 - y0) / 2.0)
+}
+
+pub fn subject_extent(b: &Aabb, right: Vec3, aspect: f32) -> f32 {
+    let s = b.size();
+    let across = right.x.abs() * s.x + right.z.abs() * s.z;
+    s.y.max(across / aspect.max(0.1)).max(0.01)
+}
+
 pub fn frame_subject(
     scene: &Scene,
     subject: &str,
@@ -385,26 +441,57 @@ pub fn frame_subject(
     let origin = world.w_axis.truncate();
     let b = bounds(scene, subject, frame)?
         .unwrap_or(Aabb { min: origin - Vec3::new(0.25, 0.85, 0.25), max: origin + Vec3::new(0.25, 0.85, 0.25) });
-    let h = b.size().y.max(0.01);
     let frac = size.fraction();
-    let visible_h = h / frac;
-    let aim_y = if frac > 1.0 { (b.max.y - visible_h * 0.42).max(b.min.y + visible_h * 0.5) } else { b.center().y };
-    // Keep the subject's origin in the aim's vertical line so describe_shot (which measures
-    // to the origin) sees the same depth.
-    let aim = Vec3::new(origin.x, aim_y, origin.z);
-    let depth = visible_h / (2.0 * (lens.vfov() / 2.0).tan());
     let front = {
         let f = world.transform_vector3(Vec3::Z);
         let f = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
         if f == Vec3::ZERO { Vec3::Z } else { f }
     };
     let dir_flat = Quat::from_rotation_y(azimuth_degrees.to_radians()) * front;
+    // low, wide subjects (a podium, a car) are sized by their width across the frame
+    let h = subject_extent(&b, Vec3::new(dir_flat.z, 0.0, -dir_flat.x), lens.aspect);
+    let visible_h = h / frac;
+    // Tight shots of people-sized subjects aim near the top (a close-up shows the head); small
+    // products stay centred so a close-up shows the label.
+    let aim_y = if frac > 1.0 && b.size().y > 1.0 {
+        (b.max.y - visible_h * 0.42).max(b.min.y + visible_h * 0.5)
+    } else {
+        b.center().y
+    };
+    let center = b.center();
+    let aim = Vec3::new(center.x, aim_y, center.z);
+    let depth = visible_h / (2.0 * (lens.vfov() / 2.0).tan());
     let elev = angle.elevation_degrees().to_radians();
     let dir = dir_flat * elev.cos() + Vec3::Y * elev.sin();
     // Do not put the lens inside the subject: stay outside its bounds along the view line.
     let half = b.half();
     let support = (half.x * dir.x).abs() + (half.y * dir.y).abs() + (half.z * dir.z).abs();
-    let mut eye = aim + dir * depth.max(support + lens.near * 2.0);
+    let look = |eye: Vec3| {
+        look_rotation(eye, aim).unwrap_or_else(|_| {
+            // Straight down / up: look along the subject's front axis as "up" on screen.
+            Quat::from_mat4(&Mat4::look_at_rh(eye, aim, -dir_flat).inverse())
+        })
+    };
+    // The view direction does not depend on the distance; find the distance at which the
+    // subject's bounds cover `frac` of the frame (coverage shrinks as the camera backs off).
+    let rotation0 = look(aim + dir);
+    let cover = |d: f32| frame_fraction(&b, aim + dir * d, rotation0, lens.vfov(), lens.aspect);
+    let near = (support + lens.near * 2.0).max(1e-3);
+    let mut hi = (depth * 4.0).max(near * 2.0).max(1.0);
+    while cover(hi) > frac && hi < 1e5 {
+        hi *= 2.0;
+    }
+    let dist = if cover(near) <= frac {
+        near
+    } else {
+        let mut lo = near;
+        for _ in 0..60 {
+            let mid = (lo * hi).sqrt();
+            if cover(mid) > frac { lo = mid } else { hi = mid }
+        }
+        hi
+    };
+    let mut eye = aim + dir * dist;
     // Stay above the ground for low angles: lift the lens, keep the distance, re-aim.
     if eye.y < 0.05 {
         eye.y = 0.05;
@@ -412,10 +499,7 @@ pub fn frame_subject(
     if !eye.is_finite() {
         return Err(CoreError::Invalid("could not frame the subject".into()));
     }
-    let rotation = look_rotation(eye, aim).or_else(|_| {
-        // Straight down / up: look along the subject's front axis as "up" on screen.
-        Ok::<_, CoreError>(Quat::from_mat4(&Mat4::look_at_rh(eye, aim, -dir_flat).inverse()))
-    })?;
+    let rotation = look(eye);
     Ok(Framing { eye, rotation, aim, distance: (aim - eye).length() })
 }
 

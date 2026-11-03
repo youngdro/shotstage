@@ -829,5 +829,6 @@ pub fn registry() -> Vec<Command> {
     ]
     .into_iter()
     .chain(crate::placement::commands())
+    .chain(crate::rig::commands())
     .collect()
 }
