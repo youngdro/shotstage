@@ -342,6 +342,18 @@ struct KeyDrag {
     key: String,
 }
 
+/// A shot bar being dragged on the timeline: what part, where it was grabbed.
+#[derive(Clone)]
+struct ShotDrag {
+    id: String,
+    /// 0 = move, 1 = start edge, 2 = end edge
+    part: u8,
+    grab: f32,
+    start: u32,
+    end: u32,
+    key: String,
+}
+
 fn timeline_rows(scene: &Scene) -> Vec<TrackRow> {
     let mut rows: Vec<TrackRow> = vec![];
     for tr in &scene.timeline.tracks {
@@ -429,6 +441,7 @@ pub struct EditorApp {
     /// Key every edit at the current frame.
     auto_key: bool,
     key_drag: Option<KeyDrag>,
+    shot_drag: Option<ShotDrag>,
     /// The key a context menu on the track strip is about: (row, frame).
     key_menu: Option<(String, f32)>,
     motion_filter: String,
@@ -492,6 +505,7 @@ impl EditorApp {
             ref_textures: Default::default(),
             auto_key: false,
             key_drag: None,
+            shot_drag: None,
             key_menu: None,
             motion_filter: String::new(),
             motion_secs: 0.0,
@@ -2242,19 +2256,6 @@ impl EditorApp {
         let f_of = |x: f32| (t0 + (x - area.left()) / area.width() * (t1 - t0)).clamp(t0, t1).round();
         let p = ui.painter_at(ruler);
         p.rect_filled(ruler, 2.0, Color32::from_gray(30));
-        // shots as coloured bands
-        for (i, s) in t.shots.iter().enumerate() {
-            let r = Rect::from_min_max(
-                egui::pos2(x_of(s.start as f32), ruler.top()),
-                egui::pos2(x_of(s.end as f32 + 1.0).min(area.right()), ruler.top() + 4.0),
-            );
-            p.rect_filled(
-                r,
-                1.0,
-                [Color32::from_rgb(70, 150, 255), Color32::from_rgb(120, 200, 120), Color32::from_rgb(230, 170, 70)]
-                    [i % 3],
-            );
-        }
         let fps = t.fps.max(1.0);
         let secs = (t1 - t0) / fps;
         let every = [0.5f32, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
@@ -2316,7 +2317,164 @@ impl EditorApp {
                 });
             }
         });
-        let mut playhead_bottom = ruler.bottom();
+        // shots: one bar each; drag to move, drag an edge to trim, double-click to look through
+        let (srow, sresp) = ui.allocate_exact_size(Vec2::new(full, 18.0), Sense::click_and_drag());
+        {
+            let p = ui.painter_at(srow);
+            p.rect_filled(srow, 0.0, Color32::from_gray(26));
+            p.text(
+                egui::pos2(srow.left() + 6.0, srow.center().y),
+                egui::Align2::LEFT_CENTER,
+                "Shots",
+                egui::FontId::proportional(11.5),
+                Color32::from_gray(170),
+            );
+            let colors = [
+                Color32::from_rgb(70, 130, 220),
+                Color32::from_rgb(90, 170, 110),
+                Color32::from_rgb(210, 150, 60),
+                Color32::from_rgb(170, 100, 200),
+            ];
+            if t.shots.is_empty() {
+                p.text(
+                    egui::pos2(area.left() + 6.0, srow.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "No shots: + Shot (top) or right-click here",
+                    egui::FontId::proportional(11.0),
+                    Color32::from_gray(110),
+                );
+            }
+            for (i, sh) in t.shots.iter().enumerate() {
+                let r = Rect::from_min_max(
+                    egui::pos2(x_of(sh.start as f32).max(area.left()), srow.top() + 2.0),
+                    egui::pos2(x_of(sh.end as f32 + 1.0).min(area.right()), srow.bottom() - 2.0),
+                );
+                let active = self.shot_drag.as_ref().is_some_and(|d| d.id == sh.id);
+                p.rect_filled(r, 3.0, if active { colors[i % 4].gamma_multiply(1.3) } else { colors[i % 4] });
+                let cam = scene.get(&sh.camera).map(|e| e.name.as_str()).unwrap_or(&sh.camera);
+                p.text(
+                    r.left_center() + Vec2::new(5.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{} · {cam}", sh.name),
+                    egui::FontId::proportional(10.5),
+                    Color32::WHITE,
+                );
+            }
+        }
+        let shot_at = |x: f32| -> Option<(String, u8)> {
+            t.shots.iter().find_map(|sh| {
+                let (a, b) = (x_of(sh.start as f32), x_of(sh.end as f32 + 1.0));
+                if (x - a).abs() < 5.0 {
+                    Some((sh.id.clone(), 1))
+                } else if (x - b).abs() < 5.0 {
+                    Some((sh.id.clone(), 2))
+                } else if x > a && x < b {
+                    Some((sh.id.clone(), 0))
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(h) = sresp.hover_pos() {
+            match shot_at(h.x) {
+                Some((_, 1 | 2)) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+                Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
+                None => {}
+            }
+        }
+        if sresp.drag_started()
+            && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(sresp.interact_pointer_pos())
+            && let Some((id, part)) = shot_at(pos.x)
+            && let Some(sh) = t.shots.iter().find(|s| s.id == id)
+        {
+            let key = self.new_key("shot");
+            self.shot_drag = Some(ShotDrag { id, part, grab: f_of(pos.x), start: sh.start, end: sh.end, key });
+        }
+        // also on release, so a quick flick still lands where the pointer ended
+        if (sresp.dragged() || sresp.drag_stopped())
+            && let (Some(d), Some(pos)) = (self.shot_drag.clone(), ui.input(|i| i.pointer.latest_pos()))
+        {
+            let delta = (f_of(pos.x) - d.grab) as i64;
+            let (mut a, mut b) = (d.start as i64, d.end as i64);
+            match d.part {
+                1 => a = (a + delta).clamp(0, b),
+                2 => b = (b + delta).max(a),
+                _ => {
+                    let shift = delta.max(-a);
+                    a += shift;
+                    b += shift;
+                }
+            }
+            self.run_key(&d.key, "shot.set", json!({"id": d.id, "start": a, "end": b}));
+        }
+        if sresp.drag_stopped() {
+            self.shot_drag = None;
+        }
+        if sresp.double_clicked()
+            && let Some(pos) = sresp.interact_pointer_pos()
+            && let Some((id, _)) = shot_at(pos.x)
+            && let Some(sh) = t.shots.iter().find(|s| s.id == id)
+        {
+            self.hub.borrow_mut().frame = sh.start as f32;
+            self.look_through = true;
+            self.hub.borrow_mut().look_through = true;
+        }
+        if sresp.secondary_clicked() {
+            self.key_menu = sresp.interact_pointer_pos().map(|p| ("__shots__".to_string(), f_of(p.x)));
+        }
+        let cams: Vec<(String, String)> = scene
+            .entities
+            .iter()
+            .filter(|e| matches!(e.kind, EntityKind::Camera(_)))
+            .map(|e| (e.id.clone(), e.name.clone()))
+            .collect();
+        let menu_frame = self.key_menu.clone().filter(|(r, _)| r == "__shots__").map(|(_, f)| f);
+        sresp.context_menu(|ui| {
+            let Some(fr) = menu_frame else { return };
+            let under = t.shots.iter().find(|s| fr >= s.start as f32 && fr <= s.end as f32).cloned();
+            match under {
+                Some(sh) => {
+                    ui.weak(format!("{} · frames {}–{}", sh.name, sh.start, sh.end));
+                    ui.menu_button("Camera", |ui| {
+                        for (cid, cname) in &cams {
+                            if ui.selectable_label(*cid == sh.camera, cname).clicked() {
+                                self.run("shot.set", json!({"id": sh.id, "camera": cid}));
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui.button("Split at the playhead").clicked() {
+                        let f = self.frame().round() as u32;
+                        if f > sh.start && f <= sh.end {
+                            let _ = hub::dispatch(&self.hub, json!({"batch": [
+                                {"command": "shot.set", "params": {"id": sh.id, "end": f - 1}},
+                                {"command": "shot.create", "params": {"camera": sh.camera, "start": f, "end": sh.end, "name": format!("{} b", sh.name)}},
+                            ]}));
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Delete shot").clicked() {
+                        self.run("shot.delete", json!({"id": sh.id}));
+                        ui.close();
+                    }
+                }
+                None => {
+                    ui.weak(format!("frame {fr:.0}"));
+                    for (cid, cname) in &cams {
+                        if ui.button(format!("New shot here through {cname}")).clicked() {
+                            let a = fr.round().max(0.0) as u32;
+                            let next = t.shots.iter().map(|s| s.start).filter(|s| *s > a).min().unwrap_or(t.end + 1);
+                            self.run("shot.create", json!({"camera": cid, "start": a, "end": (a + (t.fps * 3.0) as u32).min(next.saturating_sub(1)).max(a)}));
+                            ui.close();
+                        }
+                    }
+                    if cams.is_empty() {
+                        ui.weak("Add a camera first");
+                    }
+                }
+            }
+        });
+        let mut playhead_bottom = srow.bottom();
         egui::ScrollArea::vertical().id_salt("tracks").max_height(row_h * 5.0 + 2.0).auto_shrink([false, true]).show(ui, |ui| {
             if rows.is_empty() {
                 ui.weak("No animation yet: select something and press ◆ Key, or use a preset under Animate on the right.");
@@ -2348,8 +2506,8 @@ impl EditorApp {
                     let key = self.new_key("retime");
                     self.key_drag = Some(KeyDrag { row: row.id.clone(), frame: f, key });
                 }
-                if resp.dragged()
-                    && let (Some(d), Some(pos)) = (self.key_drag.clone(), resp.interact_pointer_pos())
+                if (resp.dragged() || resp.drag_stopped())
+                    && let (Some(d), Some(pos)) = (self.key_drag.clone(), ui.input(|i| i.pointer.latest_pos()))
                     && d.row == row.id
                 {
                     let to = f_of(pos.x);

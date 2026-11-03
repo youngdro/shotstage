@@ -72,6 +72,54 @@ struct DistributeParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ShotSetParams {
+    /// Shot id.
+    id: String,
+    name: Option<String>,
+    /// Camera the shot looks through.
+    camera: Option<String>,
+    /// First frame.
+    start: Option<u32>,
+    /// Last frame.
+    end: Option<u32>,
+}
+
+fn shot_set(scene: &mut Scene, p: ShotSetParams) -> CmdResult<Value> {
+    if let Some(c) = &p.camera {
+        scene.camera(c)?;
+    }
+    let i = scene
+        .timeline
+        .shots
+        .iter()
+        .position(|s| s.id == p.id)
+        .ok_or_else(|| CommandError::new("failed", format!("no shot `{}`", p.id)))?;
+    let mut shot = scene.timeline.shots[i].clone();
+    if let Some(n) = p.name {
+        if n.is_empty() || n.len() > 200 {
+            return Err(CommandError::invalid("name must be 1-200 bytes"));
+        }
+        shot.name = n;
+    }
+    if let Some(c) = p.camera {
+        shot.camera = c;
+    }
+    shot.start = p.start.unwrap_or(shot.start);
+    shot.end = p.end.unwrap_or(shot.end);
+    if shot.end < shot.start || shot.end - shot.start > 100_000 {
+        return Err(CommandError::invalid("need start <= end"));
+    }
+    scene.timeline.shots[i] = shot.clone();
+    scene.timeline.shots.sort_by_key(|s| s.start);
+    // the timeline grows to fit
+    if shot.end > scene.timeline.end {
+        scene.timeline.end = shot.end;
+    }
+    Ok(serde_json::to_value(shot).unwrap_or(Value::Null))
+}
+
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AttachParams {
     /// The prop (its group) to attach.
@@ -314,6 +362,7 @@ pub fn commands() -> Vec<Command> {
         command!("entity.align", "Line up entities' bounds on a world axis: min edges, centres or max edges.", mutates: true, AlignParams, align),
         command!("entity.distribute", "Space three or more entities evenly along a world axis (the outer two stay).", mutates: true, DistributeParams, distribute),
         command!("entity.attach", "Make a prop follow something: a person's hand (it moves with their poses and actions), or any entity; null detaches it. Hands snap the prop to the palm.", mutates: true, AttachParams, attach),
+        command!("shot.set", "Change a shot: its name, camera, first and last frame (retime it).", mutates: true, ShotSetParams, shot_set),
         command!("person.lookAt", "Turn a person's head and neck towards an entity (e.g. the camera) or a point.", mutates: true, LookParams, look),
     ]
 }
@@ -362,6 +411,16 @@ mod tests {
         let after = spatial::bounds(s.scene(), "ph", 0.0).unwrap().unwrap().center();
         assert!(after.y > before.y + 0.3, "the phone rose with the hand: {before} -> {after}");
         s.dispatch("entity.attach", json!({"id": "ph", "to": null})).unwrap();
+        // shots can be retimed, renamed and moved to another camera
+        s.dispatch("entity.create", json!({"type": "camera", "id": "c1"})).unwrap();
+        s.dispatch("entity.create", json!({"type": "camera", "id": "c2"})).unwrap();
+        s.dispatch("shot.create", json!({"camera": "c1", "start": 0, "end": 47, "id": "s1"})).unwrap();
+        s.dispatch("shot.set", json!({"id": "s1", "end": 200, "camera": "c2", "name": "wide"})).unwrap();
+        let sh = &s.scene().timeline.shots[0];
+        assert_eq!((sh.end, sh.camera.as_str(), sh.name.as_str()), (200, "c2", "wide"));
+        assert!(s.scene().timeline.end >= 200, "the timeline grows");
+        assert!(s.dispatch("shot.set", json!({"id": "s1", "start": 300})).is_err());
+        assert!(s.dispatch("shot.set", json!({"id": "s1", "camera": "m"})).is_err());
         assert!(s.scene().get("ph").unwrap().parent.is_none());
     }
 }
