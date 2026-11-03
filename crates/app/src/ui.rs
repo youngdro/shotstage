@@ -58,15 +58,101 @@ impl Block {
     }
 }
 
+/// One entry of the quick-actions box.
+struct QuickItem {
+    label: String,
+    kind: &'static str,
+    hint: String,
+    run: QuickRun,
+}
+
+enum QuickRun {
+    Block(Block),
+    Template(&'static str, &'static str),
+    /// preset, target, subject
+    Motion(&'static shotstage_commands::motion::Preset, String, Option<String>),
+    /// person root, pose
+    Pose(String, &'static str),
+    Action(QuickAction),
+}
+
+#[derive(Clone, Copy)]
+enum QuickAction {
+    Save,
+    Open,
+    Undo,
+    Redo,
+    New,
+    Shadows,
+    Focus,
+    Key,
+    Duplicate,
+    Delete,
+}
+
+/// `holdBasket` → `Hold basket`, `tPose` → `T pose`.
+fn humanize(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else if c.is_uppercase() {
+            out.push(' ');
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Order quick items for a query: label starts with it, then a word in the label does, then the
+/// label contains it, then the kind or hint does. Every word of the query must match somewhere.
+fn rank_quick(items: &[QuickItem], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let mut scored: Vec<(u8, usize)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            let label = it.label.to_lowercase();
+            let all = format!("{label} {} {}", it.kind.to_lowercase(), it.hint.to_lowercase());
+            if !words.iter().all(|w| all.contains(w)) {
+                return None;
+            }
+            let score = if q.is_empty() {
+                // nothing typed: what fits the selection first, blocks and templates last
+                match it.kind {
+                    "Pose" | "Motion" | "Camera move" => 1,
+                    "Action" => 2,
+                    _ => 4,
+                }
+            } else if label.starts_with(&q) {
+                0
+            } else if label.split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(words[0])) {
+                1
+            } else if label.contains(&q) {
+                2
+            } else {
+                3
+            };
+            Some((score, i))
+        })
+        .collect();
+    scored.sort_by_key(|&(s, i)| (s, i));
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
 /// The one accent colour of the UI.
 const ACCENT: Color32 = Color32::from_rgb(70, 150, 255);
 
-const HELP: &str = "Blocks: drag from the left panel into the view (or click to drop in the middle).\n\
+const HELP: &str = "Quick actions: Cmd/Ctrl+K or / opens a search box for every block, move, pose, template and action.\n\
+Blocks: drag from the left panel into the view (or click to drop in the middle).\n\
 Object: click to select (a second click picks a part); drag to slide it over surfaces.\n\
 Shift+drag: lift · Alt+drag: copy · R / Shift+R or wheel while dragging: turn · Ctrl: no snap · Esc: cancel.\n\
 People: click a body part to select its joint, then drag the part to bend it, or turn the coloured rings.\n\
 View: drag empty space to orbit · right-drag or Shift+drag to pan · scroll or pinch to zoom · double-click or F to focus.\n\
-Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus.\n\
+Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus · Cmd/Ctrl+S save.\n\
 Several objects: Shift+click to add · Cmd/Ctrl+G group · Cmd/Ctrl+Shift+G ungroup.";
 
 /// A collapsible properties section.
@@ -449,6 +535,9 @@ pub struct EditorApp {
     /// The key a context menu on the track strip is about: (row, frame).
     key_menu: Option<(String, f32)>,
     motion_filter: String,
+    /// The quick-actions box when open: (query, highlighted row).
+    quick: Option<(String, usize)>,
+
     motion_secs: f32,
     motion_strength: f32,
     /// Mode for the next picked image (card, billboard, backdrop, floor).
@@ -518,6 +607,8 @@ impl EditorApp {
             shot_drag: None,
             key_menu: None,
             motion_filter: String::new(),
+            quick: None,
+
             motion_secs: 0.0,
             motion_strength: 1.0,
             studio_light: false,
@@ -849,31 +940,264 @@ impl EditorApp {
                 // a person's own actions first, then general motion
                 let ordered = groups.iter().flat_map(|g| PRESETS.iter().filter(move |p| p.group == *g));
                 for p in ordered.filter(|p| p.name != "pathFollow") {
-                    if !filter.is_empty() && !p.label.to_lowercase().contains(&filter) && !p.description.to_lowercase().contains(&filter) {
+                    if !filter.is_empty()
+                        && !p.label.to_lowercase().contains(&filter)
+                        && !p.description.to_lowercase().contains(&filter)
+                    {
                         continue;
                     }
                     if ui.button(p.label).on_hover_text(format!("{} ({} s)", p.description, p.seconds)).clicked() {
-                        let mut req = json!({"preset": p.name, "target": target, "start": frame.round(), "intensity": self.motion_strength});
-                        if self.motion_secs > 0.0 {
-                            req["duration"] = json!(self.motion_secs);
-                        }
-                        if is_cam && let Some(s) = &subject {
-                            req["subject"] = json!(s);
-                        }
-                        match hub::dispatch(&self.hub, json!({"command": "motion.apply", "params": req})) {
-                            Ok(o) => {
-                                // play it back right away
-                                self.hub.borrow_mut().frame = o.result["start"].as_f64().unwrap_or(0.0) as f32;
-                                self.playing = true;
-                                let (st, en) = (o.result["start"].as_f64().unwrap_or(0.0), o.result["end"].as_f64().unwrap_or(0.0));
-                                self.toast(format!("{}: frames {st:.0}–{en:.0}, {} keys · drag them on the timeline to retime", p.label, o.result["keys"]));
-                            }
-                            Err(e) => self.toast(format!("{}: {}", p.label, e.message)),
-                        }
+                        self.apply_motion(p, &target, if is_cam { subject.as_deref() } else { None }, frame);
                     }
                 }
             });
         });
+    }
+
+    /// Write a motion preset's keys on `target` from `frame`, then play it back.
+    fn apply_motion(
+        &mut self,
+        p: &shotstage_commands::motion::Preset,
+        target: &str,
+        subject: Option<&str>,
+        frame: f32,
+    ) {
+        let mut req =
+            json!({"preset": p.name, "target": target, "start": frame.round(), "intensity": self.motion_strength});
+        if self.motion_secs > 0.0 {
+            req["duration"] = json!(self.motion_secs);
+        }
+        if let Some(s) = subject {
+            req["subject"] = json!(s);
+        }
+        match hub::dispatch(&self.hub, json!({"command": "motion.apply", "params": req})) {
+            Ok(o) => {
+                // play it back right away
+                self.hub.borrow_mut().frame = o.result["start"].as_f64().unwrap_or(0.0) as f32;
+                self.playing = true;
+                let (st, en) = (o.result["start"].as_f64().unwrap_or(0.0), o.result["end"].as_f64().unwrap_or(0.0));
+                self.toast(format!(
+                    "{}: frames {st:.0}–{en:.0}, {} keys · drag them on the timeline to retime",
+                    p.label, o.result["keys"]
+                ));
+            }
+            Err(e) => self.toast(format!("{}: {}", p.label, e.message)),
+        }
+    }
+
+    /// Everything the quick-actions box can do right now, with the selection in mind.
+    fn quick_items(&self) -> Vec<QuickItem> {
+        use shotstage_commands::motion::{Group, PRESETS};
+        let mut out = Vec::new();
+        let scene = self.scene();
+        let sel = self.selected().filter(|s| scene.contains(s));
+        let act = |label: &'static str, hint: &'static str, a: QuickAction| QuickItem {
+            label: label.into(),
+            kind: "Action",
+            hint: hint.into(),
+            run: QuickRun::Action(a),
+        };
+        out.push(act("Save scene", "Cmd/Ctrl+S", QuickAction::Save));
+        out.push(act("Open / import a file…", "scene, model or picture", QuickAction::Open));
+        out.push(act("Undo", "Cmd/Ctrl+Z", QuickAction::Undo));
+        out.push(act("Redo", "Cmd/Ctrl+Shift+Z", QuickAction::Redo));
+        out.push(act("New scene", "clear everything (undoable)", QuickAction::New));
+        out.push(act("Toggle shadows", "", QuickAction::Shadows));
+        if sel.is_some() {
+            out.push(act("Focus the selection", "F", QuickAction::Focus));
+            out.push(act("Key the selection", "K: keyframe at the playhead", QuickAction::Key));
+            out.push(act("Duplicate", "Cmd/Ctrl+D", QuickAction::Duplicate));
+            out.push(act("Delete", "Delete", QuickAction::Delete));
+        }
+        if let Some(id) = &sel {
+            let is_cam = matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Camera(_)));
+            let person = rig::person_root(&scene, id).ok();
+            if let Some(root) = &person {
+                for p in rig::POSES {
+                    out.push(QuickItem {
+                        label: humanize(p.name),
+                        kind: "Pose",
+                        hint: p.description.into(),
+                        run: QuickRun::Pose(root.clone(), p.name),
+                    });
+                }
+            }
+            if !matches!(scene.get(id).map(|e| &e.kind), Ok(EntityKind::Light(_))) {
+                let target = person.clone().unwrap_or_else(|| if is_cam { id.clone() } else { root_of(&scene, id) });
+                let subject = self.last_subject.clone().filter(|s| scene.contains(s) && *s != target);
+                for p in PRESETS.iter().filter(|p| p.name != "pathFollow") {
+                    let fits = match p.group {
+                        Group::Camera => is_cam,
+                        Group::Character => person.is_some(),
+                        Group::Object => !is_cam,
+                    };
+                    if fits {
+                        let subject = if is_cam { subject.clone() } else { None };
+                        out.push(QuickItem {
+                            label: p.label.into(),
+                            kind: if is_cam { "Camera move" } else { "Motion" },
+                            hint: p.description.into(),
+                            run: QuickRun::Motion(p, target.clone(), subject),
+                        });
+                    }
+                }
+            }
+        }
+        for (_, _, blocks) in palette() {
+            for b in blocks {
+                let kind = if matches!(b, Block::LightPreset(..)) { "Lighting" } else { "Add" };
+                out.push(QuickItem {
+                    label: b.label().into(),
+                    kind,
+                    hint: b.description().into(),
+                    run: QuickRun::Block(b),
+                });
+            }
+        }
+        for (name, label, desc) in shotstage_commands::templates::TEMPLATES {
+            out.push(QuickItem {
+                label: (*label).into(),
+                kind: "Template",
+                hint: (*desc).into(),
+                run: QuickRun::Template(name, label),
+            });
+        }
+        out
+    }
+
+    fn run_quick(&mut self, item: QuickItem, ctx: &egui::Context) {
+        let frame = self.frame();
+        match item.run {
+            QuickRun::Block(b) => self.use_block(&b),
+            QuickRun::Template(name, label) => self.apply_template(name, label),
+            QuickRun::Motion(p, target, subject) => self.apply_motion(p, &target, subject.as_deref(), frame),
+            QuickRun::Pose(root, pose) => {
+                let animated =
+                    self.auto_key || rig::JOINTS.iter().any(|j| is_animated(&self.scene(), &format!("{root}_{j}")));
+                let mut req = json!({"id": root, "pose": pose, "frame": frame});
+                if animated {
+                    req["keyframeAt"] = json!(frame.round());
+                }
+                self.run("pose.set", req);
+            }
+            QuickRun::Action(a) => match a {
+                QuickAction::Save => self.save_scene(),
+                QuickAction::Open => crate::files::pick(&self.incoming, ctx),
+                QuickAction::Undo => _ = self.run("history.undo", json!({})),
+                QuickAction::Redo => _ = self.run("history.redo", json!({})),
+                QuickAction::New => _ = self.run("scene.new", json!({})),
+                QuickAction::Shadows => self.shadows = !self.shadows,
+                QuickAction::Focus => self.focus_selection(),
+                QuickAction::Key => self.key_selection(),
+                QuickAction::Duplicate => {
+                    if let Some(id) = self.selected()
+                        && let Some(r) = self.run("entity.duplicate", json!({"id": id}))
+                    {
+                        self.select(r["id"].as_str().map(str::to_string));
+                    }
+                }
+                QuickAction::Delete => {
+                    if let Some(id) = self.selected() {
+                        self.run("entity.delete", json!({ "id": id }));
+                    }
+                }
+            },
+        }
+    }
+
+    /// The quick-actions box (Cmd/Ctrl+K or /): type a few letters, Enter runs the top match.
+    fn quick_box(&mut self, ctx: &egui::Context, full: Rect) {
+        let Some((mut query, mut pick)) = self.quick.take() else { return };
+        let items = self.quick_items();
+        let ranked = rank_quick(&items, &query);
+        let (up, down, enter, esc) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if down {
+            pick = (pick + 1).min(ranked.len().saturating_sub(1));
+        }
+        if up {
+            pick = pick.saturating_sub(1);
+        }
+        let mut chosen = enter.then(|| ranked.get(pick).copied()).flatten();
+        let mut keep = !esc && !enter;
+        let width = 460.0_f32.min(full.width() - 24.0);
+        let resp = egui::Area::new(egui::Id::unique("quick_actions"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(full.center().x - width / 2.0, full.top() + 48.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(width);
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut query)
+                            .hint_text("Add a block, apply a move or pose, run an action…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    edit.request_focus();
+                    if edit.changed() {
+                        pick = 0;
+                    }
+                    ui.add_space(4.0);
+                    if ranked.is_empty() {
+                        ui.weak("Nothing matches.");
+                    }
+                    egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
+                        for (row, &i) in ranked.iter().enumerate().take(40) {
+                            let it = &items[i];
+                            let on = row == pick;
+                            let r = ui
+                                .horizontal(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    let label = egui::RichText::new(&it.label);
+                                    ui.label(if on { label.strong() } else { label });
+                                    ui.weak(egui::RichText::new(it.kind).small());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add(
+                                            egui::Label::new(egui::RichText::new(&it.hint).weak().small()).truncate(),
+                                        );
+                                    });
+                                })
+                                .response
+                                .interact(Sense::click());
+                            if on {
+                                ui.painter().rect_filled(r.rect.expand(2.0), 4.0, ACCENT.gamma_multiply(0.22));
+                                if up || down {
+                                    r.scroll_to_me(None);
+                                }
+                            }
+                            if r.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
+                                pick = row;
+                            }
+                            if r.clicked() {
+                                chosen = Some(i);
+                                keep = false;
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.weak(egui::RichText::new("↑↓ choose · Enter run · Esc close").small());
+                });
+            })
+            .response;
+        if ctx.input(|i| i.pointer.any_pressed()) && !resp.contains_pointer() {
+            keep = false;
+        }
+        if let Some(i) = chosen {
+            let label = items[i].label.clone();
+            let kind = items[i].kind;
+            self.run_quick(items.into_iter().nth(i).unwrap(), ctx);
+            if kind != "Action" && kind != "Lighting" && kind != "Template" {
+                log::debug!("quick: {label}");
+            }
+        }
+        if keep {
+            self.quick = Some((query, pick));
+        }
     }
 
     /// Point the orbit view at the selection and fit it (F).
@@ -996,6 +1320,7 @@ impl eframe::App for EditorApp {
             ui.ctx().request_repaint();
         }
         self.shortcuts(ui);
+        self.quick_box(ui.ctx(), ui.ctx().content_rect());
 
         {
             let h = self.hub.borrow();
@@ -1070,6 +1395,12 @@ impl EditorApp {
         if space {
             self.playing = !self.playing;
         }
+        if ui.input(|i| {
+            (i.modifiers.command && i.key_pressed(egui::Key::K))
+                || i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "/"))
+        }) {
+            self.quick = Some((String::new(), 0));
+        }
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_scene();
         }
@@ -1101,7 +1432,7 @@ impl EditorApp {
                 0.0
             };
             (
-                i.key_pressed(egui::Key::K),
+                !i.modifiers.command && i.key_pressed(egui::Key::K),
                 i.key_pressed(egui::Key::Home),
                 i.key_pressed(egui::Key::End),
                 step * if i.modifiers.shift { 10.0 } else { 1.0 },
@@ -1142,6 +1473,9 @@ impl EditorApp {
             }
             if ui.button("Redo").on_hover_text("Cmd/Ctrl+Shift+Z").clicked() {
                 self.run("history.redo", json!({}));
+            }
+            if ui.button("🔍 Actions").on_hover_text("Search every block, move, pose, template and action (Cmd/Ctrl+K or /)").clicked() {
+                self.quick = Some((String::new(), 0));
             }
             ui.menu_button("History", |ui| {
                 let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
@@ -1333,32 +1667,35 @@ impl EditorApp {
             ),
         };
         let r = r.on_hover_cursor(CursorIcon::Grab).on_hover_text(b.description());
-        if let Block::LightPreset(preset, ..) = b {
-            if r.clicked() {
-                let mut p = json!({"preset": preset});
-                if let Some(s) = self.last_subject.clone().filter(|s| self.scene().contains(s)) {
-                    p["subject"] = json!(s);
-                }
-                if self.run("light.preset", p).is_some() {
-                    self.toast(format!("Lighting: {}", b.label()));
-                }
-            }
-            return;
-        }
-        if r.drag_started() {
+        if r.drag_started() && !matches!(b, Block::LightPreset(..)) {
             let key = self.new_key("new");
             self.palette = Some(PaletteDrag { block: b.clone(), spawned: None, key });
         }
         if r.clicked() {
-            let key = self.new_key("new");
-            if let Some(id) = self.spawn(b, &key) {
-                if let Some((rect, view)) = self.last_view {
-                    self.place_on_ray(&key, &id, ray_at(rect, &view, rect.center()), Vec3::ZERO, false);
-                } else {
-                    self.run_key(&key, "entity.place", json!({"id": id}));
-                }
-                self.select(Some(id));
+            self.use_block(b);
+        }
+    }
+
+    /// Clicking a block: drop it in the middle of the view (or apply a lighting preset).
+    fn use_block(&mut self, b: &Block) {
+        if let Block::LightPreset(preset, ..) = b {
+            let mut p = json!({"preset": preset});
+            if let Some(s) = self.last_subject.clone().filter(|s| self.scene().contains(s)) {
+                p["subject"] = json!(s);
             }
+            if self.run("light.preset", p).is_some() {
+                self.toast(format!("Lighting: {}", b.label()));
+            }
+            return;
+        }
+        let key = self.new_key("new");
+        if let Some(id) = self.spawn(b, &key) {
+            if let Some((rect, view)) = self.last_view {
+                self.place_on_ray(&key, &id, ray_at(rect, &view, rect.center()), Vec3::ZERO, false);
+            } else {
+                self.run_key(&key, "entity.place", json!({"id": id}));
+            }
+            self.select(Some(id));
         }
     }
 
@@ -2068,7 +2405,7 @@ impl EditorApp {
             ui.weak("Click a body part to select its joint, then drag it (or the rings) to bend it.");
             ui.horizontal_wrapped(|ui| {
                 for p in rig::POSES {
-                    if ui.button(p.name).on_hover_text(p.description).clicked() {
+                    if ui.button(humanize(p.name)).on_hover_text(p.description).clicked() {
                         let mut req = json!({"id": root, "pose": p.name, "frame": frame});
                         if animated {
                             req["keyframeAt"] = json!(frame.round());
@@ -3612,5 +3949,36 @@ impl EditorApp {
                     });
                 });
             });
+    }
+}
+
+#[cfg(test)]
+mod quick_tests {
+    use super::*;
+
+    fn item(label: &str, kind: &'static str, hint: &str) -> QuickItem {
+        QuickItem { label: label.into(), kind, hint: hint.into(), run: QuickRun::Action(QuickAction::Undo) }
+    }
+
+    #[test]
+    fn humanizes_names() {
+        assert_eq!(humanize("holdBasket"), "Hold basket");
+        assert_eq!(humanize("tPose"), "T pose");
+        assert_eq!(humanize("stand"), "Stand");
+    }
+
+    #[test]
+    fn ranks_prefix_then_word_then_hint() {
+        let items = [
+            item("Orbit left", "Camera move", "circle the subject"),
+            item("Push in", "Camera move", "move toward the subject"),
+            item("Slow push", "Camera move", ""),
+            item("Apples", "Add", "a crate of apples"),
+        ];
+        assert_eq!(rank_quick(&items, "push"), vec![1, 2]);
+        assert_eq!(rank_quick(&items, "subject"), vec![0, 1]);
+        assert_eq!(rank_quick(&items, "crate apples"), vec![3]);
+        assert_eq!(rank_quick(&items, "zzz"), Vec::<usize>::new());
+        assert_eq!(rank_quick(&items, "").len(), 4);
     }
 }

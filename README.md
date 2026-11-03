@@ -21,6 +21,10 @@
 视口工具栏的 **📷 Save frame** 把当前帧透过镜头的画面存成 1920 宽的 PNG。
 
 
+### Quick actions
+
+**Cmd/Ctrl+K** (or `/`, or the **Actions** button) opens one search box over everything: blocks to add, lighting presets, templates, and, for the selection, its poses, character actions, object motion or camera moves, plus editor actions (save, undo, focus, duplicate…). Type a few letters, use ↑↓, and press Enter. Each pick is one ordinary undo step.
+
 ### Saving your work
 
 **Save** (Cmd/Ctrl+S) writes the whole scene to a `.shotstage.json` file; **Open…** loads one back (it also imports models and pictures). The editor autosaves a couple of seconds after every change — in the browser's local storage on the web, in `~/.shotstage/autosave.json` on desktop — and offers to restore the last scene when it starts.
