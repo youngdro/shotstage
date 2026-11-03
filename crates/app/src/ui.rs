@@ -337,7 +337,7 @@ Object: click to select (a second click picks a part); drag to slide it over sur
 Shift+drag: lift · Alt+drag: copy · R / Shift+R or wheel while dragging: turn · Ctrl: no snap · Esc: cancel.\n\
 People: click a body part to select its joint, then drag the part to bend it, or turn the coloured rings.\n\
 View: drag empty space to orbit · right-drag or Shift+drag to pan · pinch or mouse wheel to zoom · trackpad two-finger scroll orbits (Shift: pan) · double-click or F to focus.\n\
-Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus · Cmd/Ctrl+S save.\n\
+Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+C / X / V copy, cut, paste (also between scenes) · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus · Cmd/Ctrl+S save.\n\
 Several objects: Shift+click to add · Cmd/Ctrl+G group · Cmd/Ctrl+Shift+G ungroup.";
 
 /// A collapsible properties section.
@@ -385,6 +385,7 @@ fn friendly(command: &str) -> String {
         "keyframe.set" => "Key".into(),
         "keyframe.move" => "Retime key".into(),
         "keyframe.retime" => "Retime animation".into(),
+        "entity.paste" => "Paste".into(),
         "keyframe.delete" => "Delete key".into(),
         "camera.frame" => "Frame shot".into(),
         "model.import" => "Import model".into(),
@@ -709,6 +710,7 @@ pub struct EditorApp {
     /// Autosave: the revision last written and when (seconds), and a found autosave offered for
     /// restoring: (scene JSON, object count).
     autosaved: (u64, f64),
+    autosave_warned: bool,
     restore_offer: Option<(String, usize)>,
     /// Draw shadows in the view.
     shadows: bool,
@@ -802,6 +804,7 @@ impl EditorApp {
             also: vec![],
             shadows: true,
             autosaved: (u64::MAX, 0.0),
+            autosave_warned: false,
             restore_offer: crate::files::autosave_read().and_then(|j| {
                 let v: Value = serde_json::from_str(&j).ok()?;
                 let n = v["entities"].as_array().map(|a| a.iter().filter(|e| e["parent"].is_null()).count()).unwrap_or(0);
@@ -965,8 +968,16 @@ impl EditorApp {
             return;
         }
         let json = serde_json::to_string(&*self.scene()).unwrap_or_default();
-        if let Err(e) = crate::files::autosave_write(&json) {
-            log::warn!("autosave: {e}");
+        match crate::files::autosave_write(&json) {
+            Ok(()) => self.autosave_warned = false,
+            Err(e) => {
+                log::warn!("autosave: {e}");
+                // say it once, not every two seconds
+                if !self.autosave_warned {
+                    self.autosave_warned = true;
+                    self.toast(format!("Autosave is not keeping this scene ({e}): use Save (Cmd/Ctrl+S)"));
+                }
+            }
         }
         self.autosaved = (rev, now);
     }
@@ -1173,6 +1184,57 @@ impl EditorApp {
             .filter(|i| !all.iter().any(|o| o != *i && spatial::subtree(&scene, o).contains(i)))
             .cloned()
             .collect()
+    }
+
+    /// Put the selection on the clipboard as a shotstage clip (and delete it for Cut).
+    fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
+        let ids = self.selection_roots();
+        if ids.is_empty() {
+            return;
+        }
+        let Some(clip) = self.run("entity.copy", json!({"ids": ids})) else { return };
+        ctx.copy_text(clip.to_string());
+        let n = ids.len();
+        if cut {
+            self.delete_selection();
+        }
+        self.toast(format!(
+            "{} {n} object{} (paste with Cmd/Ctrl+V, here or in another scene)",
+            if cut { "Cut" } else { "Copied" },
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
+    /// Paste a shotstage clip from the clipboard; other text is ignored. Pasting next to the
+    /// originals shifts the copies a little so they do not hide each other.
+    fn paste(&mut self, text: &str) {
+        let Ok(clip) = serde_json::from_str::<Value>(text.trim()) else { return };
+        if clip["shotstageClip"].is_null() {
+            return;
+        }
+        let scene = self.scene();
+        let all_here = clip["entities"].as_array().is_some_and(|es| {
+            es.iter().filter(|e| e["parent"].is_null()).all(|e| e["id"].as_str().is_some_and(|id| scene.contains(id)))
+        });
+        let mut params = json!({"clip": clip});
+        if all_here {
+            params["offset"] = json!([0.5, 0.0, 0.0]);
+        }
+        match hub::dispatch(&self.hub, json!({"command": "entity.paste", "params": params})) {
+            Ok(o) => {
+                let mut ids: Vec<String> = o.result["ids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if !ids.is_empty() {
+                    let first = ids.remove(0);
+                    self.select(Some(first));
+                    self.also = ids;
+                }
+                self.toast("Pasted (Undo takes it back)");
+            }
+            Err(e) => self.toast(format!("Could not paste: {}", e.message)),
+        }
     }
 
     /// Duplicate everything selected as one undo step and select the copies.
@@ -1646,6 +1708,26 @@ impl EditorApp {
                 || i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "/"))
         }) {
             self.quick = Some((String::new(), 0));
+        }
+        // Cmd/Ctrl+C, X, V: objects travel through the system clipboard as JSON (between scenes,
+        // tabs, and to or from agents)
+        let (copy, cut, pasted) = ui.input(|i| {
+            let mut out = (false, false, None);
+            for e in &i.events {
+                match e {
+                    egui::Event::Copy => out.0 = true,
+                    egui::Event::Cut => out.1 = true,
+                    egui::Event::Paste(t) => out.2 = Some(t.clone()),
+                    _ => {}
+                }
+            }
+            out
+        });
+        if copy || cut {
+            self.copy_selection(ui.ctx(), cut);
+        }
+        if let Some(text) = pasted {
+            self.paste(&text);
         }
         // Esc with nothing in progress clears the selection
         if ui.input(|i| i.key_pressed(egui::Key::Escape))

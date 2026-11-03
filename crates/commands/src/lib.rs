@@ -8,6 +8,7 @@ pub mod arrange;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod blender;
 mod builtin;
+pub mod clipboard;
 pub mod images;
 pub mod lights;
 pub mod model;

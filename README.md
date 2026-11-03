@@ -24,6 +24,7 @@
 
 - **保存 / 打开**：**Save**（Cmd/Ctrl+S）把整个场景存成 `.shotstage.json`；**Open…** 打开它（也能导入模型和图片），打开算一步，可撤销。每次改动约 2 秒后自动保存（网页存在浏览器本地，桌面版存在 `~/.shotstage/autosave.json`），下次启动会询问是否恢复上次的场景。
 - **快捷操作框**：**Cmd/Ctrl+K**（或 `/`，或工具栏的 **Actions**）打开一个搜索框，能搜到所有积木、灯光预设、模板、编辑操作（保存、撤销、聚焦、复制……），以及当前选中对象能用的姿势、人物动作、物体运动或运镜。输入几个字母，↑↓ 选择，回车执行；每次都是普通的一步撤销。
+- **复制 / 剪切 / 粘贴**：Cmd/Ctrl+C / X / V 通过系统剪贴板复制物体（连同子物体、动画和图片），可以贴到同一场景、另一个场景或另一个浏览器标签页；在原物体旁边粘贴会稍微错开。人物粘贴后依然可以摆姿势。命令 `entity.copy` / `entity.paste`，agent 也能用。
 - **场景列表**：每行都有显示（👁）和锁定（🔒）开关；Shift+点击 多选；双击一行，或点右侧属性顶部的名字，可以改名；右键有 聚焦 / 改名 / 复制 / 隐藏 / 锁定 / 删除；物体多时会出现按名字筛选的搜索框。
 - **触控板**：Mac 触控板双指滑动 = 旋转视角（按住 Shift = 平移），双指捏合 = 缩放；鼠标滚轮仍是缩放。自动识别，也可以在视图工具栏的 **View ▾** 里固定成「Orbit」或「Zoom」。阴影、影棚光、镜头小窗的开关也都收在 **View ▾** 里。
 - **镜头小窗**：在自由视角里，右下角小窗实时显示镜头相机在当前帧看到的画面，摆东西时就能同时看构图；点它进入相机视角，视图工具栏的 **Cam preview** 可以关掉。只在场景、帧或显示设置变化时才重新渲染。
@@ -195,6 +196,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.set` `shot.delete` |
+| 复制粘贴 | `entity.copy` `entity.paste` |
 
 约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。
 

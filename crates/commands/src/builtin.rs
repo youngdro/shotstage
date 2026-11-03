@@ -647,8 +647,12 @@ pub fn registry() -> Vec<Command> {
                 e.id = map[id].clone();
                 if id == &p.id {
                     e.transform.translation = (e.transform.translation() + off).to_array();
+                    let parent = e.parent.take();
+                    crate::clipboard::remap_refs(&mut e, &map, &Default::default());
+                    e.parent = parent;
                 } else {
-                    e.parent = e.parent.as_ref().map(|par| map.get(par).cloned().unwrap_or_else(|| par.clone()));
+                    // parent and skin joints point at the copies
+                    crate::clipboard::remap_refs(&mut e, &map, &Default::default());
                 }
                 s.insert(e)?;
             }
@@ -845,5 +849,6 @@ pub fn registry() -> Vec<Command> {
     .chain(crate::motion::commands())
     .chain(crate::templates::commands())
     .chain(crate::arrange::commands())
+    .chain(crate::clipboard::commands())
     .collect()
 }
