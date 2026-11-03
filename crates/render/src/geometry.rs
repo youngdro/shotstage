@@ -39,6 +39,8 @@ pub struct Overlay {
     pub studio_light: bool,
     /// Viewer position, so billboards can turn towards it (set by the renderer).
     pub eye: Option<[f32; 3]>,
+    /// More selected entities (multi-selection), highlighted like `selected`.
+    pub also_selected: Vec<String>,
 }
 
 /// Vertex of a textured image card.
@@ -76,7 +78,10 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         grid(&mut g.lines);
     }
     let group = |id: &Option<String>| id.as_deref().map(|i| spatial::subtree(scene, i)).unwrap_or_default();
-    let (selected_set, hovered_set) = (group(&overlay.selected), group(&overlay.hovered));
+    let (mut selected_set, hovered_set) = (group(&overlay.selected), group(&overlay.hovered));
+    for a in &overlay.also_selected {
+        selected_set.extend(spatial::subtree(scene, a));
+    }
     for (index, e) in scene.entities.iter().enumerate() {
         if is_hidden(scene, &e.id) {
             continue;

@@ -66,7 +66,8 @@ Object: click to select (a second click picks a part); drag to slide it over sur
 Shift+drag: lift · Alt+drag: copy · R / Shift+R or wheel while dragging: turn · Ctrl: no snap · Esc: cancel.\n\
 People: click a body part to select its joint, then drag the part to bend it, or turn the coloured rings.\n\
 View: drag empty space to orbit · right-drag or Shift+drag to pan · scroll or pinch to zoom · double-click or F to focus.\n\
-Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play.";
+Keys: Cmd/Ctrl+Z undo · Cmd/Ctrl+Shift+Z redo · Cmd/Ctrl+D duplicate · Delete · Space play · K key · F focus.\n\
+Several objects: Shift+click to add · Cmd/Ctrl+G group · Cmd/Ctrl+Shift+G ungroup.";
 
 /// A collapsible properties section.
 fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
@@ -403,6 +404,8 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// More selected objects (Shift+click), besides the hub's selection.
+    also: Vec<String>,
     /// The camera the next picked picture becomes the reference of.
     reference_for: Option<String>,
     /// egui textures of reference pictures: asset key -> (identity of the pixels, texture).
@@ -474,6 +477,7 @@ impl EditorApp {
             safe_areas: false,
             thumbs: None,
             reference_for: None,
+            also: vec![],
             ref_textures: Default::default(),
             auto_key: false,
             key_drag: None,
@@ -874,6 +878,14 @@ impl eframe::App for EditorApp {
         if !self.incoming.borrow().is_empty() {
             self.import_incoming();
         }
+        {
+            let scene = self.scene();
+            let primary = self.selected();
+            self.also.retain(|a| scene.contains(a) && Some(a) != primary.as_ref());
+            if primary.is_none() {
+                self.also.clear();
+            }
+        }
         if let Some(sel) = self.selected() {
             let scene = self.scene();
             if matches!(scene.get(&sel).map(|e| &e.kind), Ok(EntityKind::Mesh { .. } | EntityKind::Empty)) {
@@ -968,6 +980,22 @@ impl EditorApp {
         }
         if ui.input(|i| i.key_pressed(egui::Key::F)) {
             self.focus_selection();
+        }
+        let (group, ungroup) = ui.input(|i| {
+            let g = i.modifiers.command && i.key_pressed(egui::Key::G);
+            (g && !i.modifiers.shift, g && i.modifiers.shift)
+        });
+        if group && !self.also.is_empty() {
+            self.group_selection();
+        }
+        if ungroup && let Some(id) = self.selected() {
+            match hub::dispatch(&self.hub, json!({"command": "entity.ungroup", "params": {"id": id}})) {
+                Ok(_) => {
+                    self.select(None);
+                    self.toast("Ungrouped");
+                }
+                Err(e) => self.toast(format!("Could not ungroup: {}", e.message)),
+            }
         }
         let (key, home, end, step) = ui.input(|i| {
             let step = if i.key_pressed(egui::Key::ArrowLeft) {
@@ -1311,6 +1339,10 @@ impl EditorApp {
         let scene = self.scene();
         let Ok(e) = scene.get(&id) else { return };
         let frame = self.frame();
+        if !self.also.is_empty() {
+            self.multi_section(ui, &scene, &id);
+            return;
+        }
         let joint = rig::joint_name(&scene, &id);
         let person = rig::person_root(&scene, &id).ok().filter(|r| *r == id);
         let kind = match (&e.kind, joint, &person) {
@@ -1808,6 +1840,63 @@ impl EditorApp {
         self.last_subject.as_ref().filter(|s| self.scene().contains(s)).map(|s| json!(s))
     }
 
+    /// Several objects selected: group, align, distribute, delete.
+    fn multi_section(&mut self, ui: &mut egui::Ui, scene: &Scene, primary: &str) {
+        let ids: Vec<String> = std::iter::once(primary.to_string()).chain(self.also.iter().cloned()).collect();
+        ui.heading(format!("{} objects", ids.len()));
+        ui.weak(
+            ids.iter().map(|i| scene.get(i).map(|e| e.name.clone()).unwrap_or_default()).collect::<Vec<_>>().join(", "),
+        );
+        ui.weak("Shift+click adds or removes objects; click one alone to select just it.");
+        ui.add_space(4.0);
+        section(ui, "Arrange", true, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Group").on_hover_text("Ctrl/Cmd+G").clicked() {
+                    self.group_selection();
+                }
+                if ui.button("Delete all").clicked() {
+                    let steps: Vec<Value> =
+                        ids.iter().map(|i| json!({"command": "entity.delete", "params": {"id": i}})).collect();
+                    let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
+                    self.also.clear();
+                }
+            });
+            egui::Grid::new("align_grid").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
+                for (axis, label) in [("x", "Align X"), ("z", "Align Z"), ("y", "Align Y")] {
+                    ui.label(label);
+                    for (to, t) in [("min", "min"), ("center", "centre"), ("max", "max")] {
+                        if ui.small_button(t).clicked() {
+                            self.run("entity.align", json!({"ids": ids, "axis": axis, "to": to}));
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+            if ids.len() >= 3 {
+                ui.horizontal(|ui| {
+                    ui.label("Distribute");
+                    for axis in ["x", "z"] {
+                        if ui.small_button(axis.to_uppercase()).clicked() {
+                            self.run("entity.distribute", json!({"ids": ids, "axis": axis}));
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    fn group_selection(&mut self) {
+        let Some(primary) = self.selected() else { return };
+        let ids: Vec<String> = std::iter::once(primary).chain(self.also.drain(..)).collect();
+        match hub::dispatch(&self.hub, json!({"command": "entity.group", "params": {"ids": ids}})) {
+            Ok(o) => {
+                self.select(o.result["id"].as_str().map(str::to_string));
+                self.toast("Grouped: they now move together (Ctrl+Shift+G to ungroup)");
+            }
+            Err(e) => self.toast(format!("Could not group: {}", e.message)),
+        }
+    }
+
     fn person_section(&mut self, ui: &mut egui::Ui, scene: &Scene, root: &str, frame: f32) {
         let animated = self.auto_key || rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
         section(ui, "Pose", true, |ui| {
@@ -1824,6 +1913,18 @@ impl EditorApp {
                 }
             });
         });
+        if let Some(cam) = camera_id_at(scene, frame) {
+            ui.horizontal(|ui| {
+                if ui.button("Look at camera").on_hover_text("Turn the head and neck towards the shot camera").clicked()
+                {
+                    let mut req = json!({"id": root, "target": cam, "frame": frame});
+                    if animated {
+                        req["keyframeAt"] = json!(frame.round());
+                    }
+                    self.run("person.lookAt", req);
+                }
+            });
+        }
         section(ui, "Hair", true, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for style in rig::HAIR_STYLES {
@@ -2741,7 +2842,20 @@ impl EditorApp {
                     }
                 })
             });
-            self.select(sel);
+            if let Some(s) = sel.clone().filter(|_| modifiers.shift && self.selected().is_some()) {
+                // Shift+click: add to (or take out of) the selection
+                if self.selected().as_ref() != Some(&s) {
+                    match self.also.iter().position(|a| *a == s) {
+                        Some(i) => {
+                            self.also.remove(i);
+                        }
+                        None => self.also.push(s),
+                    }
+                }
+            } else {
+                self.also.clear();
+                self.select(sel);
+            }
         }
         if self.hovered.is_some() && matches!(self.drag, Gesture::Idle) && self.palette.is_none() {
             ui.ctx().set_cursor_icon(CursorIcon::Grab);
@@ -2768,6 +2882,7 @@ impl EditorApp {
             footprint: dragged_id,
             studio_light: self.studio_light,
             eye: None,
+            also_selected: if clean { vec![] } else { self.also.clone() },
         };
         let pass = self.pass;
         let (Some(rs), Some(renderer)) = (frame.wgpu_render_state(), self.renderer.as_mut()) else {

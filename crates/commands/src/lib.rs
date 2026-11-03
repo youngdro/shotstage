@@ -4,6 +4,7 @@
 //! [`Session::dispatch`] / [`Session::batch`], so they can do exactly the same things.
 //! Parameters are untrusted: bad input returns a [`CommandError`], never a panic.
 
+pub mod arrange;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod blender;
 mod builtin;
