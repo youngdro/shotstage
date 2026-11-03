@@ -286,6 +286,7 @@ enum QuickAction {
     Board,
     Preview,
     FitTimeline,
+    SafeAreas,
 }
 
 /// `holdBasket` → `Hold basket`, `tPose` → `T pose`.
@@ -1457,6 +1458,7 @@ impl EditorApp {
         out.push(act("Toggle storyboard", "every shot as a picture", QuickAction::Board));
         out.push(act("Toggle camera preview", "the small view in the corner", QuickAction::Preview));
         out.push(act("Fit the timeline", "show all frames", QuickAction::FitTimeline));
+        out.push(act("Toggle safe areas", "action / title safe frames in camera view", QuickAction::SafeAreas));
         out.push(act("New camera from this view", "where you are looking from", QuickAction::CameraHere));
         if scene.active_camera.is_some() || !scene.timeline.shots.is_empty() {
             out.push(act("Save frame as PNG", "the shot camera at the playhead, 1920 px", QuickAction::SaveFrame));
@@ -1613,6 +1615,7 @@ impl EditorApp {
                 QuickAction::Board => self.show_board = !self.show_board,
                 QuickAction::Preview => self.cam_preview = !self.cam_preview,
                 QuickAction::FitTimeline => self.tl_view = None,
+                QuickAction::SafeAreas => self.safe_areas = !self.safe_areas,
             },
         }
     }
