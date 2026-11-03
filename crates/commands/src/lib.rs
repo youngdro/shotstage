@@ -295,7 +295,9 @@ impl Session {
         }
         let changed = self.scene != before;
         if changed {
-            self.push_undo("batch", before);
+            // named after its first step, so History reads "Delete" rather than "batch"
+            let label = calls.first().map(|c| c.command.as_str()).unwrap_or("batch");
+            self.push_undo(label, before);
         }
         self.last_merge = None;
         Ok(self.outcome(json!(results), changed))
