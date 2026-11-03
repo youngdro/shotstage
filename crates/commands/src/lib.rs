@@ -15,6 +15,7 @@ mod placement;
 pub mod prefabs;
 pub mod rig;
 pub mod snapshot;
+pub mod templates;
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;

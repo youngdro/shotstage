@@ -95,3 +95,70 @@ pub fn save(name: &str, bytes: &[u8], mime: &str) -> Result<Option<String>, Stri
         Ok(Some(format!("downloaded {name}")))
     }
 }
+
+/// Where the result of a background save lands for the editor to report: Ok(where) / Err(why).
+pub type Outbox = Rc<RefCell<Option<Result<String, String>>>>;
+
+/// Render the shot camera's view at the current frame and save it as a PNG.
+pub fn save_frame(hub: &crate::hub::SharedHub, width: u32, done: &Outbox) {
+    let frame = hub.borrow().frame;
+    let name = format!("shotstage_frame_{:04}.png", frame.round() as i64);
+    let params = serde_json::json!({ "width": width });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use base64::Engine as _;
+        let r = crate::hub::dispatch(hub, serde_json::json!({ "command": "render.snapshot", "params": params }))
+            .map_err(|e| e.message)
+            .and_then(|o| {
+                let b64 = o.result["data"].as_str().unwrap_or_default().to_string();
+                base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())
+            })
+            .and_then(|png| save(&name, &png, "image/png"));
+        *done.borrow_mut() = match r {
+            Ok(Some(w)) => Some(Ok(w)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        };
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        struct SingleThread<T>(T);
+        // SAFETY: wasm32 without atomics has a single thread; the value is only used on it.
+        unsafe impl<T> Send for SingleThread<T> {}
+        impl<T> SingleThread<T> {
+            // a method call moves the whole wrapper into the closure (not just its fields)
+            fn into_inner(self) -> T {
+                self.0
+            }
+        }
+        let drawn = hub.borrow_mut().draw_snapshot(params);
+        let (_, rs, rb) = match drawn {
+            Ok(x) => x,
+            Err(e) => {
+                *done.borrow_mut() = Some(Err(e.message));
+                return;
+            }
+        };
+        hub.borrow_mut().pending_snapshots += 1;
+        let buffer = rb.buffer.clone();
+        let cell = SingleThread((hub.clone(), rb, done.clone(), name));
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            let (hub, rb, done, name) = cell.into_inner();
+            hub.borrow_mut().pending_snapshots -= 1;
+            let out = r
+                .map_err(|e| e.to_string())
+                .and_then(|_| rb.rgba())
+                .and_then(|rgba| shotstage_render::encode_png(&rgba, rb.width, rb.height))
+                .and_then(|png| save(&name, &png, "image/png"));
+            *done.borrow_mut() = match out {
+                Ok(Some(w)) => Some(Ok(w)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            };
+            if let Some(ctx) = &hub.borrow().repaint {
+                ctx.request_repaint();
+            }
+        });
+        let _ = rs.device.poll(wgpu::PollType::Poll);
+    }
+}

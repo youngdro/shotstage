@@ -787,10 +787,7 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
         }
         Softbox => {
             let mut v = light_stand(1.8);
-            v.push(Part {
-                rot: [90.0, 0.0, 0.0],
-                ..part("box", Primitive::Cone { radius: 0.42, height: 0.35, segments: 4 }, [0.0, 1.8, 0.1], DARK)
-            });
+            v.push(part("box", cube(0.62, 0.62, 0.3), [0.0, 1.8, 0.12], DARK));
             v.push(part("diffuser", cube(0.58, 0.58, 0.01), [0.0, 1.8, 0.28], WHITE));
             // the panel lights the scene: an area light facing the front (+Z)
             v.push(Part {

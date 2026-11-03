@@ -350,6 +350,8 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
+    /// Result of a background "save frame".
+    saved: crate::files::Outbox,
     /// Key every edit at the current frame.
     auto_key: bool,
     key_drag: Option<KeyDrag>,
@@ -407,6 +409,7 @@ impl EditorApp {
             block_filter: String::new(),
             show_console: false,
             image_mode: None,
+            saved: Default::default(),
             auto_key: false,
             key_drag: None,
             key_menu: None,
@@ -496,6 +499,50 @@ impl EditorApp {
             p.as_object_mut().map(|o| o.remove("snap"));
         }
         self.run_key(key, "entity.place", p);
+    }
+
+    fn apply_template(&mut self, name: &str, label: &str) {
+        match hub::dispatch(&self.hub, json!({"command": "scene.template", "params": {"name": name}})) {
+            Ok(o) => {
+                let scene = self.scene();
+                self.select(None);
+                self.hub.borrow_mut().frame = scene.timeline.start as f32;
+                if let Some(Some(b)) = scene
+                    .entities
+                    .iter()
+                    .filter(|e| e.parent.is_none())
+                    .map(|e| spatial::bounds(&scene, &e.id, 0.0).ok().flatten())
+                    .reduce(spatial::Aabb::union)
+                {
+                    self.orbit.target = b.center();
+                    self.orbit.distance = (b.size().max_element() * 1.4).clamp(2.0, 60.0);
+                    // look from where the shot camera looks, a little further back
+                    if let Some(cam) = camera_id_at(&scene, scene.timeline.start as f32)
+                        && let Ok(w) = world_at(&scene, &cam, scene.timeline.start as f32)
+                    {
+                        // centre on what the camera looks at (the product, not the backdrop)
+                        let eye = w.w_axis.truncate();
+                        let fwd = w.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
+                        let opts = RayOptions { ground: true, ..Default::default() };
+                        let at = raycast(&scene, 0.0, eye, fwd, &opts)
+                            .map(|h| Vec3::from_array(h.point))
+                            .unwrap_or(b.center());
+                        self.orbit.target = at;
+                        let dir = eye - at;
+                        if dir.length() > 0.1 {
+                            self.orbit.yaw = dir.x.atan2(dir.z);
+                            self.orbit.pitch = (dir.y / dir.length()).asin().clamp(0.1, 1.2);
+                            self.orbit.distance = (dir.length() * 1.6).clamp(1.0, 60.0);
+                        }
+                    }
+                }
+                self.toast(format!(
+                    "{label}: {} objects, {} shots · press Preview shot to play it",
+                    o.result["entities"], o.result["shots"]
+                ));
+            }
+            Err(e) => self.toast(format!("{label}: {}", e.message)),
+        }
     }
 
     /// Show a short status message at the bottom of the view.
@@ -732,6 +779,12 @@ impl eframe::App for EditorApp {
             }
         }
         crate::files::take_dropped(ui.ctx(), &self.incoming);
+        let saved = self.saved.borrow_mut().take();
+        match saved {
+            Some(Ok(w)) => self.toast(format!("Saved the frame: {w}")),
+            Some(Err(e)) => self.toast(format!("Could not save the frame: {e}")),
+            None => {}
+        }
         if !self.incoming.borrow().is_empty() {
             self.import_incoming();
         }
@@ -883,6 +936,15 @@ impl EditorApp {
             {
                 crate::files::pick(&self.incoming, ui.ctx());
             }
+            ui.menu_button("Templates", |ui| {
+                ui.weak("Start from a ready scene (replaces this one; Undo brings it back)");
+                for (name, label, desc) in shotstage_commands::templates::TEMPLATES {
+                    if ui.button(*label).on_hover_text(*desc).clicked() {
+                        self.apply_template(name, label);
+                        ui.close();
+                    }
+                }
+            });
             ui.menu_button("Export", |ui| {
                 ui.weak("The scene posed at the current frame");
                 for (label, format, tip) in [
@@ -2602,6 +2664,9 @@ impl EditorApp {
             }
         }
         self.toolbar(ui, full, cam.is_some() || camera_id_at(&scene, f).is_some());
+        if scene.entities.is_empty() && self.palette.is_none() {
+            self.welcome(ui, full);
+        }
         // files dragged over the window
         if ui.input(|i| !i.raw.hovered_files.is_empty()) {
             painter.rect_filled(full.shrink(6.0), 8.0, Color32::from_rgba_unmultiplied(40, 98, 170, 60));
@@ -2636,6 +2701,35 @@ impl EditorApp {
         }
     }
 
+    /// The empty-scene card: start from a template or drag blocks in.
+    fn welcome(&mut self, ui: &egui::Ui, full: Rect) {
+        egui::Area::new(egui::Id::unique("welcome"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .constrain_to(full)
+            .default_pos(full.center())
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16)).show(ui, |ui| {
+                    ui.set_max_width(360.0);
+                    ui.heading("Start a scene");
+                    ui.weak("Pick a ready set (everything stays editable), or drag blocks in from the left.");
+                    ui.add_space(6.0);
+                    egui::Grid::new("welcome_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+                        for (i, (name, label, desc)) in shotstage_commands::templates::TEMPLATES.iter().enumerate() {
+                            if ui.add_sized([170.0, 34.0], egui::Button::new(*label)).on_hover_text(*desc).clicked() {
+                                self.apply_template(name, label);
+                            }
+                            if i % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.weak("Tip: drop a .glb / .fbx model or a picture on the view to bring it in.");
+                });
+            });
+    }
+
     /// Floating view options at the top-left of the viewport.
     fn toolbar(&mut self, ui: &egui::Ui, full: Rect, has_cam: bool) {
         egui::Area::new(egui::Id::unique("viewport_toolbar"))
@@ -2643,7 +2737,9 @@ impl EditorApp {
             .fixed_pos(full.left_top() + Vec2::new(8.0, 8.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    // wrap rather than spill over the side panels in a narrow view
+                    ui.set_max_width((full.width() - 28.0).max(120.0));
+                    ui.horizontal_wrapped(|ui| {
                         ui.selectable_value(&mut self.pass, Pass::Clay, "Clay").on_hover_text("Clay shading");
                         ui.selectable_value(&mut self.pass, Pass::Depth, "Depth")
                             .on_hover_text("Depth pass (near = white)");
@@ -2664,6 +2760,13 @@ impl EditorApp {
                             self.look_through = false;
                         }
                         ui.separator();
+                        if ui
+                            .add_enabled(has_cam, egui::Button::new("📷 Save frame"))
+                            .on_hover_text("Save the shot camera's view at this frame as a PNG (1920 px wide)")
+                            .clicked()
+                        {
+                            crate::files::save_frame(&self.hub, 1920, &self.saved);
+                        }
                         ui.toggle_value(&mut self.studio_light, "Studio light").on_hover_text(
                             "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
                         );

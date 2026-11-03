@@ -775,6 +775,29 @@ fn key_pose(
 }
 
 fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k: f32, fps: f32) -> CmdResult<usize> {
+    // Upper-body actions (wave, point, talk, look, nod) start from the current pose, so a seated
+    // person keeps sitting; whole-body actions use full poses.
+    let rest = rig::pelvis_rest(scene, root)?;
+    let kk = (rest / 0.95).max(1e-3);
+    let mut current: BTreeMap<&'static str, [f32; 3]> = BTreeMap::new();
+    for j in rig::JOINTS {
+        current.insert(j, local_at(scene, &format!("{root}_{j}"), start)?.euler_degrees());
+    }
+    let cur_drop = (rest - local_at(scene, &format!("{root}_pelvis"), start)?.translation[1]) / kk;
+    let upper = |base: &BTreeMap<&'static str, [f32; 3]>, pose: &str| {
+        let mut m = base.clone();
+        for (j, r) in pose_map(pose) {
+            if j.starts_with("shoulder")
+                || j.starts_with("elbow")
+                || j.starts_with("wrist")
+                || j == "neck"
+                || j == "head"
+            {
+                m.insert(j, r);
+            }
+        }
+        m
+    };
     for j in rig::JOINTS {
         let id = format!("{root}_{j}");
         if let Some(t) =
@@ -783,7 +806,7 @@ fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k:
             t.keys.retain(|key| key.frame < start - 1e-3 || key.frame > end + 1e-3);
         }
     }
-    let stand = pose_map("stand");
+    let stand = current.clone();
     let frames = end - start;
     let mut n = 0;
     match name {
@@ -811,32 +834,32 @@ fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k:
             n += 2;
         }
         "wave" => {
-            let wave = pose_map("wave");
-            n += key_pose(scene, root, start, &stand, 0.0, Interp::Ease)?;
+            let wave = upper(&stand, "wave");
+            n += key_pose(scene, root, start, &stand, cur_drop, Interp::Ease)?;
             let up = start + frames * 0.2;
-            n += key_pose(scene, root, up, &wave, 0.0, Interp::Ease)?;
+            n += key_pose(scene, root, up, &wave, cur_drop, Interp::Ease)?;
             let waves = (3.0 * k).round().max(1.0) as usize;
             for i in 1..=waves * 2 {
                 let f = up + (end - up - frames * 0.15) * i as f32 / (waves * 2) as f32;
                 let mut p = wave.clone();
                 let swing = if i % 2 == 1 { 25.0 } else { -10.0 };
                 p.insert("elbow_r", [0.0, 0.0, -50.0 + swing]);
-                n += key_pose(scene, root, f, &p, 0.0, Interp::Ease)?;
+                n += key_pose(scene, root, f, &p, cur_drop, Interp::Ease)?;
             }
-            n += key_pose(scene, root, end, &stand, 0.0, Interp::Ease)?;
+            n += key_pose(scene, root, end, &stand, cur_drop, Interp::Ease)?;
         }
         "pickUp" => {
-            n += key_pose(scene, root, start, &stand, 0.0, Interp::Ease)?;
+            n += key_pose(scene, root, start, &pose_map("stand"), 0.0, Interp::Ease)?;
             n +=
                 key_pose(scene, root, start + frames * 0.45, &pose_map("pickUp"), pelvis_drop("pickUp"), Interp::Ease)?;
             n += key_pose(scene, root, start + frames * 0.6, &pose_map("pickUp"), pelvis_drop("pickUp"), Interp::Ease)?;
             n += key_pose(scene, root, end, &pose_map("holdBasket"), 0.0, Interp::Ease)?;
         }
         "pointAt" => {
-            n += key_pose(scene, root, start, &stand, 0.0, Interp::Ease)?;
-            n += key_pose(scene, root, start + frames * 0.3, &pose_map("point"), 0.0, Interp::Ease)?;
-            n += key_pose(scene, root, start + frames * 0.75, &pose_map("point"), 0.0, Interp::Ease)?;
-            n += key_pose(scene, root, end, &stand, 0.0, Interp::Ease)?;
+            n += key_pose(scene, root, start, &stand, cur_drop, Interp::Ease)?;
+            n += key_pose(scene, root, start + frames * 0.3, &upper(&stand, "point"), cur_drop, Interp::Ease)?;
+            n += key_pose(scene, root, start + frames * 0.75, &upper(&stand, "point"), cur_drop, Interp::Ease)?;
+            n += key_pose(scene, root, end, &stand, cur_drop, Interp::Ease)?;
         }
         "talk" => {
             let beats = ((frames / fps) * 1.5 * k.clamp(0.5, 2.0)).round().max(2.0) as usize;
@@ -851,7 +874,7 @@ fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k:
                     p.insert("elbow_l", [-55.0 - 10.0 * side, 0.0, 0.0]);
                     p.insert("head", [6.0 * side, 8.0 * side, 0.0]);
                 }
-                n += key_pose(scene, root, start + frames * u, &p, 0.0, Interp::Ease)?;
+                n += key_pose(scene, root, start + frames * u, &p, cur_drop, Interp::Ease)?;
             }
         }
         "turnHead" => {
@@ -860,14 +883,14 @@ fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k:
                 let mut p = stand.clone();
                 p.insert("head", [0.0, yaw, 0.0]);
                 p.insert("neck", [0.0, yaw * 0.3, 0.0]);
-                n += key_pose(scene, root, start + frames * u, &p, 0.0, Interp::Ease)?;
+                n += key_pose(scene, root, start + frames * u, &p, cur_drop, Interp::Ease)?;
             }
         }
         "nod" => {
             for (u, x) in [(0.0, 0.0), (0.2, 18.0), (0.4, -4.0), (0.6, 16.0), (0.8, -3.0), (1.0, 0.0)] {
                 let mut p = stand.clone();
                 p.insert("head", [x * k.min(2.0), 0.0, 0.0]);
-                n += key_pose(scene, root, start + frames * u, &p, 0.0, Interp::Ease)?;
+                n += key_pose(scene, root, start + frames * u, &p, cur_drop, Interp::Ease)?;
             }
         }
         "sitDown" | "standUp" => {
