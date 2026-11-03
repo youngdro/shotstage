@@ -141,7 +141,7 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
             timeline(143),
             cam("cam_hero", "Hero"),
             frame("cam_hero", "hero", "wide", "front", "high", 85.0),
-            motion("orbitLeft", "cam_hero", Some("plinth"), 0, 3.0),
+            motion("orbitLeft", "cam_hero", Some("hero"), 0, 3.0),
             shot("cam_hero", "hero arc", 0, 71),
             cam("cam_detail", "Detail"),
             frame("cam_detail", "hero", "full", "frontRight", "eyeLevel", 100.0),
