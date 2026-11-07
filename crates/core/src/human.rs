@@ -884,6 +884,27 @@ fn shoe_field(o: &HumanOutfit, v: usize) -> f32 {
     }
 }
 
+/// Centre of the eyes on the (male) base mesh, which the scalp fields are measured from.
+fn base_eye() -> Vec3 {
+    static EYE: OnceLock<Vec3> = OnceLock::new();
+    *EYE.get_or_init(|| eye_center(&asset().base[1]))
+}
+
+/// How far inside the hairline a vertex is (> 0 = under the hair), in metres.
+fn hair_field(o: &HumanOutfit, v: usize) -> f32 {
+    let a = asset();
+    if o.hair <= 0.0 || a.vfield[v].region != REGION_HEAD {
+        return -1.0;
+    }
+    let eye = base_eye();
+    let p = a.base[1][v];
+    // high on the forehead, down to the nape at the back
+    let nape = eye.y - 0.035 - 0.05 * o.hair.min(1.0);
+    let t = ((eye.z - 0.03 - p.z) / 0.13).clamp(0.0, 1.0);
+    let hairline = (eye.y + 0.062) * (1.0 - t) + nape * t;
+    (p.y - hairline).min(p.y - (eye.y - 0.12))
+}
+
 fn slice(part: HumanPart, outfit: &HumanOutfit) -> Rc<Slice> {
     let mut h = Hasher::new();
     h.word(part as u32);
@@ -913,7 +934,7 @@ fn slice(part: HumanPart, outfit: &HumanOutfit) -> Rc<Slice> {
             HumanPart::Top => (1, Some(top_field)),
             HumanPart::Bottom => (1, Some(bottom_field)),
             HumanPart::Shoes => (0, Some(shoe_field)),
-            HumanPart::Hair => (u8::MAX, None),
+            HumanPart::Hair => (0, Some(hair_field)),
             HumanPart::Eyes | HumanPart::Irises => (3, None),
             HumanPart::Teeth => (4, None),
         };
@@ -1060,7 +1081,7 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
     cached(&GEOMETRY, h.0, 128, || {
         let r = rest(body);
         if part == HumanPart::Hair {
-            return hair(&r, outfit.hair);
+            return hair(&r, outfit);
         }
         let s = slice(part, outfit);
         // shoes stand a little proud of the feet
@@ -1088,74 +1109,64 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
 
 /// Hair grown from the scalp: a cap a little off the skin, closed to the scalp at its edge, and
 /// for longer styles a curtain hanging from the sides and back (both sides drawn).
-fn hair(r: &HumanRest, length: f32) -> Geometry {
+fn hair(r: &HumanRest, outfit: &HumanOutfit) -> Geometry {
     let a = asset();
+    let length = outfit.hair;
     let mut g = Geometry { rest: vec![], skin: vec![], faces: vec![] };
     if length <= 0.0 {
         return g;
     }
     let base = &a.base[1];
-    let eye = eye_center(&a.base[1]);
-    // the hairline: high on the forehead, down to the nape at the back
-    let nape = eye.y - 0.035 - 0.05 * length.min(1.0);
-    let hairline = |z: f32| {
-        let t = ((eye.z - 0.03 - z) / 0.13).clamp(0.0, 1.0);
-        (eye.y + 0.062) * (1.0 - t) + nape * t
-    };
-    let scalp: Vec<usize> = (0..a.quads.len())
-        .filter(|q| a.part[*q] == 0 && a.region[*q] == REGION_HEAD)
-        .filter(|q| {
-            let c = a.quads[*q].iter().map(|i| base[*i as usize]).sum::<Vec3>() / 4.0;
-            c.y > hairline(c.z) && c.y > eye.y - 0.12
-        })
-        .collect();
+    let eye = base_eye();
     let normals = rest_normals(r);
     let thick = 0.004 + 0.008 * (length / 0.5).min(1.0);
-    // cap
-    let mut cap: HashMap<u32, u32> = HashMap::new();
-    let mut edge_count: HashMap<(u32, u32), i32> = HashMap::new();
-    for q in &scalp {
-        let quad = a.quads[*q];
-        let loop_ = quad.map(|v| {
-            *cap.entry(v).or_insert_with(|| {
-                let p = r.positions[v as usize];
-                // more volume on the crown than at the hairline
-                let up = ((base[v as usize].y - eye.y) / 0.12).clamp(0.0, 1.0);
-                g.rest.push(p + normals[v as usize] * thick * (0.6 + 0.6 * up));
-                g.skin.push(influence(v));
-                g.rest.len() as u32 - 1
-            })
-        });
-        g.faces.push(loop_.to_vec());
-        for k in 0..4 {
-            let (x, y) = (quad[k], quad[(k + 1) % 4]);
-            *edge_count.entry((x.min(y), x.max(y))).or_default() += 1;
+    // the cap: the scalp cut cleanly along the hairline, a little off the skin, thinning to
+    // nothing at the hairline itself
+    let s = slice(HumanPart::Hair, outfit);
+    let cap_at = |v: u32| {
+        let p = r.positions[v as usize];
+        // more volume on the crown than at the hairline
+        let up = ((base[v as usize].y - eye.y) / 0.12).clamp(0.0, 1.0);
+        p + normals[v as usize] * thick * (0.6 + 0.6 * up)
+    };
+    let skin_at = |v: u32| r.positions[v as usize] - normals[v as usize] * 0.001;
+    for v in &s.verts {
+        match *v {
+            SliceVert::Asset(i) => {
+                g.push(cap_at(i), i);
+            }
+            SliceVert::Cut(i, j, t) => {
+                // where a curtain hangs from the edge (behind the temples) the cap keeps its
+                // thickness so the two meet without a groove
+                let curtain = length > 0.6 && base[i as usize].lerp(base[j as usize], t).z <= eye.z - 0.075;
+                let p = if curtain { cap_at(i).lerp(cap_at(j), t) } else { skin_at(i).lerp(skin_at(j), t) };
+                g.rest.push(p);
+                g.skin.push(blend(influence(i), influence(j), t));
+            }
         }
     }
-    // boundary edges, in the winding of the face that owns them
+    g.faces = s.faces.clone();
+    // the cap's edge (cut to cut), in the winding of its face
     let mut boundary: Vec<(u32, u32)> = vec![];
-    for q in &scalp {
-        let quad = a.quads[*q];
-        for k in 0..4 {
-            let (x, y) = (quad[k], quad[(k + 1) % 4]);
-            if edge_count[&(x.min(y), x.max(y))] == 1 {
+    for f in &s.faces {
+        for k in 0..f.len() {
+            let (x, y) = (f[k], f[(k + 1) % f.len()]);
+            if matches!(s.verts[x as usize], SliceVert::Cut(..)) && matches!(s.verts[y as usize], SliceVert::Cut(..)) {
                 boundary.push((x, y));
             }
         }
     }
-    // close the cap's edge down to the skin
-    let mut skin_of: HashMap<u32, u32> = HashMap::new();
-    let mut skin_vert = |g: &mut Geometry, v: u32| {
-        *skin_of.entry(v).or_insert_with(|| {
-            g.rest.push(r.positions[v as usize] - normals[v as usize] * 0.001);
-            g.skin.push(influence(v));
-            g.rest.len() as u32 - 1
-        })
+    // where the curtain hangs from: the hair surface just inside the hairline
+    let top_of = |x: u32| -> (Vec3, Vec3, Influence) {
+        match s.verts[x as usize] {
+            SliceVert::Asset(i) => (cap_at(i), base[i as usize], influence(i)),
+            SliceVert::Cut(i, j, t) => (
+                cap_at(i).lerp(cap_at(j), t),
+                base[i as usize].lerp(base[j as usize], t),
+                blend(influence(i), influence(j), t),
+            ),
+        }
     };
-    for (x, y) in &boundary {
-        let (sx, sy) = (skin_vert(&mut g, *x), skin_vert(&mut g, *y));
-        g.faces.push(vec![cap[y], cap[x], sx, sy]);
-    }
     // a curtain from the sides and back for chin-length and longer hair
     if length > 0.6 {
         let drop = (length - 0.6) / 0.4 * 0.17 + 0.04; // 1 = to the shoulders
@@ -1196,7 +1207,7 @@ fn hair(r: &HumanRest, length: f32) -> Geometry {
             columns
                 .entry(v)
                 .or_insert_with(|| {
-                    let top = g.rest[cap[&v] as usize];
+                    let (top, _, inf) = top_of(v);
                     let radial = {
                         let d = top - rest_centre;
                         Vec3::new(d.x, 0.0, d.z).normalize_or(Vec3::NEG_Z)
@@ -1225,9 +1236,9 @@ fn hair(r: &HumanRest, length: f32) -> Geometry {
                             let p = if k == 0 { top } else { axis + out * len };
                             let outer = g.rest.len() as u32;
                             g.rest.push(p);
-                            g.skin.push(influence(v));
+                            g.skin.push(inf);
                             g.rest.push(p - out * 0.006);
-                            g.skin.push(influence(v));
+                            g.skin.push(inf);
                             [outer, outer + 1]
                         })
                         .collect()
@@ -1235,7 +1246,7 @@ fn hair(r: &HumanRest, length: f32) -> Geometry {
                 .clone()
         };
         for (x, y) in &boundary {
-            let (px, py) = (base[*x as usize], base[*y as usize]);
+            let (px, py) = (top_of(*x).1, top_of(*y).1);
             // only behind the temples: never over the face
             if px.z > eye.z - 0.075 || py.z > eye.z - 0.075 {
                 continue;
