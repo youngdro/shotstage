@@ -1283,6 +1283,331 @@ pub fn flip(m: &Mesh, sel: &Elements) -> Result<(Mesh, Elements)> {
     Ok((out, sel.clone().normalized()))
 }
 
+// ---------------------------------------------------------------------------------------------
+// bridge, edge slide, bisect / knife
+
+/// Border edges of a selection grouped into chains, each oriented the way a new face on the
+/// open side would run along it. `closed` chains are loops.
+fn border_chains(m: &Mesh, topo: &Topology, edges: &BTreeSet<Edge>) -> Result<Vec<(Vec<u32>, bool)>> {
+    let mut next: HashMap<u32, u32> = HashMap::new();
+    let mut prev: HashMap<u32, u32> = HashMap::new();
+    for &e in edges {
+        let fs = topo.faces_of(e);
+        if fs.len() != 1 {
+            continue;
+        }
+        let face = &m.faces[fs[0]];
+        let i = face.iter().position(|&v| v == e.0).unwrap_or(0);
+        // the face runs a→b, so a new face on the open side runs b→a
+        let (a, b) = if face[(i + 1) % face.len()] == e.1 { (e.0, e.1) } else { (e.1, e.0) };
+        need(
+            !next.contains_key(&b) && !prev.contains_key(&a),
+            "the border edges branch: select simple loops or chains to bridge",
+        )?;
+        next.insert(b, a);
+        prev.insert(a, b);
+    }
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut chains = Vec::new();
+    // open chains start where nothing leads in
+    let mut starts: Vec<u32> = next.keys().filter(|v| !prev.contains_key(v)).copied().collect();
+    starts.sort_unstable();
+    for s in starts {
+        let mut c = vec![s];
+        let mut cur = s;
+        while let Some(&n) = next.get(&cur) {
+            c.push(n);
+            cur = n;
+        }
+        seen.extend(c.iter().copied());
+        chains.push((c, false));
+    }
+    let mut rest: Vec<u32> = next.keys().filter(|v| !seen.contains(v)).copied().collect();
+    rest.sort_unstable();
+    for s in rest {
+        if seen.contains(&s) {
+            continue;
+        }
+        let mut c = vec![s];
+        let mut cur = s;
+        while let Some(&n) = next.get(&cur) {
+            if n == s {
+                break;
+            }
+            c.push(n);
+            cur = n;
+        }
+        seen.extend(c.iter().copied());
+        chains.push((c, true));
+    }
+    Ok(chains)
+}
+
+/// Join two border loops (or two open border chains) with a strip of faces (Blender's
+/// "Bridge Edge Loops"). Selected faces are removed first and their borders bridged, so two
+/// facing faces become a tunnel. Loops with different vertex counts are joined with
+/// triangles. Selects the new faces.
+pub fn bridge(m: &Mesh, sel: &Elements) -> Result<(Mesh, Elements)> {
+    let fl = flush(m, sel)?;
+    let mut work = m.clone();
+    let mut edges = fl.edges.clone();
+    if !fl.faces.is_empty() {
+        let mut count: HashMap<Edge, u32> = HashMap::new();
+        for &fi in &fl.faces {
+            let f = &m.faces[fi as usize];
+            for i in 0..f.len() {
+                *count.entry(ek(f[i], f[(i + 1) % f.len()])).or_default() += 1;
+            }
+        }
+        edges = count.into_iter().filter(|&(_, c)| c == 1).map(|(e, _)| e).collect();
+        work.faces = m
+            .faces
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !fl.faces.contains(&(*i as u32)))
+            .map(|(_, f)| f.clone())
+            .collect();
+    }
+    let topo = Topology::new(&work);
+    let chains = border_chains(&work, &topo, &edges)?;
+    need(
+        chains.len() == 2,
+        &format!(
+            "select two border edge loops (or two faces / regions) to bridge; the selection has {} border loop(s)",
+            chains.len()
+        ),
+    )?;
+    let (a, closed_a) = &chains[0];
+    let (b, closed_b) = &chains[1];
+    need(closed_a == closed_b, "bridge two closed loops or two open chains, not one of each")?;
+    need(a.len() >= 2 && b.len() >= 2, "the loops are too short to bridge")?;
+    let closed = *closed_a;
+    let p = |v: u32| pos(&work, v);
+    // b reordered so b2[k] sits across from a[k]; b runs the other way along the strip
+    let b2: Vec<u32> = if closed {
+        let n = b.len();
+        let s = if a.len() == n && n <= 4096 {
+            (0..n)
+                .min_by(|&s1, &s2| {
+                    let cost =
+                        |s: usize| -> f32 { (0..n).map(|i| p(a[i]).distance_squared(p(b[(s + n - i) % n]))).sum() };
+                    cost(s1).total_cmp(&cost(s2))
+                })
+                .unwrap_or(0)
+        } else {
+            (0..n)
+                .min_by(|&x, &y| p(a[0]).distance_squared(p(b[x])).total_cmp(&p(a[0]).distance_squared(p(b[y]))))
+                .unwrap_or(0)
+        };
+        (0..n).map(|i| b[(s + n - i) % n]).collect()
+    } else {
+        b.iter().rev().copied().collect()
+    };
+    let start = work.faces.len() as u32;
+    let (na, nb) = (a.len(), b2.len());
+    let at = |i: usize| a[i % na];
+    let bt = |k: usize| b2[k % nb];
+    // steps along each side: closed loops wrap round
+    let (sa, sb) = if closed { (na, nb) } else { (na - 1, nb - 1) };
+    if sa == sb {
+        for i in 0..sa {
+            work.faces.push(vec![at(i), at(i + 1), bt(i + 1), bt(i)]);
+        }
+    } else {
+        let (mut i, mut k) = (0usize, 0usize);
+        while i < sa || k < sb {
+            let fa = (i + 1) as f32 / sa as f32;
+            let fb = (k + 1) as f32 / sb as f32;
+            if k >= sb || (i < sa && fa <= fb) {
+                work.faces.push(vec![at(i), at(i + 1), bt(k)]);
+                i += 1;
+            } else {
+                work.faces.push(vec![at(i), bt(k + 1), bt(k)]);
+                k += 1;
+            }
+        }
+    }
+    let new: Vec<u32> = (start..work.faces.len() as u32).collect();
+    let sel = face_selection(&work, new);
+    Ok(finish(work, sel))
+}
+
+/// Where each vertex of the selected edges can slide: `[side A, side B]` targets along the
+/// neighbouring edges that are not selected (Blender's edge slide rails). Side A is to the
+/// left of the selected chains as they run.
+pub fn slide_rails(m: &Mesh, sel: &Elements) -> Result<HashMap<u32, [Option<u32>; 2]>> {
+    let topo = Topology::new(m);
+    let fl = flush_with(m, &topo, sel)?;
+    need(!fl.edges.is_empty(), "select edges (an edge loop) to slide")?;
+    let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(u, v) in &fl.edges {
+        adj.entry(u).or_default().push(v);
+        adj.entry(v).or_default().push(u);
+    }
+    // walk the selected edges as chains so "left" stays on one side
+    let mut directed: Vec<(u32, u32)> = Vec::new();
+    let mut used: HashSet<Edge> = HashSet::new();
+    let mut verts: Vec<u32> = adj.keys().copied().collect();
+    verts.sort_unstable_by_key(|v| (adj[v].len() != 1, *v));
+    for s in verts {
+        let mut cur = s;
+        while let Some(&n) = adj[&cur].iter().find(|&&n| !used.contains(&ek(cur, n))) {
+            used.insert(ek(cur, n));
+            directed.push((cur, n));
+            cur = n;
+        }
+    }
+    let mut rails: HashMap<u32, [Option<u32>; 2]> = HashMap::new();
+    for (u, v) in directed {
+        for &fi in topo.faces_of(ek(u, v)) {
+            let f = &m.faces[fi];
+            let n = f.len();
+            let i = f.iter().position(|&x| x == u).unwrap_or(0);
+            let side = if f[(i + 1) % n] == v { 0 } else { 1 };
+            for (x, other) in [(u, v), (v, u)] {
+                let j = f.iter().position(|&y| y == x).unwrap_or(0);
+                let around = [f[(j + 1) % n], f[(j + n - 1) % n]];
+                let Some(&t) = around.iter().find(|&&t| t != other) else { continue };
+                if fl.verts.contains(&t) {
+                    continue;
+                }
+                let r = rails.entry(x).or_default();
+                if r[side].is_none() {
+                    r[side] = Some(t);
+                }
+            }
+        }
+    }
+    Ok(rails)
+}
+
+/// Slide the selected edges along their neighbouring edges (Blender's GG edge slide).
+/// `factor` 0..1 moves toward side A (left of the loop), 0..-1 toward side B; 1 reaches the
+/// next loop. The selection stays the same.
+pub fn edge_slide(m: &Mesh, sel: &Elements, factor: f32) -> Result<(Mesh, Elements)> {
+    need(factor.is_finite() && (-1.0..=1.0).contains(&factor), "factor must be between -1 and 1")?;
+    let rails = slide_rails(m, sel)?;
+    let side = if factor >= 0.0 { 0 } else { 1 };
+    let t = factor.abs().min(0.999);
+    let mut out = m.clone();
+    let mut moved = 0;
+    for (&v, r) in &rails {
+        if let Some(target) = r[side] {
+            let p = pos(m, v).lerp(pos(m, target), t);
+            out.positions[v as usize] = p.to_array();
+            moved += 1;
+        }
+    }
+    need(moved > 0 || factor == 0.0, "nothing to slide along on that side")?;
+    Ok((out, sel.clone().normalized()))
+}
+
+/// Which side of a bisect plane to remove.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ClearSide {
+    /// Keep both halves.
+    #[default]
+    None,
+    /// Remove what is on the side the normal points to.
+    Front,
+    /// Remove what is behind the plane.
+    Back,
+}
+
+/// Cut faces along a plane (Blender's Bisect; the knife tool cuts with the plane through the
+/// eye and the line you draw). Cuts the selected faces, or every face when nothing is given;
+/// neighbours get the new vertices so the surface stays joined. Optionally removes one side.
+/// Selects the new edges.
+pub fn bisect(m: &Mesh, sel: &Elements, point: Vec3, normal: Vec3, clear: ClearSide) -> Result<(Mesh, Elements)> {
+    need(
+        point.is_finite() && normal.is_finite() && normal.length_squared() > 1e-12,
+        "give a finite point and a non-zero normal",
+    )?;
+    let n = normal.normalize();
+    let cut: BTreeSet<u32> = if sel.is_empty() { (0..m.faces.len() as u32).collect() } else { flush(m, sel)?.faces };
+    need(!cut.is_empty(), "select faces to cut (or none for the whole mesh)")?;
+    let size = m.positions.iter().map(|p| Vec3::from_array(*p).abs().max_element()).fold(1.0f32, f32::max);
+    let eps = 1e-5 * size;
+    let dist: Vec<f32> = m.positions.iter().map(|p| (Vec3::from_array(*p) - point).dot(n)).collect();
+    let side = |v: u32| -> i8 {
+        let d = dist[v as usize];
+        if d > eps {
+            1
+        } else if d < -eps {
+            -1
+        } else {
+            0
+        }
+    };
+    let mut out = m.clone();
+    let mut on: HashSet<u32> = (0..m.positions.len() as u32).filter(|&v| side(v) == 0).collect();
+    let mut new_pts: HashMap<Edge, u32> = HashMap::new();
+    for &fi in &cut {
+        let f = &m.faces[fi as usize];
+        for i in 0..f.len() {
+            let (a, b) = (f[i], f[(i + 1) % f.len()]);
+            if side(a) * side(b) < 0 {
+                let k = ek(a, b);
+                if let std::collections::hash_map::Entry::Vacant(slot) = new_pts.entry(k) {
+                    let (da, db) = (dist[k.0 as usize], dist[k.1 as usize]);
+                    let p = pos(m, k.0).lerp(pos(m, k.1), da / (da - db));
+                    let v = push_vertex(&mut out, p);
+                    on.insert(v);
+                    slot.insert(v);
+                }
+            }
+        }
+    }
+    let new_side = |out: &Mesh, f: &[u32]| -> f32 { (face_center(out, f) - point).dot(n) };
+    let mut faces = Vec::with_capacity(m.faces.len() + cut.len());
+    let mut from_cut = Vec::with_capacity(m.faces.len() + cut.len());
+    let mut new_edges = Vec::new();
+    for (fi, f) in m.faces.iter().enumerate() {
+        let mut g = Vec::with_capacity(f.len() + 2);
+        for i in 0..f.len() {
+            let (a, b) = (f[i], f[(i + 1) % f.len()]);
+            g.push(a);
+            if let Some(&v) = new_pts.get(&ek(a, b)) {
+                g.push(v);
+            }
+        }
+        let is_cut = cut.contains(&(fi as u32));
+        let picked: Vec<usize> = if is_cut { (0..g.len()).filter(|&i| on.contains(&g[i])).collect() } else { vec![] };
+        let gl = g.len();
+        if picked.len() == 2 && {
+            let d = picked[1] - picked[0];
+            d != 1 && d != gl - 1
+        } {
+            let (i, j) = (picked[0], picked[1]);
+            let first = g[i..=j].to_vec();
+            let mut second: Vec<u32> = g[j..].to_vec();
+            second.extend_from_slice(&g[..=i]);
+            new_edges.push([g[i], g[j]]);
+            faces.push(first);
+            faces.push(second);
+            from_cut.extend([true, true]);
+        } else {
+            faces.push(g);
+            from_cut.push(is_cut);
+        }
+    }
+    need(!new_edges.is_empty() || clear != ClearSide::None, "the plane does not cross the faces")?;
+    if clear != ClearSide::None {
+        let sign = if clear == ClearSide::Front { 1.0 } else { -1.0 };
+        let mut kept = Vec::with_capacity(faces.len());
+        for (f, c) in faces.into_iter().zip(from_cut) {
+            if !(c && new_side(&out, &f) * sign > eps) {
+                kept.push(f);
+            }
+        }
+        faces = kept;
+        need(!faces.is_empty(), "that would remove the whole mesh")?;
+    }
+    out.faces = faces;
+    Ok(finish(out, Elements::edges(new_edges)))
+}
+
 /// Every edge of the mesh as `[a, b]` (a < b), in a stable order.
 pub fn all_edges(m: &Mesh) -> Vec<[u32; 2]> {
     Topology::new(m).edges.into_iter().map(|(a, b)| [a, b]).collect()
@@ -1323,6 +1648,94 @@ mod tests {
     }
     fn euler(m: &Mesh) -> i64 {
         m.positions.len() as i64 - m.edge_count() as i64 + m.faces.len() as i64
+    }
+
+    fn face_facing(m: &Mesh, dir: Vec3) -> u32 {
+        (0..m.faces.len() as u32).find(|&f| face_normal(m, &m.faces[f as usize]).dot(dir) > 0.99).unwrap()
+    }
+    fn two_cubes() -> Mesh {
+        let mut m = cube();
+        let c = cube();
+        let off = m.positions.len() as u32;
+        m.positions.extend(c.positions.iter().map(|p| [p[0] + 4.0, p[1], p[2]]));
+        m.faces.extend(c.faces.iter().map(|f| f.iter().map(|v| v + off).collect::<Vec<_>>()));
+        m
+    }
+
+    #[test]
+    fn bridge_two_faces_into_a_tube() {
+        let m = two_cubes();
+        let a = face_facing(&m, Vec3::X);
+        let b = (0..m.faces.len() as u32)
+            .filter(|&f| face_normal(&m, &m.faces[f as usize]).dot(-Vec3::X) > 0.99)
+            .find(|&f| face_center(&m, &m.faces[f as usize]).x > 2.0)
+            .unwrap();
+        let (out, sel) = bridge(&m, &Elements::faces([a, b])).unwrap();
+        assert_eq!(out.faces.len(), 14);
+        assert_eq!(sel.faces.len(), 4);
+        assert!(closed(&out));
+        assert_eq!(euler(&out), 2);
+        // the bridge runs straight across: every new face spans the gap in x
+        for &f in &sel.faces {
+            let xs: Vec<f32> = out.faces[f as usize].iter().map(|&v| out.positions[v as usize][0]).collect();
+            assert!(xs.iter().any(|&x| (x - 1.0).abs() < 1e-5) && xs.iter().any(|&x| (x - 3.0).abs() < 1e-5));
+        }
+    }
+
+    #[test]
+    fn bridge_loops_of_different_sizes() {
+        let mut m = two_cubes();
+        let b = (0..m.faces.len() as u32)
+            .filter(|&f| face_normal(&m, &m.faces[f as usize]).dot(-Vec3::X) > 0.99)
+            .find(|&f| face_center(&m, &m.faces[f as usize]).x > 2.0)
+            .unwrap();
+        // give the second cube's facing side an extra vertex
+        let (m2, s2) = subdivide(&m, &Elements::faces([b])).unwrap();
+        m = m2;
+        let a = face_facing(&m, Vec3::X);
+        let mut sel = Elements::faces([a]);
+        sel.faces.extend(s2.faces);
+        let (out, _) = bridge(&m, &sel).unwrap();
+        assert!(closed(&out));
+        assert_eq!(euler(&out), 2);
+        assert!(bridge(&cube(), &Elements::faces([0])).is_err());
+    }
+
+    #[test]
+    fn edge_slide_moves_a_cut_loop() {
+        let (m, sel) = loop_cut(&cube(), [0, 4], 1, 0.5).unwrap();
+        let rails = slide_rails(&m, &sel).unwrap();
+        assert_eq!(rails.len(), 4);
+        assert!(rails.values().all(|r| r[0].is_some() && r[1].is_some()));
+        let (a, _) = edge_slide(&m, &sel, 0.5).unwrap();
+        let (b, _) = edge_slide(&m, &sel, -0.5).unwrap();
+        assert!(closed(&a));
+        let v = sel.edges[0][0] as usize;
+        let (pa, pb, p0) =
+            (Vec3::from_array(a.positions[v]), Vec3::from_array(b.positions[v]), Vec3::from_array(m.positions[v]));
+        // opposite sides, half way to the cube's edge (1 m away)
+        assert!((pa - p0).length() > 0.45 && (pb - p0).length() > 0.45);
+        assert!((pa - pb).length() > 0.95);
+        assert!(edge_slide(&m, &sel, 2.0).is_err());
+    }
+
+    #[test]
+    fn bisect_a_cube() {
+        let m = cube();
+        let (out, sel) = bisect(&m, &Elements::default(), Vec3::ZERO, Vec3::Y, ClearSide::None).unwrap();
+        assert_eq!(out.faces.len(), 10);
+        assert_eq!(sel.edges.len(), 4);
+        assert!(closed(&out));
+        let (half, _) = bisect(&m, &Elements::default(), Vec3::ZERO, Vec3::Y, ClearSide::Front).unwrap();
+        assert_eq!(half.faces.len(), 5);
+        assert!(half.positions.iter().all(|p| p[1] <= 1e-5));
+        // only the selected face: neighbours get the new vertices, stay joined
+        let top = face_facing(&m, Vec3::Y);
+        let (one, sel) = bisect(&m, &Elements::faces([top]), Vec3::ZERO, Vec3::X, ClearSide::None).unwrap();
+        assert_eq!(one.faces.len(), 7);
+        assert_eq!(sel.edges.len(), 1);
+        assert!(closed(&one));
+        assert!(bisect(&m, &Elements::default(), Vec3::new(0.0, 5.0, 0.0), Vec3::Y, ClearSide::None).is_err());
     }
 
     #[test]

@@ -79,6 +79,8 @@
 - **选择**：`1` / `2` / `3` 切换点、边、面；单击选中，Shift+单击加选或取消，Alt(Option)+单击选整条边环（面模式下是面环），Cmd/Ctrl+拖动框选，双击或 `L` 选鼠标下相连的整块，Ctrl+L 选和当前选择相连的部分，`A` 全选、Alt+A 全不选，Ctrl+= 扩大一圈。背面的元素默认不显示也选不到，打开 X-ray（Alt+Z）可以透视选择。
 - **移动**：直接拖选中的元素就能移动；也可以拖选区中心的红绿蓝箭头沿轴移动。`G` 移动、`R` 旋转、`S` 缩放跟随鼠标，按 `X` / `Y` / `Z` 锁定轴，直接输入数字给精确值，单击或回车确认，Esc 或右键取消。打开 Snap 时按网格步长吸附（按住 Ctrl 自由移动）。
 - **工具**：`E` 挤出（面沿法线，边向外），`I` 内插，Ctrl+B 倒角（滚轮加段数，变圆角），Ctrl+R 或 `C` 环切（浏览器里 Cmd+R 会刷新页面，所以 Mac 上用 Ctrl+R；鼠标悬停在边上预览，滚轮加刀数，单击切下），`F` 补面，`J` 连接两点切开面，`M` 合并顶点，`X` / Delete 删除。右侧面板里有同样的按钮，可以填精确数值，另有细分、翻转法线和 **Clean up**（合并重合顶点，修好导入时被拆开的网格）。
+- **更多工具**：连按两次 `G` 边滑移（选中的边沿相邻边滑动，可输入 -1~1 的比例）；`K` 刀切（单击起点、再单击终点，沿这条线切开它划过的可见面；先选了面就只切选中的面）；面板里的 **Bridge** 桥接两个边界环（选两个面会先删掉它们再连成通道，点数不同的环用三角面连）。
+- **布尔运算**：选中一个网格，在属性面板 **Boolean** 里选另一个网格和运算（差集 / 并集 / 交集），点 Apply。结果写回当前网格，另一个网格被隐藏（和 Blender 应用布尔修改器一样）。两个网格都应是封闭实体。
 - 每次操作都是一步撤销。基础形体第一次被编辑时会变成可编辑网格（尺寸滑块随之消失），修改器（镜像、阵列、细分）保持在上面实时生效；带骨骼的模型不能在这里改网格。
 
 所有工具都是普通命令，网页 JS、CLI 和 MCP 都能调用。元素用索引指定：`vertices: [3, 7]`、`edges: [[3, 7]]`、`faces: [0, 4]`，`mesh.editData` 返回顶点、面和边列表。每个工具都会返回 `selection`，也就是操作之后应该选中的元素（新索引），可以直接接着用：
@@ -214,7 +216,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 积木摆放 | `prefab.create`（`size` 拉伸到指定尺寸） `prefab.list` `entity.place`（`ray` 落到射线击中处 / `on` 放到某物顶上 / `nextTo`+`side`(+`view` 按镜头左右) 并排 / 不带参数时落到正下方）`entity.moveTo` `entity.rotate` `entity.face` `entity.bounds` |
 | 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
-| 网格编辑 | `mesh.editData` `mesh.makeEditable` `mesh.select`（loop / ring / faceLoop / linked / more / all） `mesh.transformElements` `mesh.extrude` `mesh.inset` `mesh.bevel` `mesh.loopCut` `mesh.subdivideFaces` `mesh.connect` `mesh.merge` `mesh.mergeByDistance` `mesh.fill` `mesh.flipNormals` `mesh.deleteElements` |
+| 网格编辑 | `mesh.editData` `mesh.makeEditable` `mesh.select`（loop / ring / faceLoop / linked / more / all） `mesh.transformElements` `mesh.extrude` `mesh.inset` `mesh.bevel` `mesh.loopCut` `mesh.subdivideFaces` `mesh.connect` `mesh.merge` `mesh.mergeByDistance` `mesh.fill` `mesh.flipNormals` `mesh.deleteElements` `mesh.bridge` `mesh.edgeSlide` `mesh.bisect`（平面切割，可删除一侧） `mesh.boolean`（union / difference / intersect） |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
 | 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
 | 模型 | `model.import` `model.export` |
@@ -244,7 +246,7 @@ cargo run -p shotstage-app [scene.json]          # 原生编辑器
 - **M2 镜头与时间线**：时间线 UI（关键帧拖拽、曲线）、相机支架（轨道 / 摇臂）、更多命名运镜
 - **M3 导出**：离屏逐帧渲染，导出首尾帧、mp4、深度 / 法线 / OpenPose / ID 序列，以及导出包
 - **M4 Agent**：`render_frame` 返回图片、MCP 实时桥（agent 驱动用户打开的网页编辑器）、权限分级
-- **网格编辑**：点 / 边 / 面编辑模式、挤出、内插、倒角、环切已完成；下一步是边滑动、刀切、桥接、布尔运算、减面
+- **网格编辑**：点 / 边 / 面编辑模式、挤出、内插、倒角、环切、边滑移、刀切、桥接、布尔运算已完成；下一步是减面、按曲面切的刀具
 
 ## License
 

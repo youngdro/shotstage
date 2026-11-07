@@ -4,6 +4,7 @@
 //! logic runs in the web editor (wasm), the CLI and the headless MCP server.
 
 pub mod camera;
+pub mod csg;
 pub mod eval;
 pub mod image;
 pub mod light;

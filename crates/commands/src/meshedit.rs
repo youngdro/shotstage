@@ -20,8 +20,9 @@ use glam::Vec3;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use shotstage_core::meshedit::{self as me, DeleteMode, Elements, MergeAt, Offset};
-use shotstage_core::{EntityKind, Mesh, MeshSource, Scene};
+use shotstage_core::csg::{self, BoolOp};
+use shotstage_core::meshedit::{self as me, ClearSide, DeleteMode, Elements, MergeAt, Offset};
+use shotstage_core::{EntityKind, Mesh, MeshSource, Scene, mesh::evaluate_mesh};
 
 use crate::builtin::finite3;
 use crate::{CmdResult, Command, CommandError, command};
@@ -252,6 +253,62 @@ struct EditDataParams {
     face_info: Option<bool>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SlideParams {
+    id: String,
+    #[serde(flatten)]
+    sel: Sel,
+    /// -1..1: positive slides toward side A (left of the loop as it runs), negative toward
+    /// side B; 1 reaches the neighbouring loop.
+    factor: f32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BisectParams {
+    id: String,
+    #[serde(flatten)]
+    sel: Sel,
+    /// A point on the cutting plane, mesh space.
+    point: [f32; 3],
+    /// The plane's normal, mesh space.
+    normal: [f32; 3],
+    /// Remove one side afterwards: `front` (where the normal points) or `back`. Default `none`.
+    clear: Option<ClearSide>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BooleanParams {
+    /// The mesh that changes.
+    id: String,
+    /// The other mesh (with its modifiers, where it is placed in the scene).
+    with: String,
+    /// `union`, `difference` (default: carve `with` out of `id`) or `intersect`.
+    operation: Option<BoolOp>,
+    /// Hide the other mesh afterwards, like applying Blender's boolean modifier. Default true.
+    hide_other: Option<bool>,
+}
+
+fn boolean(s: &mut Scene, p: BooleanParams) -> CmdResult<Value> {
+    if p.id == p.with {
+        return Err(CommandError::invalid("pick two different meshes"));
+    }
+    let a = edit_mesh(s, &p.id)?;
+    let b = match &s.get(&p.with)?.kind {
+        EntityKind::Mesh { source, modifiers, .. } => evaluate_mesh(source, modifiers)?,
+        _ => return Err(CommandError::new("failed", format!("entity `{}` is not a mesh", p.with))),
+    };
+    let b_to_a = s.world_matrix(&p.id)?.inverse() * s.world_matrix(&p.with)?;
+    let out = csg::boolean(&a, &b, b_to_a, p.operation.unwrap_or_default())?;
+    store(s, &p.id, out.clone())?;
+    if p.hide_other.unwrap_or(true) {
+        s.get_mut(&p.with)?.visible = false;
+    }
+    Ok(result(&out, &Elements::default()))
+}
+
 fn opt3(v: Option<[f32; 3]>, what: &str, default: Vec3) -> CmdResult<Vec3> {
     v.map(|v| finite3(v, what)).transpose().map(|v| v.unwrap_or(default))
 }
@@ -355,6 +412,18 @@ pub fn commands() -> Vec<Command> {
         |s, p| { let sel = p.sel.elements(); edit(s, &p.id, |m| me::fill(m, &sel)) }),
         command!("mesh.flipNormals", "Turn selected faces (all if none given) inside out.", mutates: true, SelParams,
         |s, p| { let sel = p.sel.elements(); edit(s, &p.id, |m| me::flip(m, &sel)) }),
+        command!("mesh.bridge", "Join two border edge loops (or two selected faces / regions, which are removed first) with a strip of faces (Blender Bridge Edge Loops). Selects the new faces.", mutates: true, SelParams,
+        |s, p| { let sel = p.sel.elements(); edit(s, &p.id, |m| me::bridge(m, &sel)) }),
+        command!("mesh.edgeSlide", "Slide selected edges along their neighbouring edges (Blender GG): factor -1..1.", mutates: true, SlideParams,
+        |s, p| { let sel = p.sel.elements(); edit(s, &p.id, |m| me::edge_slide(m, &sel, p.factor)) }),
+        command!("mesh.bisect", "Cut faces along a plane (the selected faces, or all): the knife tool uses this. Optionally remove one side. Selects the new edges.", mutates: true, BisectParams,
+        |s, p| {
+            let point = finite3(p.point, "point")?;
+            let normal = finite3(p.normal, "normal")?;
+            let sel = p.sel.elements();
+            edit(s, &p.id, |m| me::bisect(m, &sel, point, normal, p.clear.unwrap_or_default()))
+        }),
+        command!("mesh.boolean", "Combine a mesh with another: union, difference (carve `with` out) or intersect. Both should be closed solids. The other mesh is hidden unless hideOther is false.", mutates: true, BooleanParams, boolean),
     ]
 }
 
@@ -363,6 +432,48 @@ mod tests {
     use serde_json::json;
 
     use crate::Session;
+
+    #[test]
+    fn bridge_slide_bisect_boolean() {
+        let mut s = Session::default();
+        s.dispatch(
+            "entity.create",
+            json!({"id": "box", "type": "mesh", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        let cut = s.dispatch("mesh.loopCut", json!({"id": "box", "edge": [0, 4]})).unwrap().result;
+        let lp = cut["selection"]["edges"].clone();
+        s.dispatch("mesh.edgeSlide", json!({"id": "box", "edges": lp, "factor": 0.5})).unwrap();
+        let b = s
+            .dispatch("mesh.bisect", json!({"id": "box", "point": [0, 0, 0], "normal": [1, 0, 0], "clear": "front"}))
+            .unwrap()
+            .result;
+        assert!(!b["selection"]["edges"].as_array().unwrap().is_empty());
+        let d = s.dispatch("mesh.editData", json!({"id": "box"})).unwrap().result;
+        assert!(d["positions"].as_array().unwrap().iter().all(|p| p[0].as_f64().unwrap() <= 1e-5));
+        // carve a cylinder out of a fresh box
+        s.dispatch(
+            "entity.create",
+            json!({"id": "a", "type": "mesh", "primitive": {"shape": "cube", "size": [2, 2, 2]}}),
+        )
+        .unwrap();
+        s.dispatch(
+            "entity.create",
+            json!({"id": "rod", "type": "mesh", "primitive": {"shape": "cylinder", "radius": 0.3, "height": 4, "segments": 12}}),
+        )
+        .unwrap();
+        let r = s.dispatch("mesh.boolean", json!({"id": "a", "with": "rod"})).unwrap().result;
+        assert!(r["faces"].as_u64().unwrap() > 6);
+        assert!(!s.scene().get("rod").unwrap().visible);
+        assert!(s.dispatch("mesh.boolean", json!({"id": "a", "with": "a"})).is_err());
+        // a single face has only one border loop: nothing to bridge to
+        s.dispatch(
+            "entity.create",
+            json!({"id": "t", "type": "mesh", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        assert!(s.dispatch("mesh.bridge", json!({"id": "t", "faces": [0]})).is_err());
+    }
 
     #[test]
     fn edit_a_box_through_commands() {

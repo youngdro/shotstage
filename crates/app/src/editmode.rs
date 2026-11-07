@@ -1,6 +1,7 @@
 //! Mesh edit mode in the viewport, Blender style: Tab on a mesh, then pick vertices, edges or
 //! faces (1 / 2 / 3), and grab (G), rotate (R), scale (S), extrude (E), inset (I), bevel
-//! (Ctrl+B), loop cut (Ctrl+R or C), fill (F), connect (J), merge (M), delete (X)...
+//! (Ctrl+B), loop cut (Ctrl+R or C), edge slide (G G), knife (K), fill (F), connect (J), merge
+//! (M), delete (X)...
 //!
 //! Interactive tools follow the pointer and re-run the real `mesh.*` command each time their
 //! amount changes (undoing the previous try first), so the history shows "mesh.bevel" and an
@@ -84,6 +85,10 @@ pub(super) enum Tool {
     Inset,
     Bevel,
     LoopCut,
+    /// Edge slide (G twice).
+    Slide,
+    /// Draw a line to cut along (K).
+    Knife,
 }
 
 impl Tool {
@@ -96,6 +101,8 @@ impl Tool {
             Tool::Inset => "Inset",
             Tool::Bevel => "Bevel",
             Tool::LoopCut => "Loop cut",
+            Tool::Slide => "Edge slide",
+            Tool::Knife => "Knife",
         }
     }
 }
@@ -128,6 +135,13 @@ pub(super) struct Modal {
     preview: Vec<(Vec3, Vec3)>,
     /// Amount shown in the hint.
     shown: String,
+    /// The pointer as last seen.
+    pointer: Pos2,
+    /// Knife: where the line starts (after the first click).
+    knife: Option<Pos2>,
+    /// Edge slide: one vertex and where it goes on side A and side B (world), to read the
+    /// pointer against.
+    rail: Option<(Vec3, Vec3, Option<Vec3>)>,
 }
 
 /// Amounts used by the panel's tool buttons.
@@ -144,6 +158,32 @@ impl Default for EditAmounts {
     fn default() -> Self {
         Self { extrude: 0.2, inset: 0.05, depth: 0.0, bevel: 0.05, segments: 1, cuts: 1 }
     }
+}
+
+/// Whether the screen segment `a`–`b` crosses or lies in the polygon.
+fn segment_meets_polygon(a: Pos2, b: Pos2, poly: &[Pos2]) -> bool {
+    let cross = |o: Pos2, p: Pos2, q: Pos2| (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x);
+    let n = poly.len();
+    for i in 0..n {
+        let (p, q) = (poly[i], poly[(i + 1) % n]);
+        let (d1, d2) = (cross(a, b, p), cross(a, b, q));
+        let (d3, d4) = (cross(p, q, a), cross(p, q, b));
+        if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
+            return true;
+        }
+    }
+    // both ends inside (a short line within one face)
+    let inside = |pt: Pos2| {
+        let mut c = false;
+        for i in 0..n {
+            let (p, q) = (poly[i], poly[(i + 1) % n]);
+            if (p.y > pt.y) != (q.y > pt.y) && pt.x < p.x + (pt.y - p.y) / (q.y - p.y) * (q.x - p.x) {
+                c = !c;
+            }
+        }
+        c
+    };
+    inside(a) || inside(b)
 }
 
 fn plane_hit(o: Vec3, d: Vec3, p: Vec3, n: Vec3) -> Option<Vec3> {
@@ -641,7 +681,7 @@ impl EditorApp {
         let scene = self.scene();
         let f = self.frame();
         let Some(cage) = self.edit_cage(&scene, &st.id, f, rect, &view, self.edit_xray) else { return };
-        if tool != Tool::LoopCut && st.selection.is_empty() {
+        if !matches!(tool, Tool::LoopCut | Tool::Knife) && st.selection.is_empty() {
             self.toast(format!("{}: select something first", tool.name()));
             return;
         }
@@ -650,6 +690,36 @@ impl EditorApp {
         let n = (view.view.inverse().w_axis.truncate() - center).normalize_or_zero();
         let start_hit = plane_hit(o, d, center, n).unwrap_or(center);
         let base = self.edit_cache.as_ref().map(|c| c.mesh.clone()).unwrap_or_default();
+        let mut rail = None;
+        if tool == Tool::Slide {
+            let rails = match me::slide_rails(&base, &st.selection) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.toast(format!("Edge slide: {e}"));
+                    return;
+                }
+            };
+            // read the pointer against the rail of the vertex nearest to it
+            let w = |v: u32| cage.world.transform_point3(Vec3::from_array(base.positions[v as usize]));
+            let best = rails
+                .iter()
+                .filter_map(|(&v, r)| {
+                    let a = r[0].or(r[1])?;
+                    let b = if r[0].is_some() { r[1] } else { None };
+                    let d = cage.pts.get(v as usize).copied().flatten().map(|p| (p - pointer).length()).unwrap_or(1e9);
+                    Some((d, v, a, b, r[0].is_none()))
+                })
+                .min_by(|x, y| x.0.total_cmp(&y.0));
+            match best {
+                // a vertex with only side B: read the pointer along B, negated
+                Some((_, v, a, _, true)) => rail = Some((w(v), w(v), Some(w(a)))),
+                Some((_, v, a, b, false)) => rail = Some((w(v), w(a), b.map(w))),
+                None => {
+                    self.toast("Edge slide: no neighbouring edges to slide along");
+                    return;
+                }
+            }
+        }
         self.edit_modal = Some(Modal {
             tool,
             base,
@@ -671,6 +741,9 @@ impl EditorApp {
             hover_edge: None,
             preview: Vec::new(),
             shown: String::new(),
+            pointer,
+            knife: None,
+            rail,
         });
     }
 
@@ -686,7 +759,17 @@ impl EditorApp {
 
     /// Keep the preview as the result.
     pub(super) fn edit_confirm(&mut self) {
-        let Some(m) = self.edit_modal.take() else { return };
+        let Some(mut m) = self.edit_modal.take() else { return };
+        if m.tool == Tool::Knife {
+            match m.knife {
+                None => {
+                    m.knife = Some(m.pointer);
+                    self.edit_modal = Some(m);
+                }
+                Some(a) => self.edit_knife(a, m.pointer),
+            }
+            return;
+        }
         if m.tool == Tool::LoopCut {
             if let Some(e) = m.hover_edge {
                 let cuts = m.segments;
@@ -713,6 +796,7 @@ impl EditorApp {
     ) {
         let Some(st) = self.edit_state() else { return };
         let Some(mut m) = self.edit_modal.clone() else { return };
+        m.pointer = pointer;
         let (o, d) = ray_at(rect, view, pointer);
         let world = cage.world;
         let inv = world.inverse();
@@ -870,6 +954,33 @@ impl EditorApp {
                 m.shown = format!("{} cut{} (scroll for more)", m.segments, if m.segments == 1 { "" } else { "s" });
                 None
             }
+            Tool::Slide => {
+                let (v, a, b) = m.rail.unwrap_or((m.center, m.center, None));
+                let along = |t: Vec3| -> Option<f32> {
+                    let (sv, st) = (project(rect, view, v)?, project(rect, view, t)?);
+                    let dir = st - sv;
+                    (dir.length_sq() > 1.0).then(|| (pointer - m.start).dot(dir) / dir.length_sq())
+                };
+                let mut f = if a == v { 0.0 } else { along(a).unwrap_or(0.0) };
+                if f <= 0.0
+                    && let Some(b) = b
+                    && let Some(g) = along(b)
+                    && g > 0.0
+                {
+                    f = -g;
+                }
+                let f = typed.unwrap_or(f).clamp(-1.0, 1.0);
+                m.shown = format!("{:.0}%", f * 100.0);
+                (f.abs() > 1e-4).then(|| ("mesh.edgeSlide".to_string(), sel_json(json!({"factor": f}))))
+            }
+            Tool::Knife => {
+                m.shown = if m.knife.is_none() {
+                    "click where the cut starts".into()
+                } else {
+                    "click where it ends (cuts the faces the line crosses, or the selected faces)".into()
+                };
+                None
+            }
         };
         if m.tool != Tool::LoopCut && want != m.tried {
             if m.changed {
@@ -976,6 +1087,11 @@ impl EditorApp {
         }
         // loop cut preview
         if let Some(m) = &self.edit_modal {
+            if let Some(a) = m.knife {
+                let p = painter.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(m.pointer);
+                painter.line_segment([a, p], (2.0, Color32::from_rgb(255, 230, 60)));
+                painter.circle_filled(a, 3.5, Color32::from_rgb(255, 230, 60));
+            }
             for (a, b) in &m.preview {
                 if let (Some(a), Some(b)) = (project(rect, view, *a), project(rect, view, *b)) {
                     painter.line_segment([a, b], (2.0, Color32::from_rgb(255, 230, 60)));
@@ -1031,8 +1147,8 @@ impl EditorApp {
                 let how = if m.release_confirms { "release to apply" } else { "click or Enter to apply" };
                 let extra = match m.tool {
                     Tool::Grab | Tool::Rotate | Tool::Scale => " · X Y Z lock an axis · type a number",
-                    Tool::Extrude | Tool::Inset | Tool::Bevel => " · type a number",
-                    Tool::LoopCut => "",
+                    Tool::Extrude | Tool::Inset | Tool::Bevel | Tool::Slide => " · type a number",
+                    Tool::LoopCut | Tool::Knife => "",
                 };
                 format!("{}{axis}: {}{typed} · {how}, Esc / right-click to cancel{extra}", m.tool.name(), m.shown)
             }
@@ -1108,6 +1224,13 @@ impl EditorApp {
         let pointer = pointer.unwrap_or_default();
         // keys while a tool runs
         if self.edit_modal.is_some() {
+            let gg = ui.input(|i| i.key_pressed(egui::Key::G) && !i.modifiers.any());
+            if gg && self.edit_modal.as_ref().is_some_and(|m| m.tool == Tool::Grab) {
+                // G twice: slide the edges along their neighbours instead
+                self.edit_cancel();
+                self.edit_start(Tool::Slide, pointer, None, false);
+                return true;
+            }
             let (esc, enter, axis, typed, back, undo) = ui.input(|i| {
                 let axis = [egui::Key::X, egui::Key::Y, egui::Key::Z].iter().position(|k| i.key_pressed(*k));
                 let mut typed = String::new();
@@ -1214,6 +1337,9 @@ impl EditorApp {
         // (Cmd+R reloads the page in a browser: Ctrl+R on a Mac, or C anywhere)
         if press(egui::Key::R).is_some_and(|m| m.ctrl) || kp(egui::Key::C) {
             self.edit_start(Tool::LoopCut, pointer, None, false);
+        }
+        if kp(egui::Key::K) {
+            self.edit_start(Tool::Knife, pointer, None, false);
         }
         if kp(egui::Key::F) {
             self.edit_apply("mesh.fill", json!({}));
@@ -1353,6 +1479,27 @@ impl EditorApp {
             ui.end_row();
         });
         ui.horizontal_wrapped(|ui| {
+            if ui.button("Edge slide").on_hover_text("G G: slide the selected edges along their neighbours").clicked() {
+                start = Some(Tool::Slide);
+            }
+            if ui
+                .button("Knife")
+                .on_hover_text(
+                    "K: click two points to cut along the line (the faces it crosses, or the selected faces)",
+                )
+                .clicked()
+            {
+                start = Some(Tool::Knife);
+            }
+            if ui
+                .button("Bridge")
+                .on_hover_text("Join two border loops with faces; with two faces selected, makes a tunnel between them")
+                .clicked()
+            {
+                run = Some(("mesh.bridge", json!({})));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
             for (label, cmd, tip) in [
                 ("Subdivide", "mesh.subdivideFaces", "Split the selected faces into smaller quads"),
                 ("Connect", "mesh.connect", "J: a new edge between two selected vertices of a face"),
@@ -1385,8 +1532,107 @@ impl EditorApp {
         }
         ui.add_space(2.0);
         ui.weak(
-            "Click to pick · Shift+click add · Alt+click loop · Cmd/Ctrl+drag box · drag a selection to move it · G R S move, rotate, scale (X Y Z lock, type a number) · double-click or L linked",
+            "Click to pick · Shift+click add · Alt+click loop · Cmd/Ctrl+drag box · drag a selection to move it · G R S move, rotate, scale (X Y Z lock, type a number) · G G edge slide · K knife · double-click or L linked",
         );
+    }
+
+    /// Cut along the screen line `a`–`b`: the plane through the eye and the line, on the
+    /// selected faces or else the visible faces the line crosses.
+    fn edit_knife(&mut self, a: Pos2, b: Pos2) {
+        let Some(st) = self.edit_state() else { return };
+        let Some((rect, view)) = self.last_view else { return };
+        if (b - a).length() < 4.0 {
+            self.toast("Knife: draw a longer line");
+            return;
+        }
+        let scene = self.scene();
+        let Some(cage) = self.edit_cage(&scene, &st.id, self.frame(), rect, &view, self.edit_xray) else { return };
+        let (o0, d0) = ray_at(rect, &view, a);
+        let (o1, d1) = ray_at(rect, &view, b);
+        // the plane holding both rays (they share the eye, or are parallel in an ortho view)
+        let n_world = d0.cross(o1 + d1 - o0);
+        if n_world.length_squared() < 1e-12 {
+            return;
+        }
+        let world = cage.world;
+        let n_local = glam::Mat3::from_mat4(world).transpose() * n_world;
+        let p_local = world.inverse().transform_point3(o0);
+        let faces: Vec<u32> = {
+            let Some(c) = self.cache_for(&cage) else { return };
+            let picked = me::flush_with(&c.mesh, &c.topo, &st.selection).map(|f| f.faces).unwrap_or_default();
+            if !picked.is_empty() {
+                picked.into_iter().collect()
+            } else {
+                (0..c.mesh.faces.len() as u32)
+                    .filter(|&f| self.edit_xray || cage.face_vis.get(f as usize).copied().unwrap_or(false))
+                    .filter(|&f| {
+                        let poly: Option<Vec<Pos2>> = c.mesh.faces[f as usize]
+                            .iter()
+                            .map(|&v| cage.pts.get(v as usize).copied().flatten())
+                            .collect();
+                        poly.is_some_and(|p| segment_meets_polygon(a, b, &p))
+                    })
+                    .collect()
+            }
+        };
+        if faces.is_empty() {
+            self.toast("Knife: draw the line across the mesh");
+            return;
+        }
+        self.edit_apply(
+            "mesh.bisect",
+            json!({"vertices": [], "edges": [], "faces": faces, "point": p_local.to_array(), "normal": n_local.to_array()}),
+        );
+    }
+
+    /// Combine this mesh with another one: union, difference or intersect (`mesh.boolean`).
+    pub(super) fn boolean_panel(&mut self, ui: &mut egui::Ui, id: &str) {
+        use shotstage_core::csg::BoolOp;
+        let scene = self.scene();
+        let others: Vec<(String, String)> = scene
+            .entities
+            .iter()
+            .filter(|e| e.id != id && matches!(e.kind, shotstage_core::EntityKind::Mesh { .. }))
+            .map(|e| (e.id.clone(), e.name.clone()))
+            .collect();
+        if others.is_empty() {
+            ui.weak("Add a second mesh to cut with or merge in.");
+            return;
+        }
+        if self.bool_with.as_ref().is_none_or(|w| !others.iter().any(|(i, _)| i == w)) {
+            self.bool_with = Some(others[0].0.clone());
+        }
+        let with = self.bool_with.clone().unwrap_or_default();
+        let label = others.iter().find(|(i, _)| *i == with).map(|(_, n)| n.clone()).unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("With");
+            egui::ComboBox::from_id_salt("bool_with").selected_text(label).show_ui(ui, |ui| {
+                for (i, n) in &others {
+                    ui.selectable_value(&mut self.bool_with, Some(i.clone()), n);
+                }
+            });
+        });
+        ui.horizontal_wrapped(|ui| {
+            for (op, name, tip) in [
+                (BoolOp::Difference, "Difference", "Carve the other mesh out of this one"),
+                (BoolOp::Union, "Union", "Merge both into one solid"),
+                (BoolOp::Intersect, "Intersect", "Keep only where they overlap"),
+            ] {
+                ui.selectable_value(&mut self.bool_op, op, name).on_hover_text(tip);
+            }
+        });
+        if ui
+            .button("Apply")
+            .on_hover_text("Changes this mesh and hides the other one. Both should be closed solids.")
+            .clicked()
+        {
+            let op = serde_json::to_value(self.bool_op).unwrap_or(json!("difference"));
+            let req = json!({"command": "mesh.boolean", "params": {"id": id, "with": with, "operation": op}});
+            match hub::dispatch(&self.hub, req) {
+                Ok(o) => self.toast(format!("Boolean done: {} faces", o.result["faces"])),
+                Err(e) => self.toast(e.message),
+            }
+        }
     }
 
     fn edit_first_edge(&self) -> Option<[u32; 2]> {

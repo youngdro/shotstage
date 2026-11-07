@@ -812,6 +812,9 @@ pub struct EditorApp {
     edit_swallow: bool,
     /// Frames left to clear the keyboard focus a Tab gave to some button.
     edit_unfocus: u8,
+    /// Boolean panel: the other mesh and the operation.
+    bool_with: Option<String>,
+    bool_op: shotstage_core::csg::BoolOp,
 }
 
 impl EditorApp {
@@ -899,6 +902,8 @@ impl EditorApp {
             edit_hover: None,
             edit_swallow: false,
             edit_unfocus: 0,
+            bool_with: None,
+            bool_op: Default::default(),
         }
     }
 
@@ -2633,6 +2638,7 @@ impl EditorApp {
             EntityKind::Mesh { modifiers, color, source } => {
                 if !matches!(source, shotstage_core::MeshSource::Skinned { .. }) {
                     section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
+                    section(ui, "Boolean", false, |ui| self.boolean_panel(ui, &id));
                 }
                 section(ui, "Mesh", true, |ui| {
                     let mut c = *color;
