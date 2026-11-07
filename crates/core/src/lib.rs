@@ -5,6 +5,7 @@
 
 pub mod camera;
 pub mod eval;
+pub mod human;
 pub mod image;
 pub mod light;
 pub mod mesh;
@@ -19,7 +20,7 @@ pub use image::{Asset, ImageData};
 pub use light::{LightData, LightKind};
 pub use mesh::{Mesh, MeshSource, Modifier, Primitive, Skin, TriMesh};
 pub use scene::{CameraReference, Entity, EntityKind, Scene, Transform};
-pub use timeline::{Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
+pub use timeline::{ExpressionMix, Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
 
 /// Errors produced by scene operations. Messages are written for agents as well as people.
 #[derive(Debug, thiserror::Error, PartialEq)]

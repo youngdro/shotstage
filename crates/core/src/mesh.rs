@@ -76,6 +76,15 @@ pub enum MeshSource {
     /// Imported geometry bound to a skeleton: `mesh` is the rest pose, and every vertex follows
     /// up to four joint entities (see [`crate::eval::posed_mesh`]).
     Skinned { mesh: Mesh, skin: Skin },
+    /// One part of a realistic person (MakeHuman / MPFB), generated from its body parameters and
+    /// bent by `joints` (one entity id per bone of [`crate::human::skeleton`]).
+    Human {
+        body: crate::human::HumanBody,
+        part: crate::human::HumanPart,
+        #[serde(default)]
+        outfit: crate::human::HumanOutfit,
+        joints: Vec<String>,
+    },
 }
 
 /// How a skinned mesh follows its joints (glTF skinning).
@@ -345,6 +354,13 @@ impl MeshSource {
                 mesh.validate()?;
                 skin.validate(mesh.positions.len())?;
                 Ok(mesh.clone())
+            }
+            MeshSource::Human { body, part, outfit, .. } => {
+                body.validate()?;
+                outfit.validate()?;
+                let rest = crate::human::rest(body);
+                let mats = crate::human::skin_matrices(&rest, Mat4::IDENTITY, &[]);
+                Ok(crate::human::part_mesh(body, *part, outfit, &mats))
             }
         }
     }

@@ -12,7 +12,7 @@
 
 ## 从模板开始
 
-场景为空时视口中间会出现模板卡片，顶栏 **Templates** 里也能随时选：生鲜通道、产品拍摄台、白底产品图（主镜头环绕 + 细节推近）、俯拍平铺（flat lay）、双人访谈、街角、咖啡馆、空摄影棚。每个模板都包含人物、道具、灯光、相机、镜头和运镜，全部是普通的可编辑内容，选模板只算一步撤销。命令：`scene.template`、`scene.templates`。
+场景为空时视口中间会出现模板卡片，顶栏 **Templates** 里也能随时选：生鲜通道、产品拍摄台、白底产品图（主镜头环绕 + 细节推近）、俯拍平铺（flat lay）、双人访谈、街角、收银台、咖啡馆、空摄影棚。每个模板都包含人物、道具、灯光、相机、镜头和运镜，全部是普通的可编辑内容，选模板只算一步撤销。命令：`scene.template`、`scene.templates`。
 
 左侧素材都有实时渲染的缩略图。相机属性里可以一键切换画幅（16:9、9:16 竖屏、1:1、4:5、4:3、2.39:1），**Roll** 做荷兰角（倾斜地平线），**Match current view** 把相机放到你当前的视角，**Safe areas** 在镜头视角里显示动作 / 字幕安全框；选中物体时会显示它的尺寸。
 
@@ -62,6 +62,22 @@
 
 对应的命令是 `pose.set`（预设和/或关节角度）、`pose.aim`（让某段肢体指向一个点）、`person.lookAt`（转头看向相机或某处，人物面板里有 **Look at camera**）、`pose.get`、`pose.list`、`person.setHair`。
 
+### 真人模型
+
+**People** 分类里有真人模型：男人、女人、男孩、女孩、老年男性、老年女性、运动员、顾客、店员（系围裙）、收银员（制服 polo 衫）、熟食柜 / 厨师（白衣白围裙）、休闲装年轻人。它们基于 MakeHuman / MPFB 的人体（CC0 素材，见 `crates/core/assets/README.md`），是连续皮肤的真实人体，带 50 多根骨骼（脊柱三节、锁骨、每根手指三节）。
+
+- **Body**：性别、年龄、胖瘦、肌肉、身高滑块，人物原地变形，姿势保持不变。
+- **Clothes**：上衣（袖长可调，0 为背心）、裤子（裤长可调，短裤到长裤）、鞋子、围裙，各自可以换颜色，也能换肤色和瞳色。衣服沿着身体裁出干净的领口、袖口和裤脚。
+- **Hair**：短发、长发、波波头、马尾、丸子头、光头，长度和颜色可调。
+- **Face**：18 种表情（微笑、大笑、惊讶、难过、生气、思考、说话、闭眼、眨眼……），强度可调，也可以直接设置 34 个面部动作单元。表情可以打关键帧：动画模式下（或已有表情关键帧时）点表情就会在当前帧记一帧，两帧之间脸部平滑过渡；**◆ Key** 也会带上表情。人物动作“说话”会让嘴跟着动，“挥手”会微笑，新增的“大笑”动作会笑出声的样子。命令 `person.setExpression` 加 `keyframeAt`，或 `keyframe.set` 用 `property: "expression"`。
+- **Hands**：放松、张开、握拳、握持、捏取、指向、点赞、比耶、OK 等手势，可以只设左手或右手。
+- 姿势库多了 23 个日常 / 零售场景的姿势：叉腰、思考、试吃、喝东西、看手机、自拍、挑选商品、看高处货架、搬箱子、拎袋子、收银、切菜、靠柜台、讲解、耸肩、鼓掌、欢呼、伸懒腰、捂脸、鞠躬、单膝跪、席地而坐、背身走开。面板上先显示常用姿势，其余在 **More poses ▾** 里。积木人偶和真人共用同一套姿势与关节名。
+
+- 真人拿东西（**Hold in hand** / `entity.attach`）时，道具会贴在掌心，手指自动握住（小东西用捏的手势）。
+- 零售互动姿势：递东西、接东西、迎客、推荐商品、扫码收银、付款、装袋、上货、端详商品、排队等候。新增 **Checkout** 模板：收银员扫码聊天，顾客用手机付款。
+
+命令：`person.setBody`、`person.setOutfit`、`person.setExpression`、`person.expressions`、`pose.hand`、`person.get`。
+
 每一次拖动只算一步撤销，背后调用的是 `entity.place`、`entity.moveTo`、`entity.rotate`、`prefab.create`、`camera.frame` 这些命令，agent 可以用完全相同的方式操作。
 
 ## 导入导出模型
@@ -101,7 +117,7 @@
 - **一键动画（右侧 Animate）**，都从当前帧开始，生成普通的可编辑关键帧，一步撤销：
   - 运镜（选中相机，围绕最近选过的物体）：推 / 拉、推近、拉远揭示、横移、升降、摇、俯仰、左右环绕、摇臂升降、希区柯克变焦、变焦、甩镜、跟拍、手持晃动、无人机飞越、360° 环绕。
   - 物体：转台旋转、弹跳、悬浮、落入、滑入、弹出、摇摆、英雄登场，以及沿路径移动（`points`）。
-  - 人物：走路、挥手、捡东西、左右张望、点头、坐下、站起。
+  - 人物：走路、挥手、捡东西、左右张望、点头、大笑、坐下、站起。
   - 可以调时长和强度，也可以搜索。命令：`motion.apply`、`motion.list`，以及 `keyframe.move`、`keyframe.setInterp`。
 - **时间轴缩放**：在时间轴上双指捏合或 Cmd/Ctrl+滚轮放大（以指针处为中心），左右滑动平移；播放时会跟着播放头翻页；**Fit**（或双击时间尺）回到整条时间轴。
 - **整段调时间**：在时间轴上拖动一行关键帧之间的横条，整段动画一起平移；右键这一行可以 从播放头开始 / 变快 / 变慢。都是一步撤销。命令 `keyframe.retime`（`offset` 平移、`scale` 变速、`from`/`to` 限定范围）。
@@ -194,7 +210,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
-| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
+| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `pose.hand` `person.setHair` `person.setBody` `person.setOutfit` `person.setExpression` `person.expressions` `person.get` |
 | 模型 | `model.import` `model.export` |
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
