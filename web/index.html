@@ -10,19 +10,34 @@
     header { padding: 6px 12px; border-bottom: 1px solid #333; }
     /* The editor fills whatever container you mount it in. */
     #stage { position: relative; min-height: 0; }
+    #bridge { float: right; color: #888; }
+    #bridge.connected { color: #6c6; }
   </style>
 </head>
 <body>
   <div id="app">
-    <header>shotstage demo host page · the editor below is mounted into <code>#stage</code>; try <code>shotstage.dispatch(...)</code> or <code>await shotstage.snapshot()</code> in the console</header>
+    <header><span id="bridge"></span>shotstage demo host page · the editor below is mounted into <code>#stage</code>; try <code>shotstage.dispatch(...)</code> or <code>await shotstage.snapshot()</code> in the console</header>
     <div id="stage"></div>
   </div>
   <script type="module">
     import init, { mount } from "./pkg/shotstage_app.js";
+    import { connectBridge, findBridge } from "./bridge.js";
     await init();
     const editor = await mount("#stage", {});
     window.shotstage = editor;   // optional global for agents and the devtools console
 
+    // Opened by `shotstage mcp --live --web dist` (or with ?bridge=ws://...): an agent drives
+    // this editor, so start empty and let it bring its scene.
+    const bridgeUrl = await findBridge();
+    if (bridgeUrl) {
+      const badge = document.getElementById("bridge");
+      window.shotstageBridge = connectBridge(editor, bridgeUrl, {
+        onStatus: (s) => {
+          badge.textContent = s === "connected" ? "● agent connected" : s === "connecting" ? "○ connecting to agent…" : "○ agent disconnected";
+          badge.className = s;
+        },
+      });
+    } else {
     // A small starter scene, built through the same API agents use: real-size blocks that
     // rest on each other, and a camera framed by shot size instead of coordinates.
     editor.batch([
@@ -46,6 +61,7 @@
       { command: "camera.orbitMove", params: { id: "cam_a", target: "shopper", degrees: 30, start: 72, end: 119 } },
       { command: "shot.create", params: { camera: "cam_a", start: 0, end: 119, name: "push-in" } },
     ]);
+    }
     editor.on(ev => { if (ev.type === "change") console.debug("shotstage change", ev.revision); });
   </script>
 </body>

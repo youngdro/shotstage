@@ -11,20 +11,26 @@
 //! shotstage export set.fbx --scene shot.json     # glb, gltf, obj, stl; fbx through Blender
 //! shotstage storyboard --scene shot.json -o board/  # first / middle / last frame of every shot
 //! shotstage render --scene shot.json -o frames/ --pass clay,depth --video   # every frame
+//! shotstage mcp --scene shot.json --live --web dist   # drive the editor open in a browser
 //! ```
+//!
+//! Every subcommand goes through [`host::Host`], so the CLI, the JSON-lines server and the MCP
+//! server accept exactly the catalog that `shotstage commands` prints.
 
+mod bridge;
+mod docs;
+mod host;
 mod mcp;
 
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
-use shotstage_commands::snapshot::{SNAPSHOT_COMMAND, SnapshotPass, plan, result_json};
 use shotstage_commands::{Call, CommandError, Outcome, Session};
-use shotstage_core::Scene;
-use shotstage_render::{Headless, Pass, View};
+
+use crate::host::{Host, Local};
 
 #[derive(Parser)]
 #[command(
@@ -44,6 +50,9 @@ enum Cmd {
         /// Only ids and summaries.
         #[arg(long)]
         brief: bool,
+        /// The API reference as Markdown (docs/api.md is generated with this).
+        #[arg(long)]
+        markdown: bool,
     },
     /// Run one command and print its JSON result.
     Run {
@@ -65,11 +74,19 @@ enum Cmd {
     Serve {
         #[command(flatten)]
         scene: SceneArgs,
+        #[command(flatten)]
+        live: LiveArgs,
     },
     /// MCP server on stdio (for Claude, Cursor and other MCP clients).
     Mcp {
         #[command(flatten)]
         scene: SceneArgs,
+        #[command(flatten)]
+        live: LiveArgs,
+        /// Publish only the generic tools (command_list / command_run / command_batch and a few
+        /// essentials) instead of one tool per command, for clients with small tool budgets.
+        #[arg(long)]
+        compact: bool,
     },
     /// Render the view through a camera to a PNG file (needs a GPU or a software Vulkan driver).
     Snapshot {
@@ -152,6 +169,9 @@ enum Cmd {
         /// Also render the depth pass of every frame.
         #[arg(long)]
         depth: bool,
+        /// Also render the normal pass of every frame.
+        #[arg(long)]
+        normal: bool,
     },
     /// Export the scene (or some entities) to a model file; the format comes from the extension.
     Export {
@@ -166,69 +186,27 @@ enum Cmd {
     },
 }
 
-/// A shot name usable in a file name.
-fn compact_name(name: &str) -> String {
-    let s: String =
-        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(32).collect();
-    if s.is_empty() { "shot".into() } else { s }
-}
-
-fn format_of(path: &Path) -> Result<String, String> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-    shotstage_commands::model::ModelFormat::from_extension(&ext)
-        .map(|f| f.extension().to_string())
-        .ok_or_else(|| format!("unknown model format `.{ext}`: use glb, gltf, obj, stl, fbx or blend"))
+#[derive(clap::Args)]
+struct LiveArgs {
+    /// Drive an editor open in a browser: listen on 127.0.0.1 for it to connect (see --port,
+    /// --web). Until one connects, commands run on the local scene.
+    #[arg(long)]
+    live: bool,
+    /// Bridge port (0 picks a free one).
+    #[arg(long, default_value_t = 7777)]
+    port: u16,
+    /// Serve the built web editor (the dist/ folder) at http://127.0.0.1:<port>/; the page
+    /// connects to the bridge by itself.
+    #[arg(long)]
+    web: Option<PathBuf>,
+    /// Another page origin allowed to connect (localhost pages always are), e.g. https://my.app
+    #[arg(long)]
+    allow_origin: Vec<String>,
 }
 
 /// Drop null fields so optional params stay unset.
 fn compact(v: Value) -> Value {
     Value::Object(v.as_object().cloned().unwrap_or_default().into_iter().filter(|(_, v)| !v.is_null()).collect())
-}
-
-/// Lazily created GPU for `render.snapshot`.
-#[derive(Default)]
-pub(crate) struct Gpu(Option<Headless>);
-
-impl Gpu {
-    fn snapshot_png(&mut self, scene: &Scene, params: Value) -> Result<(Value, Vec<u8>), CommandError> {
-        let plan = plan(scene, params, None)?;
-        if self.0.is_none() {
-            self.0 = Some(Headless::new().map_err(|e| CommandError::new("unsupported", e))?);
-        }
-        let gpu = self.0.as_mut().expect("just set");
-        let pass = match plan.pass {
-            SnapshotPass::Clay => Pass::Clay,
-            SnapshotPass::Depth => Pass::Depth,
-            SnapshotPass::Normal => Pass::Normal,
-        };
-        let [depth_near, depth_far] = plan.depth_range.unwrap_or([0.0, 0.0]);
-        let view = View { view: plan.view, proj: plan.proj, depth_near, depth_far };
-        let png = gpu
-            .png(scene, plan.frame, view, pass, &plan.camera, (plan.width, plan.height))
-            .map_err(|e| CommandError::new("failed", e))?;
-        Ok((result_json(&plan, shotstage_render::base64(&png)), png))
-    }
-
-    /// Like `Session::dispatch`, but renders `render.snapshot` here.
-    pub(crate) fn dispatch(
-        &mut self,
-        session: &mut Session,
-        command: &str,
-        params: Value,
-    ) -> Result<Outcome, CommandError> {
-        if command == SNAPSHOT_COMMAND {
-            let (result, _) = self.snapshot_png(session.scene(), params)?;
-            return Ok(Outcome { result, revision: session.revision(), changed: false });
-        }
-        session.dispatch(command, params)
-    }
-
-    pub(crate) fn dispatch_json(&mut self, session: &mut Session, request: Value) -> Result<Outcome, CommandError> {
-        if request.get("command").and_then(Value::as_str) == Some(SNAPSHOT_COMMAND) {
-            return self.dispatch(session, SNAPSHOT_COMMAND, request.get("params").cloned().unwrap_or(json!({})));
-        }
-        session.dispatch_json(request)
-    }
 }
 
 #[derive(clap::Args)]
@@ -242,29 +220,38 @@ struct SceneArgs {
 }
 
 impl SceneArgs {
-    fn open(&self) -> Result<Session, String> {
+    fn session(&self) -> Result<Session, String> {
         let Some(path) = &self.scene else { return Ok(Session::default()) };
         if !path.exists() {
             return Ok(Session::default());
         }
-        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-        let scene: Scene = serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
-        Ok(Session::new(scene))
+        host::read_scene(path).map(Session::new).map_err(|e| e.message)
     }
 
-    fn save(&self, session: &Session) -> Result<(), String> {
-        match &self.scene {
-            Some(path) if !self.dry_run => save_scene(path, session.scene()),
-            _ => Ok(()),
+    /// A host over the local scene that writes changes back to the scene file.
+    fn host(&self) -> Result<Host, String> {
+        Ok(Host::new(Box::new(Local::new(self.session()?)), self.scene.clone(), !self.dry_run))
+    }
+
+    /// Like [`SceneArgs::host`], with the live bridge when asked for.
+    fn live_host(&self, live: &LiveArgs) -> Result<(Host, Option<Value>), String> {
+        if !live.live {
+            return Ok((self.host()?, None));
         }
+        let web = live.web.clone().or_else(|| std::env::var_os("SHOTSTAGE_WEB").map(PathBuf::from));
+        if let Some(w) = &web
+            && !w.join("index.html").exists()
+        {
+            return Err(format!("{} has no index.html: build it with scripts/build-web.sh", w.display()));
+        }
+        let b = bridge::Bridge::start(
+            Local::new(self.session()?),
+            bridge::Options { port: live.port, web, allow_origins: live.allow_origin.clone() },
+        )?;
+        let status = b.status();
+        eprintln!("shotstage: live bridge on {} ({})", b.url, status["howToConnect"].as_str().unwrap_or_default());
+        Ok((Host::new(Box::new(b), self.scene.clone(), !self.dry_run), Some(status)))
     }
-}
-
-pub(crate) fn save_scene(path: &Path, scene: &Scene) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(scene).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 fn read_arg(s: &str) -> Result<String, String> {
@@ -295,14 +282,37 @@ fn main() -> ExitCode {
     }
 }
 
+/// Print a result the way every subcommand does: `{ok, result, changed}` or `{ok: false, error}`.
+fn finish(r: Result<Outcome, CommandError>) -> ExitCode {
+    match r {
+        Ok(o) => {
+            print_json(&json!({ "ok": true, "result": o.result, "changed": o.changed }));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            print_json(&error_json(&e));
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn real_main() -> Result<ExitCode, String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Commands { brief } => {
+        Cmd::Commands { brief, markdown } => {
             let list = Session::default().list();
-            if brief {
+            if markdown {
+                print!("{}", docs::markdown(&list));
+            } else if brief {
                 for c in list {
-                    println!("{:<26} {}{}", c.id, c.summary, if c.mutates { "" } else { "  (query)" });
+                    let tag = if !c.needs.is_empty() {
+                        format!("  ({})", c.needs.join(", "))
+                    } else if !c.mutates {
+                        "  (query)".into()
+                    } else {
+                        String::new()
+                    };
+                    println!("{:<26} {}{tag}", c.id, c.summary);
                 }
             } else {
                 print_json(&json!(list));
@@ -310,268 +320,79 @@ fn real_main() -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Run { command, params, scene } => {
-            let mut session = scene.open()?;
             let params = match params {
                 Some(p) => serde_json::from_str(&read_arg(&p)?).map_err(|e| format!("params are not JSON: {e}"))?,
                 None => json!({}),
             };
-            finish(Gpu::default().dispatch(&mut session, &command, params), &mut session, &scene)
+            Ok(finish(scene.host()?.call(&command, params)))
         }
         Cmd::Batch { file, scene } => {
-            let mut session = scene.open()?;
             let text =
                 if file == "-" { read_arg("-")? } else { std::fs::read_to_string(&file).map_err(|e| e.to_string())? };
             let steps: Vec<Call> = serde_json::from_str(&text).map_err(|e| format!("batch file: {e}"))?;
-            finish(session.batch(steps), &mut session, &scene)
+            Ok(finish(scene.host()?.request(json!({ "batch": steps }))))
         }
-        Cmd::Serve { scene } => {
-            let mut session = scene.open()?;
+        Cmd::Serve { scene, live } => {
+            let (mut host, _) = scene.live_host(&live)?;
             let stdin = std::io::stdin();
             let mut out = std::io::stdout().lock();
-            let mut gpu = Gpu::default();
             for line in stdin.lock().lines() {
                 let line = line.map_err(|e| e.to_string())?;
                 if line.trim().is_empty() {
                     continue;
                 }
-                let reply = serve_line(&mut session, &mut gpu, &line, &scene);
+                let reply = serve_line(&mut host, &line);
                 writeln!(out, "{reply}").map_err(|e| e.to_string())?;
                 out.flush().map_err(|e| e.to_string())?;
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Mcp { scene } => {
-            let session = scene.open()?;
-            mcp::serve(session, scene.scene.clone().filter(|_| !scene.dry_run))?;
+        Cmd::Mcp { scene, live, compact } => {
+            let (host, bridge) = scene.live_host(&live)?;
+            mcp::serve(host, mcp::Config { compact, live: bridge.is_some() })?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Import { file, scene, id, position, scale, fit_height, unit, up_axis } => {
-            let mut session = scene.open()?;
-            let format = format_of(&file)?;
-            let bytes = std::fs::read(&file).map_err(|e| format!("reading {}: {e}", file.display()))?;
-            let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("model").to_string();
-            let mut params = compact(json!({ "format": format, "name": name, "id": id, "position": position,
+            let params = compact(json!({ "path": file, "id": id, "position": position,
                 "scale": scale, "fitHeight": fit_height, "unit": unit, "upAxis": up_axis }));
-            params["data"] = json!(shotstage_commands::model::encode(&bytes));
-            if format == "obj" {
-                // pick up colours from the .mtl next to it
-                let mtl = file.with_extension("mtl");
-                if let Ok(text) = std::fs::read_to_string(&mtl) {
-                    params["mtl"] = json!(text);
-                }
-            }
-            finish(session.dispatch("model.import", params), &mut session, &scene)
+            Ok(finish(scene.host()?.call("model.import", params)))
         }
         Cmd::Export { file, scene, ids, frame } => {
-            let mut session = scene.open()?;
-            let format = format_of(&file)?;
-            let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("scene").to_string();
-            let params = compact(json!({ "format": format, "ids": ids, "frame": frame, "name": name }));
-            match session.dispatch("model.export", params) {
-                Ok(o) => {
-                    let mut r = o.result;
-                    let write = |path: &Path, bytes: &[u8]| {
-                        std::fs::write(path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
-                    };
-                    if let Some(d) = r.get("data").and_then(Value::as_str) {
-                        use base64::Engine as _;
-                        let bytes = base64::engine::general_purpose::STANDARD.decode(d).map_err(|e| e.to_string())?;
-                        write(&file, &bytes)?;
-                    } else if let Some(t) = r.get("text").and_then(Value::as_str) {
-                        write(&file, t.as_bytes())?;
-                    }
-                    if let Some(m) = r.get("mtl").and_then(Value::as_str) {
-                        write(&file.with_extension("mtl"), m.as_bytes())?;
-                    }
-                    if let Some(o) = r.as_object_mut() {
-                        o.remove("data");
-                        o.remove("text");
-                        o.remove("mtl");
-                    }
-                    r["file"] = json!(file.display().to_string());
-                    print_json(&json!({ "ok": true, "result": r }));
-                    Ok(ExitCode::SUCCESS)
-                }
-                Err(e) => {
-                    print_json(&error_json(&e));
-                    Ok(ExitCode::from(1))
-                }
-            }
+            let params = compact(json!({ "path": file, "ids": ids, "frame": frame }));
+            Ok(finish(scene.host()?.call("model.export", params)))
         }
         Cmd::Render { scene, out, pass, width, start, end, video } => {
-            let session = scene.open()?;
-            let t = session.scene().timeline.clone();
-            let (a, b) = (start.unwrap_or(t.start), end.unwrap_or(t.end));
-            if b < a {
-                return Err("end must be >= start".into());
-            }
-            for p in &pass {
-                if !["clay", "depth", "normal"].contains(&p.as_str()) {
-                    return Err(format!("unknown pass `{p}`: use clay, depth or normal"));
-                }
-                std::fs::create_dir_all(out.join(p)).map_err(|e| e.to_string())?;
-            }
-            let mut gpu = Gpu::default();
-            // one depth range for the whole sequence (camera to the farthest corner of the scene)
-            let sc = session.scene();
-            let corners = sc
-                .entities
-                .iter()
-                .filter(|e| e.parent.is_none())
-                .filter_map(|e| shotstage_core::spatial::bounds(sc, &e.id, a as f32).ok().flatten())
-                .reduce(|x, y| shotstage_core::spatial::Aabb::union(Some(x), Some(y)).expect("both"));
-            let far = (a..=b)
-                .step_by(4)
-                .filter_map(|f| {
-                    let cam = shotstage_core::eval::camera_id_at(sc, f as f32)?;
-                    let eye = shotstage_core::eval::world_at(sc, &cam, f as f32).ok()?.w_axis.truncate();
-                    let bx = corners?;
-                    Some(
-                        (0..8)
-                            .map(|i| {
-                                let c = glam::Vec3::new(
-                                    if i & 1 == 0 { bx.min.x } else { bx.max.x },
-                                    if i & 2 == 0 { bx.min.y } else { bx.max.y },
-                                    if i & 4 == 0 { bx.min.z } else { bx.max.z },
-                                );
-                                (c - eye).length()
-                            })
-                            .fold(0.0f32, f32::max),
-                    )
-                })
-                .fold(0.0f32, f32::max)
-                .max(1.0);
-            let mut cams = vec![];
-            for f in a..=b {
-                let cam = shotstage_core::eval::camera_id_at(session.scene(), f as f32)
-                    .ok_or("no camera: add one (or a shot) first")?;
-                for p in &pass {
-                    let (_, png) = gpu
-                        .snapshot_png(
-                            session.scene(),
-                            json!({ "camera": cam, "frame": f, "pass": p, "width": width, "depthRange": [0.0, far] }),
-                        )
-                        .map_err(|e| e.message)?;
-                    std::fs::write(out.join(p).join(format!("{:05}.png", f - a)), png).map_err(|e| e.to_string())?;
-                }
-                cams.push(json!({ "frame": f, "camera": cam }));
-                if (f - a) % 24 == 0 {
-                    eprintln!("frame {f} / {b}");
-                }
-            }
-            // per-frame camera data for camera-conditioned models
-            let mut traj = vec![];
-            for c in cams.iter() {
-                let (f, cam) =
-                    (c["frame"].as_u64().unwrap_or(0) as u32, c["camera"].as_str().unwrap_or_default().to_string());
-                let lens =
-                    shotstage_core::eval::camera_data_at(session.scene(), &cam, f as f32).map_err(|e| e.to_string())?;
-                let h = (width as f32 / lens.aspect).round() as u32;
-                let one = shotstage_core::eval::camera_trajectory(session.scene(), &cam, f, f, width, h)
-                    .map_err(|e| e.to_string())?;
-                traj.push(json!({ "camera": cam, "data": one.first() }));
-            }
-            std::fs::write(
-                out.join("camera.json"),
-                serde_json::to_string_pretty(&json!({ "fps": t.fps, "frames": traj })).unwrap_or_default(),
-            )
-            .map_err(|e| e.to_string())?;
-            let mut videos = vec![];
-            if video {
-                for p in &pass {
-                    let mp4 = out.join(format!("{p}.mp4"));
-                    let status = std::process::Command::new("ffmpeg")
-                        .args(["-y", "-loglevel", "error", "-framerate", &t.fps.to_string(), "-i"])
-                        .arg(out.join(p).join("%05d.png"))
-                        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-                        .arg(&mp4)
-                        .status();
-                    match status {
-                        Ok(s) if s.success() => videos.push(mp4.display().to_string()),
-                        Ok(_) => eprintln!("ffmpeg could not encode {p}.mp4"),
-                        Err(_) => {
-                            eprintln!("ffmpeg was not found: the PNG frames are there to encode yourself");
-                            break;
-                        }
-                    }
-                }
-            }
-            print_json(
-                &json!({ "ok": true, "result": { "folder": out.display().to_string(), "frames": b - a + 1, "passes": pass, "videos": videos } }),
+            let params = compact(
+                json!({ "out": out, "passes": pass, "width": width, "start": start, "end": end, "video": video }),
             );
-            Ok(ExitCode::SUCCESS)
+            Ok(finish(scene.host()?.call("render.sequence", params)))
         }
-        Cmd::Storyboard { scene, out, width, depth } => {
-            let mut session = scene.open()?;
-            std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
-            let t = session.scene().timeline.clone();
-            // every shot, or the whole timeline through the active camera
-            let shots: Vec<(String, String, u32, u32)> = if t.shots.is_empty() {
-                match session.scene().active_camera.clone() {
-                    Some(c) => vec![("shot".into(), c, t.start, t.end)],
-                    None => return Err("the scene has no shots and no active camera".into()),
-                }
-            } else {
-                t.shots.iter().map(|s| (s.name.clone(), s.camera.clone(), s.start, s.end)).collect()
-            };
-            let mut gpu = Gpu::default();
-            let mut board = vec![];
-            let mut html = String::from(
-                "<!doctype html><meta charset=utf-8><title>Storyboard</title><style>body{font:14px system-ui;background:#16171a;color:#ddd;margin:24px}h2{margin:28px 0 6px}.row{display:flex;gap:12px}figure{margin:0}img{width:100%;border-radius:6px;display:block}figcaption{color:#999;font-size:12px;margin-top:4px}</style><h1>Storyboard</h1>",
-            );
-            for (i, (name, cam, a, b)) in shots.iter().enumerate() {
-                let mid = (a + b) / 2;
-                let mut frames = vec![];
-                html.push_str(&format!("<h2>{} · {name}</h2><div class=row>", i + 1));
-                for (label, f) in [("first", *a), ("middle", mid), ("last", *b)] {
-                    let mut files = vec![];
-                    for pass in if depth { vec!["clay", "depth"] } else { vec!["clay"] } {
-                        let file = format!("{:02}_{}_{label}_{pass}.png", i + 1, compact_name(name));
-                        let (_, png) = gpu
-                            .snapshot_png(
-                                session.scene(),
-                                json!({ "camera": cam, "frame": f, "pass": pass, "width": width }),
-                            )
-                            .map_err(|e| e.message)?;
-                        std::fs::write(out.join(&file), png).map_err(|e| e.to_string())?;
-                        files.push(file);
-                    }
-                    let d = session
-                        .dispatch("camera.describe", json!({ "id": cam, "frame": f }))
-                        .map(|o| o.result)
-                        .unwrap_or(Value::Null);
-                    let summary = d["summary"].as_str().unwrap_or_default().to_string();
-                    html.push_str(&format!(
-                        "<figure><img src=\"{}\"><figcaption>{label} · frame {f} · {summary}</figcaption></figure>",
-                        files[0]
-                    ));
-                    frames.push(json!({ "position": label, "frame": f, "images": files, "describe": d }));
-                }
-                html.push_str("</div>");
-                let traj = session
-                    .dispatch("camera.trajectory", json!({ "id": cam, "start": a, "end": b }))
-                    .map(|o| o.result["frames"].clone())
-                    .unwrap_or(Value::Null);
-                board.push(json!({ "shot": name, "camera": cam, "start": a, "end": b,
-                    "seconds": (b - a + 1) as f32 / t.fps, "frames": frames, "trajectory": traj }));
+        Cmd::Storyboard { scene, out, width, depth, normal } => {
+            let mut passes = vec!["clay"];
+            if depth {
+                passes.push("depth");
             }
-            let doc = json!({ "fps": t.fps, "shots": board });
-            std::fs::write(out.join("storyboard.json"), serde_json::to_string_pretty(&doc).unwrap_or_default())
-                .map_err(|e| e.to_string())?;
-            std::fs::write(out.join("index.html"), html).map_err(|e| e.to_string())?;
-            print_json(&json!({ "ok": true, "result": { "folder": out.display().to_string(), "shots": shots.len() } }));
-            Ok(ExitCode::SUCCESS)
+            if normal {
+                passes.push("normal");
+            }
+            let params = json!({ "out": out, "width": width, "passes": passes });
+            let r = scene.host()?.call("render.storyboard", params).map(|mut o| {
+                // the full document is in storyboard.json; print where it went
+                let r = &o.result;
+                o.result =
+                    json!({ "folder": r["folder"], "index": r["index"], "shots": r["shots"].as_array().map(Vec::len) });
+                o
+            });
+            Ok(finish(r))
         }
         Cmd::Snapshot { scene, out, camera, frame, pass, width, height } => {
-            let session = scene.open()?;
-            let params = json!({ "camera": camera, "frame": frame, "pass": pass, "width": width, "height": height });
-            let params = Value::Object(
-                params.as_object().cloned().unwrap_or_default().into_iter().filter(|(_, v)| !v.is_null()).collect(),
-            );
-            match Gpu::default().snapshot_png(session.scene(), params) {
+            let params =
+                compact(json!({ "camera": camera, "frame": frame, "pass": pass, "width": width, "height": height }));
+            let mut host = scene.host()?;
+            match host.snapshot(params) {
                 Ok((mut meta, png)) => {
                     std::fs::write(&out, png).map_err(|e| format!("writing {}: {e}", out.display()))?;
-                    meta["data"] = json!(out.display().to_string());
+                    meta["file"] = json!(out.display().to_string());
                     print_json(&json!({ "ok": true, "result": meta }));
                     Ok(ExitCode::SUCCESS)
                 }
@@ -584,29 +405,9 @@ fn real_main() -> Result<ExitCode, String> {
     }
 }
 
-fn finish(
-    r: Result<shotstage_commands::Outcome, CommandError>,
-    session: &mut Session,
-    scene: &SceneArgs,
-) -> Result<ExitCode, String> {
-    match r {
-        Ok(o) => {
-            if o.changed {
-                scene.save(session)?;
-            }
-            print_json(&json!({ "ok": true, "result": o.result, "changed": o.changed }));
-            Ok(ExitCode::SUCCESS)
-        }
-        Err(e) => {
-            print_json(&error_json(&e));
-            Ok(ExitCode::from(1))
-        }
-    }
-}
-
 /// One JSON-lines request: `{"id": 1, "command": "...", "params": {...}}` or
 /// `{"id": 1, "batch": [...]}`. The reply echoes `id`.
-fn serve_line(session: &mut Session, gpu: &mut Gpu, line: &str, scene: &SceneArgs) -> Value {
+fn serve_line(host: &mut Host, line: &str) -> Value {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => return error_json(&CommandError::invalid(format!("request is not JSON: {e}"))),
@@ -616,11 +417,8 @@ fn serve_line(session: &mut Session, gpu: &mut Gpu, line: &str, scene: &SceneArg
     if let Some(o) = body.as_object_mut() {
         o.remove("id");
     }
-    let mut reply = match gpu.dispatch_json(session, body) {
-        Ok(o) => {
-            let saved = if o.changed { scene.save(session).err() } else { None };
-            json!({ "ok": true, "result": o.result, "revision": o.revision, "changed": o.changed, "saveError": saved })
-        }
+    let mut reply = match host.request(body) {
+        Ok(o) => json!({ "ok": true, "result": o.result, "revision": o.revision, "changed": o.changed }),
         Err(e) => error_json(&e),
     };
     reply["id"] = id;
