@@ -810,6 +810,8 @@ pub struct EditorApp {
     edit_hover: Option<editmode::Elem>,
     /// The press that applied a tool: its click must not also select.
     edit_swallow: bool,
+    /// Frames left to clear the keyboard focus a Tab gave to some button.
+    edit_unfocus: u8,
 }
 
 impl EditorApp {
@@ -896,6 +898,7 @@ impl EditorApp {
             edit_hot_axis: None,
             edit_hover: None,
             edit_swallow: false,
+            edit_unfocus: 0,
         }
     }
 
@@ -1891,6 +1894,15 @@ impl eframe::App for EditorApp {
 
 impl EditorApp {
     fn shortcuts(&mut self, ui: &egui::Ui) {
+        if self.edit_unfocus > 0 {
+            self.edit_unfocus -= 1;
+            ui.ctx().memory_mut(|m| {
+                if let Some(f) = m.focused() {
+                    m.surrender_focus(f);
+                }
+            });
+            ui.ctx().request_repaint();
+        }
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
@@ -2421,6 +2433,12 @@ impl EditorApp {
             })
             .unwrap_or_default();
         ui.weak(format!("{kind} · {}{dims}", e.id));
+        // edit mode: the mesh tools come first, the object panels wait until you are done
+        if self.edit_state().is_some_and(|s| s.id == id) {
+            ui.add_space(4.0);
+            section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
+            return;
+        }
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let mut visible = e.visible;
@@ -4480,7 +4498,17 @@ impl EditorApp {
             if std::mem::take(&mut self.edit_swallow) || self.edit_modal.is_some() {
                 // the click that applied a tool
             } else {
-                self.edit_click(cg, pos, ray_at(rect, &view, pos), modifiers);
+                // modifiers as they were when the button went up (a quick Alt+click may let go
+                // of Alt before this frame)
+                let m = ui
+                    .input(|i| {
+                        i.events.iter().rev().find_map(|e| match e {
+                            egui::Event::PointerButton { pressed: false, modifiers, .. } => Some(*modifiers),
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or(modifiers);
+                self.edit_click(cg, pos, ray_at(rect, &view, pos), m);
             }
         } else if resp.clicked()
             && let Some(pos) = resp.interact_pointer_pos().filter(|p| rect.contains(*p))
@@ -4679,6 +4707,13 @@ impl EditorApp {
         if let Some((id, _)) = self.texture {
             painter.image(id, rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
+        // (a tool may have changed the mesh since the cage was projected: project it again)
+        let cage = cage.and_then(|_| {
+            let st = self.edit_state()?;
+            let scene = self.scene();
+            self.edit_refresh(&scene, &st.id).then_some(())?;
+            self.edit_cage(&scene, &st.id, f, rect, &view, self.edit_xray)
+        });
         if let Some(cg) = &cage {
             self.edit_draw(&painter, cg, rect, &view, self.edit_hover);
         }

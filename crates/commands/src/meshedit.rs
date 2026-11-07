@@ -395,12 +395,41 @@ mod tests {
         // chain: bevel the loop the cut just made
         let loop_edges = cut["selection"]["edges"].clone();
         s.dispatch("mesh.bevel", json!({"id": "box", "edges": loop_edges, "width": 0.02, "segments": 2})).unwrap();
-        s.dispatch("history.undo", json!({})).unwrap();
+        // a tried-and-dropped preview leaves nothing to redo
+        s.dispatch("history.discard", json!({})).unwrap();
+        assert_eq!(s.dispatch("history.info", json!({})).unwrap().result["redo"], json!([]));
         // bad input is an error, not a panic, and changes nothing
         let before = s.scene().clone();
         assert!(s.dispatch("mesh.extrude", json!({"id": "box", "faces": [999]})).is_err());
         assert!(s.dispatch("mesh.bevel", json!({"id": "box", "edges": [[0, 2]], "width": -1})).is_err());
         assert!(s.dispatch("mesh.loopCut", json!({"id": "box", "edge": [0, 0]})).is_err());
         assert_eq!(&before, s.scene());
+    }
+}
+
+#[cfg(test)]
+mod select_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    #[test]
+    fn loops_on_a_cut_cube() {
+        let mut s = Session::default();
+        s.dispatch(
+            "entity.create",
+            json!({"id": "box", "type": "mesh", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        let cut = s.dispatch("mesh.loopCut", json!({"id": "box", "edge": [0, 4]})).unwrap().result;
+        let ring = cut["selection"]["edges"].clone();
+        assert_eq!(ring.as_array().unwrap().len(), 4);
+        // the new loop is found again from any of its edges
+        let e = ring[0].clone();
+        let l = s.dispatch("mesh.select", json!({"id": "box", "how": "loop", "edge": e})).unwrap().result;
+        assert_eq!(l["selection"]["edges"], ring);
+        // the face loop across it runs round four sides
+        let f = s.dispatch("mesh.select", json!({"id": "box", "how": "faceLoop", "edge": [5, 11]})).unwrap().result;
+        assert_eq!(f["selection"]["faces"].as_array().unwrap().len(), 4);
     }
 }

@@ -1,6 +1,6 @@
 //! Mesh edit mode in the viewport, Blender style: Tab on a mesh, then pick vertices, edges or
 //! faces (1 / 2 / 3), and grab (G), rotate (R), scale (S), extrude (E), inset (I), bevel
-//! (Ctrl+B), loop cut (Ctrl+R), fill (F), connect (J), merge (M), delete (X)...
+//! (Ctrl+B), loop cut (Ctrl+R or C), fill (F), connect (J), merge (M), delete (X)...
 //!
 //! Interactive tools follow the pointer and re-run the real `mesh.*` command each time their
 //! amount changes (undoing the previous try first), so the history shows "mesh.bevel" and an
@@ -31,6 +31,7 @@ pub(super) struct EditCache {
     vert_faces: Vec<Vec<u32>>,
     normals: Vec<Vec3>,
     centers: Vec<Vec3>,
+    topo: me::Topology,
 }
 
 impl EditCache {
@@ -48,12 +49,14 @@ impl EditCache {
         let vert_faces = topo.vert_faces.iter().map(|v| v.iter().map(|&f| f as u32).collect()).collect();
         let normals = mesh.faces.iter().map(|f| me::face_normal(&mesh, f)).collect();
         let centers = mesh.faces.iter().map(|f| me::face_center(&mesh, f)).collect();
-        Self { rev, id: id.to_string(), mesh, edges, edge_faces, vert_faces, normals, centers }
+        Self { rev, id: id.to_string(), mesh, edges, edge_faces, vert_faces, normals, centers, topo }
     }
 }
 
 /// The cage of the edited mesh as seen this frame.
 pub(super) struct Cage {
+    /// Revision of the cache it was projected from.
+    rev: u64,
     pub world: Mat4,
     pts: Vec<Option<Pos2>>,
     face_vis: Vec<bool>,
@@ -333,7 +336,7 @@ impl EditorApp {
             .map(|fs| xray || fs.iter().flatten().any(|&f| face_vis[f as usize]) || fs[1].is_none())
             .collect();
         let st = self.hub.borrow().edit.clone()?;
-        let center = me::flush(&c.mesh, &st.selection)
+        let center = me::flush_with(&c.mesh, &c.topo, &st.selection)
             .ok()
             .filter(|fl| !fl.verts.is_empty())
             .map(|fl| world.transform_point3(me::selection_center(&c.mesh, &fl.verts)));
@@ -343,12 +346,17 @@ impl EditorApp {
             let arrows = [Vec3::X, Vec3::Y, Vec3::Z].map(|a| project(rect, view, o + a * len));
             Some((cp, arrows))
         });
-        Some(Cage { world, pts, face_vis, vert_vis, edge_vis, center, gizmo })
+        Some(Cage { rev: c.rev, world, pts, face_vis, vert_vis, edge_vis, center, gizmo })
     }
 
     /// The face hit by a ray (nearest), and how far along the ray.
+    /// The cache, if `cage` was projected from it (a tool may have changed the mesh since).
+    fn cache_for(&self, cage: &Cage) -> Option<&EditCache> {
+        self.edit_cache.as_ref().filter(|c| c.rev == cage.rev)
+    }
+
     fn edit_ray_face(&self, cage: &Cage, o: Vec3, d: Vec3, xray: bool) -> Option<(u32, f32)> {
-        let c = self.edit_cache.as_ref()?;
+        let c = self.cache_for(cage)?;
         let mut best: Option<(u32, f32)> = None;
         for (fi, f) in c.mesh.faces.iter().enumerate() {
             if !xray && !cage.face_vis[fi] {
@@ -376,7 +384,7 @@ impl EditorApp {
         ray: (Vec3, Vec3),
         xray: bool,
     ) -> Option<Elem> {
-        let c = self.edit_cache.as_ref()?;
+        let c = self.cache_for(cage)?;
         let (o, d) = ray;
         let hit = self.edit_ray_face(cage, o, d, xray);
         // vertices and edges behind the surface under the pointer are hidden
@@ -400,7 +408,7 @@ impl EditorApp {
     }
 
     fn edit_pick_edge(&self, cage: &Cage, pos: Pos2, depth_ok: &dyn Fn(Vec3) -> bool) -> Option<[u32; 2]> {
-        let c = self.edit_cache.as_ref()?;
+        let c = self.cache_for(cage)?;
         let w = |v: u32| cage.world.transform_point3(Vec3::from_array(c.mesh.positions[v as usize]));
         let mut best: Option<([u32; 2], f32)> = None;
         for (i, e) in c.edges.iter().enumerate() {
@@ -482,7 +490,20 @@ impl EditorApp {
         let hit = self.edit_ray_face(cage, o, d, self.edit_xray);
         let xray = self.edit_xray;
         let depth_ok = |p: Vec3| xray || hit.is_none_or(|(_, t)| (p - o).dot(d) <= t * 1.02 + 1e-3);
-        let Some(edge) = self.edit_pick_edge(cage, pos, &depth_ok) else { return };
+        // the edge near the pointer, else the nearest edge of the face under it
+        let near = self.edit_pick_edge(cage, pos, &depth_ok).or_else(|| {
+            let c = self.cache_for(cage)?;
+            let f = &c.mesh.faces[hit?.0 as usize];
+            (0..f.len())
+                .filter_map(|i| {
+                    let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                    let d = seg_dist(pos, cage.pts[a as usize]?, cage.pts[b as usize]?);
+                    Some(([a.min(b), a.max(b)], d))
+                })
+                .min_by(|x, y| x.1.total_cmp(&y.1))
+                .map(|x| x.0)
+        });
+        let Some(edge) = near else { return };
         let how = if st.mode == SelectMode::Face { "faceLoop" } else { "loop" };
         let Some(r) = self.run("mesh.select", json!({"id": st.id, "how": how, "edge": edge})) else { return };
         let Ok(found) = serde_json::from_value::<Elements>(r["selection"].clone()) else { return };
@@ -523,7 +544,7 @@ impl EditorApp {
     /// Box select: visible elements inside `r` (Shift adds).
     pub(super) fn edit_select_rect(&mut self, cage: &Cage, r: Rect, add: bool) {
         let Some(st) = self.edit_state() else { return };
-        let Some(c) = self.edit_cache.as_ref() else { return };
+        let Some(c) = self.cache_for(cage) else { return };
         let inside = |v: u32| cage.pts[v as usize].is_some_and(|p| r.contains(p));
         let mut sel = if add { st.selection.clone() } else { Elements::default() };
         match st.mode {
@@ -567,7 +588,12 @@ impl EditorApp {
     /// Run an edit command on the selection; the result's selection becomes the selection.
     pub(super) fn edit_apply(&mut self, command: &str, extra: Value) -> bool {
         let Some(st) = self.edit_state() else { return false };
-        let mut p = serde_json::to_value(&st.selection).unwrap_or(json!({}));
+        // (a loop cut takes an edge, not the selection)
+        let mut p = if command == "mesh.loopCut" {
+            json!({})
+        } else {
+            serde_json::to_value(&st.selection).unwrap_or(json!({}))
+        };
         p["id"] = json!(st.id);
         if let (Some(o), Some(x)) = (p.as_object_mut(), extra.as_object()) {
             for (k, v) in x {
@@ -652,7 +678,7 @@ impl EditorApp {
     pub(super) fn edit_cancel(&mut self) {
         if let Some(m) = self.edit_modal.take() {
             if m.changed {
-                self.run("history.undo", json!({}));
+                self.run("history.discard", json!({}));
             }
             self.set_edit_sel(m.sel);
         }
@@ -704,9 +730,9 @@ impl EditorApp {
             |v: f32| if self.snap && !modifiers.command { (v / self.snap_step).round() * self.snap_step } else { v };
         if scroll != 0.0 && matches!(m.tool, Tool::Bevel | Tool::LoopCut) {
             self.edit_scroll += scroll;
-            let steps = (self.edit_scroll / 40.0).trunc();
+            let steps = (self.edit_scroll / 60.0).trunc();
             if steps != 0.0 {
-                self.edit_scroll -= steps * 40.0;
+                self.edit_scroll -= steps * 60.0;
                 m.segments = (m.segments as i32 + steps as i32).clamp(1, 16) as u32;
             }
         }
@@ -807,7 +833,7 @@ impl EditorApp {
             }
             Tool::Inset => {
                 let d0 = (m.start - cs).length();
-                let t = typed.unwrap_or_else(|| snap(((d0 - (pointer - cs).length()) * wpp).max(0.0)) / obj_scale);
+                let t = typed.unwrap_or_else(|| ((pointer - cs).length() - d0).abs() * wpp / obj_scale);
                 m.shown = format!("{:.3} m", t * obj_scale);
                 (t > 0.0).then(|| {
                     ("mesh.inset".to_string(), sel_json(json!({"thickness": t, "depth": self.edit_amounts.depth})))
@@ -815,7 +841,7 @@ impl EditorApp {
             }
             Tool::Bevel => {
                 let d0 = (m.start - cs).length();
-                let w = typed.unwrap_or_else(|| snap((((pointer - cs).length() - d0) * wpp).max(0.0)) / obj_scale);
+                let w = typed.unwrap_or_else(|| ((pointer - cs).length() - d0).abs() * wpp / obj_scale);
                 m.shown = format!(
                     "{:.3} m · {} segment{} (scroll)",
                     w * obj_scale,
@@ -847,7 +873,7 @@ impl EditorApp {
         };
         if m.tool != Tool::LoopCut && want != m.tried {
             if m.changed {
-                self.run("history.undo", json!({}));
+                self.run("history.discard", json!({}));
                 m.changed = false;
             }
             m.tried = want.clone();
@@ -878,9 +904,9 @@ impl EditorApp {
 
     /// Draw the cage, the selection, the hovered element and the tool hint.
     pub(super) fn edit_draw(&self, painter: &egui::Painter, cage: &Cage, rect: Rect, view: &View, hover: Option<Elem>) {
-        let Some(c) = self.edit_cache.as_ref() else { return };
+        let Some(c) = self.cache_for(cage) else { return };
         let Some(st) = self.hub.borrow().edit.clone() else { return };
-        let fl = me::flush(&c.mesh, &st.selection).unwrap_or_default();
+        let fl = me::flush_with(&c.mesh, &c.topo, &st.selection).unwrap_or_default();
         let big = c.edges.len() > DRAW_LIMIT;
         // selected faces: a tint
         let mut tint = egui::epaint::Mesh::default();
@@ -1003,11 +1029,12 @@ impl EditorApp {
                 let axis = m.axis.map(|i| format!(" along {}", ["X", "Y", "Z"][i])).unwrap_or_default();
                 let typed = if m.typed.is_empty() { String::new() } else { format!(" · typed {}", m.typed) };
                 let how = if m.release_confirms { "release to apply" } else { "click or Enter to apply" };
-                format!(
-                    "{}{axis}: {}{typed} · {how}, Esc / right-click to cancel · X Y Z lock an axis · type a number",
-                    m.tool.name(),
-                    m.shown
-                )
+                let extra = match m.tool {
+                    Tool::Grab | Tool::Rotate | Tool::Scale => " · X Y Z lock an axis · type a number",
+                    Tool::Extrude | Tool::Inset | Tool::Bevel => " · type a number",
+                    Tool::LoopCut => "",
+                };
+                format!("{}{axis}: {}{typed} · {how}, Esc / right-click to cancel{extra}", m.tool.name(), m.shown)
             }
             None => counts,
         };
@@ -1060,6 +1087,11 @@ impl EditorApp {
     /// Keys in edit mode. Returns true when edit mode handled the keyboard this frame.
     pub(super) fn edit_shortcuts(&mut self, ui: &egui::Ui) -> bool {
         let tab = ui.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.any());
+        if tab {
+            // Tab also moves egui's keyboard focus to a button (at the end of this frame), which
+            // would swallow every later key: take it back over the next frames
+            self.edit_unfocus = 3;
+        }
         let editing = self.edit_state().is_some();
         if !editing {
             if tab {
@@ -1114,20 +1146,32 @@ impl EditorApp {
             }
             return true;
         }
-        let k = |key: egui::Key| ui.input(|i| i.key_pressed(key));
-        let (cmd, shift, alt, ctrl) =
-            ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt, i.modifiers.ctrl));
-        let plain = !cmd && !alt && !ctrl;
+        // modifiers as they were when each key went down (a quick Ctrl+B may be released before
+        // the frame that sees it)
+        let presses: Vec<(egui::Key, egui::Modifiers)> = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect()
+        });
+        let press = |key: egui::Key| presses.iter().find(|(k, _)| *k == key).map(|(_, m)| *m);
+        let k = |key: egui::Key| press(key).is_some();
+        let kp = |key: egui::Key| press(key).is_some_and(|m| !m.command && !m.ctrl && !m.alt);
+        let kc = |key: egui::Key| press(key).is_some_and(|m| m.command || m.ctrl);
+        let shift = ui.input(|i| i.modifiers.shift) || presses.iter().any(|(_, m)| m.shift);
         // history and file keys work as usual
-        if cmd && k(egui::Key::Z) {
+        if kc(egui::Key::Z) {
             self.run(if shift { "history.redo" } else { "history.undo" }, json!({}));
             return true;
         }
-        if cmd && k(egui::Key::Y) {
+        if kc(egui::Key::Y) {
             self.run("history.redo", json!({}));
             return true;
         }
-        if cmd && k(egui::Key::S) {
+        if kc(egui::Key::S) {
             self.save_scene();
             return true;
         }
@@ -1143,44 +1187,45 @@ impl EditorApp {
         if k(egui::Key::Num3) {
             self.set_edit_mode(SelectMode::Face);
         }
-        if k(egui::Key::A) {
-            self.edit_select_all(!alt);
+        if let Some(m) = press(egui::Key::A) {
+            self.edit_select_all(!m.alt);
         }
-        if alt && k(egui::Key::Z) {
+        if press(egui::Key::Z).is_some_and(|m| m.alt) {
             self.edit_xray = !self.edit_xray;
         }
-        if plain && k(egui::Key::G) {
+        if kp(egui::Key::G) {
             self.edit_start(Tool::Grab, pointer, None, false);
         }
-        if plain && k(egui::Key::R) {
+        if kp(egui::Key::R) {
             self.edit_start(Tool::Rotate, pointer, None, false);
         }
-        if plain && k(egui::Key::S) {
+        if kp(egui::Key::S) {
             self.edit_start(Tool::Scale, pointer, None, false);
         }
-        if plain && k(egui::Key::E) {
+        if kp(egui::Key::E) {
             self.edit_start(Tool::Extrude, pointer, None, false);
         }
-        if plain && k(egui::Key::I) {
+        if kp(egui::Key::I) {
             self.edit_start(Tool::Inset, pointer, None, false);
         }
-        if (cmd || ctrl) && k(egui::Key::B) {
+        if kc(egui::Key::B) {
             self.edit_start(Tool::Bevel, pointer, None, false);
         }
-        if (cmd || ctrl) && k(egui::Key::R) {
+        // (Cmd+R reloads the page in a browser: Ctrl+R on a Mac, or C anywhere)
+        if press(egui::Key::R).is_some_and(|m| m.ctrl) || kp(egui::Key::C) {
             self.edit_start(Tool::LoopCut, pointer, None, false);
         }
-        if plain && k(egui::Key::F) {
+        if kp(egui::Key::F) {
             self.edit_apply("mesh.fill", json!({}));
         }
-        if plain && k(egui::Key::J) {
+        if kp(egui::Key::J) {
             self.edit_apply("mesh.connect", json!({}));
         }
-        if plain && k(egui::Key::M) {
+        if kp(egui::Key::M) {
             self.edit_apply("mesh.merge", json!({}));
         }
-        if k(egui::Key::L) {
-            if cmd || ctrl {
+        if let Some(m) = press(egui::Key::L) {
+            if m.command || m.ctrl {
                 self.edit_select_how("linked", None, false);
             } else if let Some((rect, view)) = self.last_view {
                 let scene = self.scene();
@@ -1191,10 +1236,10 @@ impl EditorApp {
                 }
             }
         }
-        if (cmd || ctrl) && (k(egui::Key::Plus) || k(egui::Key::Equals)) {
+        if kc(egui::Key::Plus) || kc(egui::Key::Equals) {
             self.edit_select_how("more", None, false);
         }
-        if k(egui::Key::Delete) || k(egui::Key::Backspace) || (plain && k(egui::Key::X)) {
+        if k(egui::Key::Delete) || k(egui::Key::Backspace) || (kp(egui::Key::X)) {
             self.edit_apply("mesh.deleteElements", json!({}));
         }
         if k(egui::Key::Escape) {
@@ -1298,7 +1343,7 @@ impl EditorApp {
             ui.end_row();
             if ui
                 .button("Loop cut")
-                .on_hover_text("Ctrl+R: hover an edge, scroll for more cuts, click to cut")
+                .on_hover_text("Ctrl+R or C: hover an edge, scroll for more cuts, click to cut")
                 .clicked()
             {
                 start = Some(Tool::LoopCut);

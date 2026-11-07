@@ -152,7 +152,8 @@ pub fn flush(m: &Mesh, sel: &Elements) -> Result<Flushed> {
     flush_with(m, &topo, sel)
 }
 
-fn flush_with(m: &Mesh, topo: &Topology, sel: &Elements) -> Result<Flushed> {
+/// [`flush`] with a topology already built for `m`.
+pub fn flush_with(m: &Mesh, topo: &Topology, sel: &Elements) -> Result<Flushed> {
     let nv = m.positions.len() as u32;
     let nf = m.faces.len() as u32;
     let mut out = Flushed::default();
