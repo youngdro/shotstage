@@ -2934,6 +2934,7 @@ dependencies = [
  "js-sys",
  "log",
  "rfd",
+ "serde",
  "serde_json",
  "shotstage-commands",
  "shotstage-core",
