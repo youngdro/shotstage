@@ -537,12 +537,5 @@ pub fn commands() -> Vec<Command> {
         command!("prefab.create", "Add a ready-made, real-size block as a group standing on whatever is below: rigged people (man, woman), furniture, fresh-food retail fixtures and produce, product-shoot stand-ins and sets. See prefab.list.", mutates: true, PrefabParams, prefab_create),
         command!("prefab.list", "The prefab kinds prefab.create accepts, with their sizes.", mutates: false, crate::builtin::NoParams,
             |_, _| Ok(json!(prefabs::PREFABS.iter().map(|p| json!({ "kind": p.key, "category": p.category.key(), "description": p.description })).collect::<Vec<_>>()))),
-        Command {
-            id: crate::snapshot::SNAPSHOT_COMMAND,
-            summary: "Render the view through a camera to a PNG (clay, depth or normal pass) so you can see the shot. Returns {mimeType, data (base64), width, height}. Needs a GPU host (editor, CLI, MCP).",
-            mutates: false,
-            schema: crate::schema_of::<crate::snapshot::SnapshotParams>,
-            run: crate::snapshot::unsupported,
-        },
     ]
 }
