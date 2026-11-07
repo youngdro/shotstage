@@ -11,6 +11,7 @@ mod builtin;
 pub mod clipboard;
 pub mod images;
 pub mod lights;
+pub mod meshedit;
 pub mod model;
 pub mod motion;
 mod placement;
