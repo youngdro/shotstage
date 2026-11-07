@@ -9,6 +9,7 @@ pub mod arrange;
 pub mod blender;
 mod builtin;
 pub mod clipboard;
+pub mod humans;
 pub mod images;
 pub mod lights;
 pub mod model;

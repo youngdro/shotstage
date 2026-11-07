@@ -50,8 +50,9 @@ pub(crate) fn remap_refs(e: &mut Entity, ids: &HashMap<String, String>, assets: 
         e.parent = ids.get(p).cloned().or(Some(p.clone()));
     }
     match &mut e.kind {
-        EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } => {
-            for j in &mut skin.joints {
+        EntityKind::Mesh { source: MeshSource::Skinned { skin: shotstage_core::Skin { joints, .. }, .. }, .. }
+        | EntityKind::Mesh { source: MeshSource::Human { joints, .. }, .. } => {
+            for j in joints {
                 if let Some(n) = ids.get(j) {
                     *j = n.clone();
                 }

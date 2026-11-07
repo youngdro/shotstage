@@ -843,6 +843,7 @@ pub fn registry() -> Vec<Command> {
     .into_iter()
     .chain(crate::placement::commands())
     .chain(crate::rig::commands())
+    .chain(crate::humans::commands())
     .chain(crate::lights::commands())
     .chain(crate::model::commands())
     .chain(crate::images::commands())

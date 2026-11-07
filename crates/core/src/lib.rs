@@ -5,6 +5,7 @@
 
 pub mod camera;
 pub mod eval;
+pub mod human;
 pub mod image;
 pub mod light;
 pub mod mesh;

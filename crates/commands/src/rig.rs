@@ -439,6 +439,20 @@ pub const POSES: &[Pose] = &[
     },
 ];
 
+/// Hand shape that goes with a named pose on realistic people (others: relaxed).
+pub const POSE_HANDS: &[(&str, &str)] = &[
+    ("tPose", "open"),
+    ("run", "fist"),
+    ("wave", "spread"),
+    ("point", "point"),
+    ("reach", "grip"),
+    ("pickUp", "claw"),
+    ("holdBasket", "grip"),
+    ("pushCart", "grip"),
+    ("phone", "grip"),
+    ("present", "open"),
+];
+
 /// The root of the group `id` belongs to.
 pub fn root_of(scene: &Scene, id: &str) -> String {
     let mut cur = id.to_string();
@@ -479,17 +493,18 @@ pub fn joint_of(scene: &Scene, id: &str) -> Option<String> {
     joint_name(scene, &parent).map(|_| parent)
 }
 
-/// Joints of imported skeletons: every entity a skinned mesh follows.
+/// The joints a skinned mesh follows (imported skeletons and realistic people).
+pub fn mesh_joints(e: &Entity) -> Option<&Vec<String>> {
+    match &e.kind {
+        EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } => Some(&skin.joints),
+        EntityKind::Mesh { source: MeshSource::Human { joints, .. }, .. } => Some(joints),
+        _ => None,
+    }
+}
+
+/// Joints of imported skeletons and realistic people: every entity a skinned mesh follows.
 pub fn skin_joints(scene: &Scene) -> std::collections::HashSet<String> {
-    scene
-        .entities
-        .iter()
-        .filter_map(|e| match &e.kind {
-            EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } => Some(skin.joints.iter().cloned()),
-            _ => None,
-        })
-        .flatten()
-        .collect()
+    scene.entities.iter().filter_map(mesh_joints).flatten().cloned().collect()
 }
 
 /// A joint of a person prefab or of an imported skeleton.
@@ -500,14 +515,12 @@ pub fn is_joint(scene: &Scene, id: &str) -> bool {
 /// The joint nearest to a world point on a skinned mesh (measured to each bone, from a joint to
 /// its first child joint).
 pub fn joint_near(scene: &Scene, mesh: &str, point: Vec3, frame: f32) -> Option<String> {
-    let EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } = &scene.get(mesh).ok()?.kind else {
-        return None;
-    };
+    let joints = mesh_joints(scene.get(mesh).ok()?)?;
     let pos = |id: &str| world_at(scene, id, frame).ok().map(|m| m.w_axis.truncate());
     let mut best: Option<(f32, String)> = None;
-    for j in &skin.joints {
+    for j in joints {
         let Some(a) = pos(j) else { continue };
-        let child = scene.children(Some(j)).find(|c| skin.joints.contains(&c.id)).and_then(|c| pos(&c.id));
+        let child = scene.children(Some(j)).find(|c| joints.contains(&c.id)).and_then(|c| pos(&c.id));
         let d = match child {
             Some(b) => {
                 let ab = b - a;
@@ -525,6 +538,9 @@ pub fn joint_near(scene: &Scene, mesh: &str, point: Vec3, frame: f32) -> Option<
 
 /// Rest height of the pelvis, from the leg chain (works for any body size).
 pub(crate) fn pelvis_rest(scene: &Scene, root: &str) -> CmdResult<f32> {
+    if let Some(y) = crate::humans::pelvis_rest(scene, root) {
+        return Ok(y);
+    }
     let y = |j: &str| -> CmdResult<f32> { Ok(scene.get(&format!("{root}_{j}"))?.transform.translation[1]) };
     let knee = y("knee_l")?;
     let scale = (knee.abs() / 0.43).max(1e-3);
@@ -547,6 +563,9 @@ struct PoseParams {
     keyframe_at: Option<f32>,
     /// Re-rest the person on the surface below afterwards. Default true.
     drop: Option<bool>,
+    /// Hand shape for realistic people (see `pose.list`), e.g. `fist`, `grip`, `point`.
+    /// Default with a named pose: the pose's own hand shape.
+    hands: Option<String>,
 }
 
 fn pose_set(scene: &mut Scene, p: PoseParams) -> CmdResult<Value> {
@@ -590,6 +609,26 @@ fn pose_set(scene: &mut Scene, p: PoseParams) -> CmdResult<Value> {
         t.set_euler_degrees(*r);
         crate::placement::store_pose(scene, &id, frame, p.keyframe_at, t)?;
     }
+    let human = crate::humans::human_of(scene, &root).is_some();
+    if human && p.pose.is_some() {
+        // a named pose also straightens the joints only realistic people have
+        for j in ["spine2", "chest", "clavicle_l", "clavicle_r", "toes_l", "toes_r"] {
+            let id = format!("{root}_{j}");
+            if scene.contains(&id) {
+                let mut t = local_at(scene, &id, frame)?;
+                t.rotation = Quat::IDENTITY.to_array();
+                crate::placement::store_pose(scene, &id, frame, p.keyframe_at, t)?;
+            }
+        }
+    }
+    let hands = p.hands.clone().or_else(|| {
+        p.pose
+            .as_deref()
+            .map(|n| POSE_HANDS.iter().find(|(q, _)| *q == n).map(|(_, h)| *h).unwrap_or("relaxed").to_string())
+    });
+    if let (true, Some(h)) = (human, hands) {
+        crate::humans::set_hands(scene, &root, &h, crate::humans::HandSide::Both, frame, p.keyframe_at)?;
+    }
     if p.drop.unwrap_or(true) {
         crate::placement::drop_down(scene, &root, frame, p.keyframe_at)?;
     }
@@ -613,11 +652,13 @@ fn bone_direction(scene: &Scene, joint: &str) -> Vec3 {
     let kids: Vec<&Entity> = scene.children(Some(joint)).collect();
     let pick = kids
         .iter()
-        .find(|e| matches!(e.kind, EntityKind::Empty))
+        .find(|e| e.name.starts_with("middle_01"))
+        .or_else(|| kids.iter().find(|e| matches!(e.kind, EntityKind::Empty)))
         .or_else(|| kids.iter().find(|e| !e.name.starts_with("hair") && e.name != "nose"))
         .map(|e| e.transform.translation());
     // person limbs hang along -Y; imported (Blender) bones point along their +Y
-    let rest = if joint_name(scene, joint).is_some() { Vec3::NEG_Y } else { Vec3::Y };
+    let human = person_root(scene, joint).is_ok_and(|r| crate::humans::human_of(scene, &r).is_some());
+    let rest = if joint_name(scene, joint).is_some() || human { Vec3::NEG_Y } else { Vec3::Y };
     pick.map(|v| v.normalize_or_zero()).filter(|v| *v != Vec3::ZERO).unwrap_or(rest)
 }
 
@@ -658,6 +699,9 @@ struct HairParams {
 
 fn set_hair(scene: &mut Scene, p: HairParams) -> CmdResult<Value> {
     let root = person_root(scene, &p.id)?;
+    if crate::humans::human_of(scene, &root).is_some() {
+        return crate::humans::set_human_hair(scene, &root, p.style, p.color);
+    }
     let head = format!("{root}_head");
     let old: Vec<String> =
         scene.children(Some(&head)).filter(|e| e.name.starts_with("hair")).map(|e| e.id.clone()).collect();

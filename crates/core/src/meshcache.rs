@@ -56,7 +56,7 @@ fn key(source: &MeshSource, modifiers: &[Modifier]) -> Option<u64> {
             }
         }
         // a skinned mesh changes shape with its joints: not cached
-        MeshSource::Skinned { .. } => return None,
+        MeshSource::Skinned { .. } | MeshSource::Human { .. } => return None,
     }
     h.bytes(format!("{modifiers:?}").as_bytes());
     Some(h.0)
