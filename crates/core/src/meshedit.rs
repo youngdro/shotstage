@@ -1914,6 +1914,61 @@ pub fn transform_proportional(
     Ok((out, sel.clone().normalized()))
 }
 
+/// Extrude the selection again and again while turning it about an axis (Blender's Spin):
+/// edges sweep into a surface, faces into a curved solid. A full 360° turn joins the end to
+/// the start. Selects the last copy.
+pub fn spin(m: &Mesh, sel: &Elements, center: Vec3, axis: Vec3, angle: f32, steps: u32) -> Result<(Mesh, Elements)> {
+    need((1..=256).contains(&steps), "steps must be 1..=256")?;
+    need(angle.is_finite() && angle != 0.0 && angle.abs() <= 3600.0, "angle must be non-zero degrees, at most 3600")?;
+    need(
+        center.is_finite() && axis.is_finite() && axis.length_squared() > 1e-12,
+        "give a finite centre and a non-zero axis",
+    )?;
+    let f = flush(m, sel)?;
+    need(!f.edges.is_empty(), "select edges or faces to spin")?;
+    let q = Quat::from_axis_angle(axis.normalize(), (angle / steps as f32).to_radians());
+    let full = (angle.abs() - 360.0).abs() < 1e-3;
+    let mut cur = m.clone();
+    let mut s = sel.clone();
+    for _ in 0..steps {
+        let (next, ns) = extrude(&cur, &s, Offset { distance: 0.0, vector: Vec3::ZERO }, false)?;
+        let moved = flush(&next, &ns)?.verts;
+        cur = next;
+        for v in moved {
+            let p = pos(&cur, v) - center;
+            cur.positions[v as usize] = (center + q * p).to_array();
+        }
+        s = ns;
+    }
+    if full {
+        // the last copy sits where the first one started: drop its faces, weld the seam, and
+        // drop any face pairs that now coincide
+        let last = flush(&cur, &s)?.faces;
+        cur.faces =
+            cur.faces.into_iter().enumerate().filter(|(i, _)| !last.contains(&(*i as u32))).map(|(_, f)| f).collect();
+        let (welded, _, _) = merge_by_distance(&cur, &Elements::default(), 1e-4)?;
+        let mut count: HashMap<Vec<u32>, usize> = HashMap::new();
+        for f in &welded.faces {
+            let mut k = f.clone();
+            k.sort_unstable();
+            *count.entry(k).or_default() += 1;
+        }
+        let faces = welded
+            .faces
+            .iter()
+            .filter(|f| {
+                let mut k = (*f).clone();
+                k.sort_unstable();
+                count[&k] == 1
+            })
+            .cloned()
+            .collect();
+        let out = Mesh { positions: welded.positions, faces };
+        return Ok(finish(out, Elements::default()));
+    }
+    Ok(finish(cur, s))
+}
+
 /// Every edge of the mesh as `[a, b]` (a < b), in a stable order.
 pub fn all_edges(m: &Mesh) -> Vec<[u32; 2]> {
     Topology::new(m).edges.into_iter().map(|(a, b)| [a, b]).collect()
@@ -2098,6 +2153,35 @@ mod tests {
         assert!(y(mid + 2) > 0.0 && y(mid + 2) < y(mid + 1));
         assert_eq!(y(mid + 3), 0.0);
         assert_eq!(y(0), 0.0);
+    }
+
+    #[test]
+    fn spin_a_border_into_a_ring() {
+        // a square plane at x 1..2 standing in the XY plane, spun round Y: a tube wall
+        let m = Mesh {
+            positions: vec![[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
+            faces: vec![vec![0, 1, 2, 3]],
+        };
+        let (half, sel) = spin(&m, &Elements::faces([0]), Vec3::ZERO, Vec3::Y, 180.0, 6).unwrap();
+        assert_eq!(sel.faces.len(), 1);
+        // like Blender, extruding a lone face leaves its start open
+        assert_eq!(half.faces.len(), 1 + 6 * 4);
+        let (ring, _) = spin(&m, &Elements::faces([0]), Vec3::ZERO, Vec3::Y, 360.0, 8).unwrap();
+        assert_eq!(ring.faces.len(), 8 * 4);
+        assert_eq!(ring.positions.len(), 8 * 4);
+        assert!(closed(&ring));
+        // a face on a closed box spun a quarter turn stays watertight
+        let (bent, _) = spin(
+            &cube(),
+            &Elements::faces([face_facing(&cube(), Vec3::X)]),
+            Vec3::new(1.0, 0.0, 2.0),
+            Vec3::Y,
+            90.0,
+            4,
+        )
+        .unwrap();
+        assert!(closed(&bent));
+        assert!(spin(&m, &Elements::default(), Vec3::ZERO, Vec3::Y, 90.0, 4).is_err());
     }
 
     #[test]

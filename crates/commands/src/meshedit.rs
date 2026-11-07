@@ -155,6 +155,22 @@ struct KnifeParams {
     faces: Option<Vec<u32>>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SpinParams {
+    id: String,
+    #[serde(flatten)]
+    sel: Sel,
+    /// Degrees to turn in total. Default 360 (joins up).
+    angle: Option<f32>,
+    /// How many copies along the turn. Default 12.
+    steps: Option<u32>,
+    /// Axis to turn about (mesh space). Default `[0, 1, 0]`.
+    axis: Option<[f32; 3]>,
+    /// A point on the axis (mesh space). Default: the mesh origin.
+    center: Option<[f32; 3]>,
+}
+
 fn knife(s: &mut Scene, p: KnifeParams) -> CmdResult<Value> {
     let path: Vec<Vec3> = p.path.iter().map(|v| finite3(*v, "path")).collect::<CmdResult<_>>()?;
     let view = match (p.eye, p.direction) {
@@ -469,6 +485,13 @@ pub fn commands() -> Vec<Command> {
             edit(s, &p.id, |m| me::bisect(m, &sel, point, normal, p.clear.unwrap_or_default()))
         }),
         command!("mesh.knife", "Cut along a path of surface points as seen from an eye (or direction), like Blender's knife: the cut stops at the path's ends and turns at points inside faces. Selects the new edges.", mutates: true, KnifeParams, knife),
+        command!("mesh.spin", "Extrude the selected edges or faces round and round an axis (Blender Spin): edges sweep into a surface, faces into a curved solid; 360° joins up.", mutates: true, SpinParams,
+        |s, p| {
+            let axis = opt3(p.axis, "axis", Vec3::Y)?;
+            let center = opt3(p.center, "center", Vec3::ZERO)?;
+            let sel = p.sel.elements();
+            edit(s, &p.id, |m| me::spin(m, &sel, center, axis, p.angle.unwrap_or(360.0), p.steps.unwrap_or(12)))
+        }),
         command!("mesh.boolean", "Combine a mesh with another: union, difference (carve `with` out) or intersect. Both should be closed solids. The other mesh is hidden unless hideOther is false.", mutates: true, BooleanParams, boolean),
     ]
 }
@@ -526,6 +549,23 @@ mod tests {
             .result;
         assert_eq!(kn["selection"]["edges"].as_array().unwrap().len(), 2);
         assert!(s.dispatch("mesh.knife", json!({"id": "k", "path": [[0, 1, 0]], "eye": [0, 10, 0]})).is_err());
+        // spin the box's side a quarter turn round an axis beside it
+        s.dispatch(
+            "entity.create",
+            json!({"id": "sp", "type": "mesh", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        let sp = s
+            .dispatch("mesh.spin", json!({"id": "sp", "faces": [1], "angle": 90, "steps": 3, "center": [0, 0, 2]}))
+            .unwrap()
+            .result;
+        assert_eq!(sp["faces"], 6 + 3 * 4 - 1 + 1);
+        // a lathe shape is a primitive like the others
+        s.dispatch(
+            "entity.create",
+            json!({"id": "vase", "type": "mesh", "primitive": {"shape": "lathe", "profile": [[0, 0], [0.1, 0], [0.12, 0.2], [0.05, 0.3]], "segments": 12}}),
+        )
+        .unwrap();
         // proportional move drags the neighbours part way
         s.dispatch(
             "mesh.transformElements",

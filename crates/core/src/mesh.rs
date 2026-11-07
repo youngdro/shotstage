@@ -63,6 +63,13 @@ pub enum Primitive {
         size: [f32; 3],
         radius: f32,
     },
+    /// A shape turned on a lathe around the Y axis: `profile` is `[radius, y]` points from
+    /// bottom to top (bottles, jars, vases, cups). A point with radius 0 closes that end;
+    /// other open ends get a flat cap.
+    Lathe {
+        profile: Vec<[f32; 2]>,
+        segments: u32,
+    },
 }
 
 /// Where an entity's base geometry comes from.
@@ -142,6 +149,64 @@ fn check_size(v: f32, what: &str) -> Result<f32> {
     }
 }
 
+/// Turn `profile` (`[radius, y]`, bottom to top) around Y.
+fn lathe(profile: &[[f32; 2]], segments: u32) -> Result<Mesh> {
+    let seg = check_segments(segments, 3, "segments")?;
+    if !(2..=512).contains(&profile.len()) {
+        return Err(CoreError::Invalid(format!("profile needs 2..=512 points, got {}", profile.len())));
+    }
+    for (i, p) in profile.iter().enumerate() {
+        if !(p[0].is_finite() && p[1].is_finite() && p[0] >= 0.0 && p[0] <= 10_000.0 && p[1].abs() <= 10_000.0) {
+            return Err(CoreError::Invalid(format!(
+                "profile point {i} must have a radius in [0, 10000] and a finite y, got {p:?}"
+            )));
+        }
+    }
+    if profile.iter().all(|p| p[0] <= 1e-7) {
+        return Err(CoreError::Invalid("the profile lies on the axis: give some radius".into()));
+    }
+    let mut m = Mesh::default();
+    // each profile point is a ring of `seg` vertices, or one vertex on the axis
+    let mut rings: Vec<Vec<u32>> = Vec::with_capacity(profile.len());
+    for p in profile {
+        if p[0] <= 1e-7 {
+            m.positions.push([0.0, p[1], 0.0]);
+            rings.push(vec![m.positions.len() as u32 - 1; seg as usize]);
+        } else {
+            let mut ring = Vec::with_capacity(seg as usize);
+            for j in 0..seg {
+                let th = j as f32 / seg as f32 * std::f32::consts::TAU;
+                m.positions.push([p[0] * th.cos(), p[1], -p[0] * th.sin()]);
+                ring.push(m.positions.len() as u32 - 1);
+            }
+            rings.push(ring);
+        }
+    }
+    let n = seg as usize;
+    for k in 0..rings.len() - 1 {
+        let (a, b) = (&rings[k], &rings[k + 1]);
+        for j in 0..n {
+            let mut f = vec![a[j], a[(j + 1) % n], b[(j + 1) % n], b[j]];
+            f.dedup();
+            if f.first() == f.last() {
+                f.pop();
+            }
+            if f.len() >= 3 {
+                m.faces.push(f);
+            }
+        }
+    }
+    let first = &rings[0];
+    if first[0] != first[1] {
+        m.faces.push(first.iter().rev().copied().collect());
+    }
+    let last = &rings[rings.len() - 1];
+    if last[0] != last[1] {
+        m.faces.push(last.clone());
+    }
+    Ok(m)
+}
+
 fn check_segments(v: u32, min: u32, what: &str) -> Result<u32> {
     if (min..=MAX_SEGMENTS).contains(&v) {
         Ok(v)
@@ -152,7 +217,11 @@ fn check_segments(v: u32, min: u32, what: &str) -> Result<u32> {
 
 impl Primitive {
     pub fn build(&self) -> Result<Mesh> {
+        if let Primitive::Lathe { profile, segments } = self {
+            return lathe(profile, *segments);
+        }
         match *self {
+            Primitive::Lathe { .. } => unreachable!("built above"),
             Primitive::Cube { size } => {
                 let [x, y, z] = [
                     check_size(size[0], "size.x")? / 2.0,
@@ -728,6 +797,27 @@ mod tests {
         assert!(Primitive::Sphere { radius: -1.0, segments: 8, rings: 4 }.build().is_err());
         assert!(Primitive::Sphere { radius: 1.0, segments: 100_000, rings: 4 }.build().is_err());
         assert!(Modifier::Subdivide { levels: 9, smooth: true }.apply(&cube()).is_err());
+        let vase = Primitive::Lathe {
+            profile: vec![[0.0, 0.0], [0.1, 0.0], [0.15, 0.2], [0.05, 0.35], [0.06, 0.4]],
+            segments: 16,
+        }
+        .build()
+        .unwrap();
+        vase.validate().unwrap();
+        // closed bottom (pole), open-capped top: every edge shared by two faces
+        let mut half = std::collections::HashMap::new();
+        for f in &vase.faces {
+            for i in 0..f.len() {
+                *half.entry((f[i], f[(i + 1) % f.len()])).or_insert(0) += 1;
+            }
+        }
+        assert!(half.iter().all(|(&(a, b), &c)| c == 1 && half.get(&(b, a)) == Some(&1)));
+        assert_eq!(vase.positions.len(), 1 + 4 * 16);
+        // outward: the side face at angle 0 points +X
+        let side = vase.faces.iter().find(|f| f.len() == 4).unwrap();
+        let n = crate::meshedit::face_normal(&vase, side);
+        assert!(n.x > 0.5, "{n}");
+        assert!(Primitive::Lathe { profile: vec![[0.0, 0.0], [0.0, 1.0]], segments: 8 }.build().is_err());
         let cove = Primitive::Cove { size: [3.0, 2.0, 2.0], radius: 0.5 }.build().unwrap().triangulate(false);
         assert!(cove.normals.first().unwrap()[1] > 0.99, "floor faces up");
         assert!(cove.normals.last().unwrap()[2] > 0.99, "wall faces the front");

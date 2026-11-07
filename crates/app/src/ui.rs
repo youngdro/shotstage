@@ -466,6 +466,16 @@ fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
             json!({"shape": "torus", "majorRadius": 0.3, "minorRadius": 0.08, "majorSegments": 32, "minorSegments": 12}),
             grey,
         ),
+        Block::Shape(
+            "Vase",
+            json!({"shape": "lathe", "segments": 32, "profile": [[0, 0], [0.07, 0], [0.11, 0.08], [0.12, 0.16], [0.07, 0.27], [0.045, 0.32], [0.06, 0.36]]}),
+            grey,
+        ),
+        Block::Shape(
+            "Bowl",
+            json!({"shape": "lathe", "segments": 32, "profile": [[0, 0], [0.05, 0], [0.06, 0.01], [0.13, 0.05], [0.16, 0.09], [0.15, 0.09], [0.12, 0.055], [0.0, 0.02]]}),
+            grey,
+        ),
         Block::Shape("Floor", json!({"shape": "plane", "size": [12, 12]}), [0.5, 0.5, 0.52]),
     ];
     let of = |c: Category| -> Vec<Block> {

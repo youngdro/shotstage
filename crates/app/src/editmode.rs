@@ -142,6 +142,8 @@ pub(super) struct Modal {
     /// Edge slide: one vertex and where it goes on side A and side B (world), to read the
     /// pointer against.
     rail: Option<(Vec3, Vec3, Option<Vec3>)>,
+    /// Grab with Cmd / Ctrl: the vertex it snapped to (screen).
+    snap_to: Option<Pos2>,
 }
 
 /// Amounts used by the panel's tool buttons.
@@ -155,6 +157,10 @@ pub(super) struct EditAmounts {
     /// Proportional editing reach (world metres) and fall-off.
     pub prop_radius: f32,
     pub falloff: me::Falloff,
+    /// Spin: degrees, steps and axis (0 = X, 1 = Y, 2 = Z).
+    pub spin_angle: f32,
+    pub spin_steps: u32,
+    pub spin_axis: usize,
 }
 
 impl Default for EditAmounts {
@@ -168,6 +174,9 @@ impl Default for EditAmounts {
             cuts: 1,
             prop_radius: 1.0,
             falloff: me::Falloff::Smooth,
+            spin_angle: 360.0,
+            spin_steps: 12,
+            spin_axis: 1,
         }
     }
 }
@@ -730,6 +739,7 @@ impl EditorApp {
             pointer,
             knife: Vec::new(),
             rail,
+            snap_to: None,
         });
     }
 
@@ -833,7 +843,49 @@ impl EditorApp {
         let (so, sd) = ray_at(rect, view, m.start);
         let pivot = inv.transform_point3(m.center).to_array();
         let want: Option<(String, Value)> = match m.tool {
+            Tool::Grab if (modifiers.command || modifiers.ctrl) && typed.is_none() => {
+                // hold Cmd / Ctrl: snap onto the nearest vertex under the pointer
+                let moving = me::flush(&m.base, &m.sel).map(|f| f.verts).unwrap_or_default();
+                let target = cage
+                    .pts
+                    .iter()
+                    .enumerate()
+                    .filter(|(v, p)| {
+                        p.is_some()
+                            && !moving.contains(&(*v as u32))
+                            && (self.edit_xray || cage.vert_vis.get(*v).copied().unwrap_or(false))
+                    })
+                    .filter_map(|(v, p)| p.map(|p| ((p - pointer).length(), v)))
+                    .filter(|(d, _)| *d < 16.0)
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                let source = if moving.len() == 1 {
+                    moving
+                        .iter()
+                        .next()
+                        .map(|&v| world.transform_point3(Vec3::from_array(m.base.positions[v as usize])))
+                } else {
+                    Some(m.center)
+                };
+                match (target, source) {
+                    (Some((_, v)), Some(src)) => {
+                        let tw = world.transform_point3(Vec3::from_array(m.base.positions[v]));
+                        m.snap_to = cage.pts[v];
+                        let delta = tw - src;
+                        m.shown = format!("snapped to vertex {v} · {:.3} m", delta.length());
+                        Some((
+                            "mesh.transformElements".into(),
+                            sel_json(json!({"translate": inv.transform_vector3(delta).to_array()})),
+                        ))
+                    }
+                    _ => {
+                        m.snap_to = None;
+                        m.shown = "hold over a vertex to snap to it".into();
+                        m.tried.clone()
+                    }
+                }
+            }
             Tool::Grab => {
+                m.snap_to = None;
                 let delta = match axis_vec {
                     Some(a) => {
                         let t0 = closest_on_line(m.center, a, so, sd).unwrap_or(0.0);
@@ -1086,6 +1138,9 @@ impl EditorApp {
         }
         // loop cut preview
         if let Some(m) = &self.edit_modal {
+            if let Some(p) = m.snap_to {
+                painter.circle_stroke(p, 7.0, (2.0, Color32::from_rgb(255, 230, 60)));
+            }
             if !m.knife.is_empty() {
                 let yellow = Color32::from_rgb(255, 230, 60);
                 let pts: Vec<Pos2> = m.knife.iter().filter_map(|p| project(rect, view, *p)).collect();
@@ -1166,7 +1221,8 @@ impl EditorApp {
                     Tool::Grab | Tool::Rotate | Tool::Scale if self.edit_prop => {
                         " · X Y Z lock an axis · type a number · scroll: proportional radius"
                     }
-                    Tool::Grab | Tool::Rotate | Tool::Scale => " · X Y Z lock an axis · type a number",
+                    Tool::Grab => " · X Y Z lock an axis · type a number · hold Cmd/Ctrl to snap to a vertex",
+                    Tool::Rotate | Tool::Scale => " · X Y Z lock an axis · type a number",
                     Tool::Extrude | Tool::Inset | Tool::Bevel | Tool::Slide => " · type a number",
                     Tool::LoopCut | Tool::Knife => "",
                 };
@@ -1532,6 +1588,26 @@ impl EditorApp {
                 .clicked()
             {
                 run = Some(("mesh.bridge", json!({})));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let a = &mut self.edit_amounts;
+            if ui
+                .button("Spin")
+                .on_hover_text("Extrude the selected edges or faces round the object's origin (360° joins up)")
+                .clicked()
+            {
+                let mut axis = [0.0; 3];
+                axis[a.spin_axis.min(2)] = 1.0;
+                run = Some((
+                    "mesh.spin",
+                    json!({"angle": a.spin_angle, "steps": a.spin_steps, "axis": axis, "center": [0, 0, 0]}),
+                ));
+            }
+            ui.add(egui::DragValue::new(&mut a.spin_angle).speed(1.0).range(-3600.0..=3600.0).suffix("°"));
+            ui.add(egui::DragValue::new(&mut a.spin_steps).range(1..=256).suffix(" steps"));
+            for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
+                ui.selectable_value(&mut a.spin_axis, i, *n);
             }
         });
         ui.horizontal_wrapped(|ui| {
