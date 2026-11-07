@@ -3,8 +3,9 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use shotstage_core::eval::{camera_data_at, posed_tris, world_at};
+use shotstage_core::human::HumanPart;
 use shotstage_core::spatial::{self, RayOptions, is_hidden};
-use shotstage_core::{EntityKind, Scene};
+use shotstage_core::{EntityKind, MeshSource, Scene};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -12,7 +13,8 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
-    /// Entity index + 1 (0 = none), for id passes and picking.
+    /// Entity index + 1 (0 = none), for id passes and picking; the top four bits carry the
+    /// surface look (0 matte, 1 skin, 2 hair, 3 eyes).
     pub id: u32,
 }
 
@@ -103,8 +105,15 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         let selected = selected_set.contains(&e.id);
         let hovered = !selected && hovered_set.contains(&e.id);
         match &e.kind {
-            EntityKind::Mesh { color, .. } => {
+            EntityKind::Mesh { color, source, .. } => {
                 let Ok(tri) = posed_tris(scene, &e.id, frame) else { continue };
+                // surface look for the shader (top four bits of the id)
+                let look: u32 = match source {
+                    MeshSource::Human { part: HumanPart::Skin, .. } => 1,
+                    MeshSource::Human { part: HumanPart::Hair, .. } => 2,
+                    MeshSource::Human { part: HumanPart::Eyes | HumanPart::Irises, .. } => 3,
+                    _ => 0,
+                };
                 let normal_m = world.inverse().transpose();
                 let c = if selected {
                     mix(*color, SELECT, 0.45)
@@ -122,7 +131,7 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                             .normalize_or_zero()
                             .to_array(),
                         color: c,
-                        id: index as u32 + 1,
+                        id: (index as u32 + 1) | look << 28,
                     });
                 }
             }

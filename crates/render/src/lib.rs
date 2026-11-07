@@ -162,7 +162,7 @@ fn shadow_vis(wp: vec3<f32>) -> f32 {
 }
 
 struct MeshIn { @location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) color: vec3<f32>, @location(3) id: u32 };
-struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec3<f32>, @location(2) vz: f32, @location(3) wp: vec3<f32> };
+struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec3<f32>, @location(2) vz: f32, @location(3) wp: vec3<f32>, @location(4) @interpolate(flat) mat: u32 };
 
 @vertex fn vs_mesh(v: MeshIn) -> MeshOut {
     var o: MeshOut;
@@ -171,7 +171,40 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     o.c = v.color;
     o.vz = -(u.view * vec4<f32>(v.pos, 1.0)).z;
     o.wp = v.pos;
+    o.mat = v.id >> 28u;
     return o;
+}
+
+// Surface looks (top bits of the vertex id): 0 matte, 1 skin, 2 hair, 3 eyes.
+// Skin lets light wrap past the terminator, warmer in red (a cheap subsurface look).
+fn diffuse(n: vec3<f32>, l: vec3<f32>, mat: u32) -> vec3<f32> {
+    let d = dot(n, l);
+    let lam = max(d, 0.0);
+    if (mat == 1u) {
+        let wrap = max((d + 0.4) / 1.4, 0.0);
+        return mix(vec3<f32>(lam), vec3<f32>(wrap), vec3<f32>(0.6, 0.38, 0.32));
+    }
+    return vec3<f32>(lam);
+}
+
+// A soft sheen on skin, a tighter highlight on hair, a wet glint on eyes.
+fn specular(n: vec3<f32>, l: vec3<f32>, v: vec3<f32>, mat: u32) -> f32 {
+    if (mat == 0u || dot(n, l) <= 0.0) {
+        return 0.0;
+    }
+    let nh = max(dot(n, normalize(l + v)), 0.0);
+    if (mat == 1u) {
+        return 0.045 * pow(nh, 18.0);
+    }
+    if (mat == 2u) {
+        return 0.09 * pow(nh, 40.0) + 0.03 * pow(nh, 8.0);
+    }
+    return 0.5 * pow(nh, 140.0);
+}
+
+fn eye_pos() -> vec3<f32> {
+    let r = mat3x3<f32>(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
+    return -(transpose(r) * u.view[3].xyz);
 }
 
 @fragment fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
@@ -188,6 +221,8 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     }
     let vis = shadow_vis(i.wp);
     let count = u32(u.light_params.x + 0.5);
+    let v = normalize(eye_pos() - i.wp);
+    var spec = vec3<f32>(0.0);
     if (count > 0u) {
         // scene lights: soft sky ambient plus each light's Lambert term (no shadows)
         var col = i.c * (u.light_params.y * (0.75 + 0.25 * n.y));
@@ -206,14 +241,15 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
                     att = att * smoothstep(l.dir.w, l.rad.w, dot(-ldir, l.dir.xyz));
                 }
             }
-            var ndl = max(dot(n, ldir), 0.0);
-            if (kind == 3u) {
-                ndl = max((dot(n, ldir) + 0.35) / 1.35, 0.0);
+            var ndl = diffuse(n, ldir, i.mat);
+            if (kind == 3u && i.mat != 1u) {
+                ndl = vec3<f32>(max((dot(n, ldir) + 0.35) / 1.35, 0.0));
             }
             if (f32(k) == u.shadow_params.z) {
                 att = att * vis;
             }
             col = col + i.c * l.rad.rgb * ndl * att;
+            col = col + l.rad.rgb * specular(n, ldir, v, i.mat) * att;
         }
         // roll highlights off softly instead of clipping to white
         let knee = vec3<f32>(0.75);
@@ -225,8 +261,9 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     let fill = normalize(vec3<f32>(-0.6, 0.25, -0.5));
     // the studio key casts a soft shadow (so things sit on the ground)
     let key_vis = mix(1.0, vis, 0.7);
-    let light = 0.28 + 0.62 * max(dot(n, key), 0.0) * key_vis + 0.18 * max(dot(n, fill), 0.0) + 0.08 * max(n.y, 0.0);
-    return vec4<f32>(i.c * light, 1.0);
+    let light = vec3<f32>(0.28 + 0.08 * max(n.y, 0.0)) + 0.62 * diffuse(n, key, i.mat) * key_vis + 0.18 * diffuse(n, fill, i.mat);
+    spec = vec3<f32>(0.62 * key_vis * specular(n, key, v, i.mat) + 0.18 * specular(n, fill, v, i.mat));
+    return vec4<f32>(i.c * light + spec, 1.0);
 }
 
 @group(1) @binding(0) var img_tex: texture_2d<f32>;
