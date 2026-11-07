@@ -19,6 +19,36 @@ use crate::host::Host;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// What the model reads first: the workflow, then where the detail is.
+const INSTRUCTIONS: &str = "\
+shotstage is a 3D previs stage: block out a scene with real-size stand-ins, place cameras by \
+shot size, animate, and export reference frames for AI image / video models. Every tool is also \
+a browser API call and a CLI command (same params, same results).
+
+Workflow that works well:
+1. Start: scene_template (see scene_templates) for a ready set, or scene_new and build up.
+2. Set: prefab_create (prefab_list: people, fresh-food retail fixtures and produce, product-shoot \
+props and backdrops, furniture), entity_place (rest on / next to / drop), entity_face, \
+entity_attach (props in hand). model_import / image_import take file paths.
+3. People: pose_set (pose_list), pose_aim, person_lookAt; realistic people also take \
+person_setBody / person_setOutfit / person_setExpression when available.
+4. Light: light_preset (threePoint, productSoftbox, goldenHour...).
+5. Camera: camera_frame {subject, size: closeUp|medium|full|wide..., angle, side} places the \
+camera for you; check it with render_snapshot (you get the image) and camera_describe.
+6. Motion: motion_apply {preset, target, subject} (motion_list: push-ins, orbits, crane, \
+handheld, product spins, character actions); shot_create / shot_cut lay out the edit.
+7. Deliver: render_storyboard (first / middle / last frame of each shot, images back, files in \
+a folder), render_sequence (every frame as clay / depth / normal + per-frame camera data, MP4 \
+with ffmpeg), model_export, scene_save.
+
+Read the scene with scene_summary, entity_bounds and editor_state. Exact control: \
+entity_setTransform, keyframe_set, mesh_* (including edit tools: mesh_extrude, mesh_bevel, \
+mesh_loopCut... on explicit vertex / edge / face indices; mesh_editData lists them). Every \
+change is one undo step (history_undo); command_batch runs several as one. Errors say what is \
+wrong and leave the scene unchanged. Units: metres, degrees, frames; +Y up, ground y = 0, object \
+fronts face +Z, cameras look down -Z. When the bridge is on (bridge_status), your edits appear \
+live in the person's browser editor.";
+
 /// How many storyboard pictures come back as images (the rest are files).
 const BOARD_IMAGES: usize = 12;
 
@@ -222,7 +252,7 @@ pub fn handle(host: &mut Host, cfg: Config, msg: &Value) -> Option<Value> {
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "shotstage", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "shotstage is a 3D previs editor; every tool here is also a browser API call and a CLI command. Start from scene_template (see scene_templates) or build up. Prefer the high-level tools: prefab_create (real-size rigged man / woman, furniture, fresh-food retail fixtures and produce, product-shoot stand-ins, podiums and backdrops; see prefab_list), pose_set / pose_aim / person_setHair to pose people, model_import / model_export for glTF, OBJ, STL (FBX through Blender), light_preset or entity_create type light for lighting, image_import for reference pictures and backdrops, motion_apply for camera moves / object motion / character actions (see motion_list), entity_place (rest on / next to / drop), entity_face, camera_frame (shot size + angle + side), then look at the result with render_snapshot (returns an image) and camera_describe. shot_create / shot_cut lay out the edit; render_storyboard renders the first / middle / last frame of every shot (images back, files to a folder) and render_sequence renders every frame as clay / depth / normal control sequences with per-frame camera data. scene_save / scene_open / model_import / model_export / image_import take file paths. Low-level tools (entity_create, entity_setTransform, mesh_*, keyframe_set, camera_dollyMove, camera_orbitMove) give exact control. Read the scene with scene_summary and entity_bounds. Every edit is undoable with history_undo. Units: metres, degrees, frames; +Y up, object fronts face +Z.",
+            "instructions": INSTRUCTIONS,
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools(&Session::default().list(), cfg)})),

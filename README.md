@@ -188,6 +188,16 @@ claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json
 
 MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch` 三个通用工具；工具预算紧的客户端可以加 `--compact`，只发布通用工具和几个常用工具，其余照样能用 `command_run` 调。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图；`render_storyboard` 把分镜写到场景文件旁边的 `<场景>.storyboard/` 文件夹，同时把各镜头的画面作为图片返回。
 
+### 端到端示例
+
+[examples/fresh-produce-ad.json](examples/fresh-produce-ad.json) 是一串 MCP 工具调用，和 Claude 实际会做的一样：从空场景搭一个生鲜货架、放一位挑水果的顾客（手里挎着篮子）、布光、用景别给两台相机构图、加推镜、切两个镜头，再截图检查、出分镜。用 [examples/run-mcp-example.py](examples/run-mcp-example.py) 回放（只用 Python 标准库）：
+
+```sh
+cargo build -p shotstage-cli
+python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --scene /tmp/ad.shotstage.json
+python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --live    # 在浏览器里看着它搭
+```
+
 ### 实时桥：让 Claude 直接操作你打开的编辑器
 
 ```sh

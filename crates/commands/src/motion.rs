@@ -116,6 +116,7 @@ struct MotionParams {
     preset: String,
     /// What to animate. Camera moves: a camera (default: the active camera). Object motion: any
     /// entity. Character actions: a person (root, joint or part).
+    #[serde(alias = "id")]
     target: Option<String>,
     /// What camera moves aim at, orbit and track (default: what the camera looks at).
     subject: Option<String>,
@@ -263,6 +264,15 @@ fn apply(scene: &mut Scene, p: MotionParams) -> CmdResult<Value> {
         );
         (hit.map(|h| Vec3::from_array(h.point)).unwrap_or(pos0 + fwd * 4.0), 1.0)
     });
+    // A camera already pointed at the subject (framed with camera.frame, say) keeps its framing:
+    // moves aim at the point it looks at, level with the subject, not at the subject's centre
+    // (which would tilt a medium shot of a person down to the waist on the first frame).
+    let center = {
+        let along = (center - pos0).dot(fwd);
+        let on_axis = pos0 + fwd * along;
+        let off = (center - pos0).normalize_or_zero().dot(fwd);
+        if subject.is_some() && along > 0.1 && off > 25f32.to_radians().cos() { on_axis } else { center }
+    };
     let dist = (center - pos0).length().max(0.3);
     let step = (dist * 0.35).clamp(0.3, 4.0) * k;
     let dense = ((frames / 3.0).ceil() as usize).clamp(4, 240);
