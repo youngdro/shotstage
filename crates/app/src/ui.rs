@@ -3125,17 +3125,36 @@ impl EditorApp {
             });
         });
         section(ui, "Face", true, |ui| {
+            // with expression keys the face follows the timeline: show and key what is there
+            let keyed = scene
+                .timeline
+                .track(root, TrackProperty::Expression)
+                .and_then(|t| t.sample(frame))
+                .and_then(|v| if let shotstage_core::KeyValue::Expression(m) = v { Some(m) } else { None });
+            let keyed_now = keyed.map(|m| if m.a_amount >= m.b_amount { m.a } else { m.b });
             ui.horizontal_wrapped(|ui| {
-                for e in shotstage_core::human::EXPRESSIONS {
-                    let on = !body.face.is_empty()
-                        && e.units.len() == body.face.len()
-                        && e.units.iter().all(|(u, w)| body.face.get(*u).is_some_and(|v| (v - w).abs() < 1e-3));
-                    let on = on || (e.units.is_empty() && body.face.is_empty());
+                for (i, e) in shotstage_core::human::EXPRESSIONS.iter().enumerate() {
+                    let on = match keyed_now {
+                        Some(k) => k as usize == i,
+                        None => {
+                            (!body.face.is_empty()
+                                && e.units.len() == body.face.len()
+                                && e.units.iter().all(|(u, w)| body.face.get(*u).is_some_and(|v| (v - w).abs() < 1e-3)))
+                                || (e.units.is_empty() && body.face.is_empty())
+                        }
+                    };
                     if ui.selectable_label(on, humanize(e.name)).on_hover_text(e.description).clicked() {
-                        self.run("person.setExpression", json!({"id": root, "expression": e.name}));
+                        let mut req = json!({"id": root, "expression": e.name});
+                        if animated || keyed.is_some() {
+                            req["keyframeAt"] = json!(frame.round());
+                        }
+                        self.run("person.setExpression", req);
                     }
                 }
             });
+            if keyed.is_some() {
+                ui.weak("Keyed: the face cross-fades between expression keys.");
+            }
         });
         section(ui, "Body", true, |ui| {
             egui::Grid::new("human_body").num_columns(2).show(ui, |ui| {
@@ -4026,7 +4045,15 @@ impl EditorApp {
         let mut steps = vec![];
         let ids: Vec<String> = match rig::person_root(&scene, &id) {
             Ok(root) if root == id => {
-                std::iter::once(root.clone()).chain(rig::JOINTS.iter().map(|j| format!("{root}_{j}"))).collect()
+                // realistic people key every joint (fingers too) and their expression
+                let joints: Vec<String> = humans::human_parts(&scene, &root)
+                    .first()
+                    .and_then(|(part, ..)| scene.get(part).ok().and_then(rig::mesh_joints).cloned())
+                    .unwrap_or_else(|| rig::JOINTS.iter().map(|j| format!("{root}_{j}")).collect());
+                if scene.timeline.track(&root, TrackProperty::Expression).is_some() {
+                    steps.push(json!({"command": "keyframe.set", "params": {"id": root, "property": "expression", "frame": f}}));
+                }
+                std::iter::once(root.clone()).chain(joints).collect()
             }
             _ => vec![id.clone()],
         };

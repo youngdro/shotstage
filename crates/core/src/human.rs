@@ -258,6 +258,28 @@ pub struct Expression {
     pub units: &'static [(&'static str, f32)],
 }
 
+/// Index of a named expression in [`EXPRESSIONS`].
+pub fn expression_index(name: &str) -> Option<u8> {
+    EXPRESSIONS.iter().position(|e| e.name == name).map(|i| i as u8)
+}
+
+/// Expression-unit weights of a keyed mix of named expressions.
+pub fn mix_face(mix: &crate::ExpressionMix) -> BTreeMap<String, f32> {
+    let mut face: BTreeMap<String, f32> = BTreeMap::new();
+    for (i, w) in [(mix.a, mix.a_amount), (mix.b, mix.b_amount)] {
+        let Some(e) = EXPRESSIONS.get(i as usize) else { continue };
+        for (u, x) in e.units {
+            *face.entry(u.to_string()).or_default() += x * w;
+        }
+    }
+    // a few steps per unit keep cross-fades cheap to cache without visible stepping
+    face.retain(|_, w| {
+        *w = (*w * 200.0).round() / 200.0;
+        w.abs() > 1e-4
+    });
+    face
+}
+
 pub const EXPRESSIONS: &[Expression] = &[
     Expression { name: "neutral", description: "Relaxed, no expression", units: &[] },
     Expression {

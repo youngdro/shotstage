@@ -240,6 +240,7 @@ pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
         _ => return Err(CoreError::WrongKind(id.into(), "mesh")),
     };
     if let crate::MeshSource::Human { body, part, outfit, joints } = source {
+        let body = &body_at(scene, id, body, frame);
         body.validate()?;
         outfit.validate()?;
         let mats = human_matrices(scene, id, body, joints, frame)?;
@@ -290,6 +291,24 @@ pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
     Ok(m)
 }
 
+/// A human part's body at `frame`: the face follows the person's expression track, if any.
+fn body_at<'a>(
+    scene: &Scene,
+    id: &str,
+    body: &'a crate::human::HumanBody,
+    frame: f32,
+) -> std::borrow::Cow<'a, crate::human::HumanBody> {
+    let root = scene.get(id).ok().and_then(|e| e.parent.as_deref());
+    match root.and_then(|r| scene.timeline.track(r, TrackProperty::Expression)).and_then(|t| t.sample(frame)) {
+        Some(KeyValue::Expression(mix)) => {
+            let mut b = body.clone();
+            b.face = crate::human::mix_face(&mix);
+            std::borrow::Cow::Owned(b)
+        }
+        _ => std::borrow::Cow::Borrowed(body),
+    }
+}
+
 /// Skinning matrices of a human part entity at `frame` (joints that were deleted stay at rest).
 fn human_matrices(
     scene: &Scene,
@@ -322,6 +341,7 @@ pub fn posed_tris(scene: &Scene, id: &str, frame: f32) -> Result<std::rc::Rc<cra
         crate::EntityKind::Mesh {
             source: crate::MeshSource::Human { body, part, outfit, joints }, modifiers, ..
         } if modifiers.is_empty() => {
+            let body = &body_at(scene, id, body, frame);
             body.validate()?;
             outfit.validate()?;
             let mats = human_matrices(scene, id, body, joints, frame)?;

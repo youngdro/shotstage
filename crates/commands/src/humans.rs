@@ -12,7 +12,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use shotstage_core::eval::local_at;
 use shotstage_core::human::{self, EXPRESSION_UNITS, EXPRESSIONS, HumanBody, HumanOutfit, HumanPart, PARTS};
-use shotstage_core::{Entity, EntityKind, MeshSource, Scene, Transform};
+use shotstage_core::{
+    Entity, EntityKind, ExpressionMix, Interp, Key, KeyValue, MeshSource, Scene, TrackProperty, Transform,
+};
 
 use crate::builtin::{color, frame_ok};
 use crate::rig::person_root;
@@ -197,7 +199,7 @@ pub fn human_of(scene: &Scene, root: &str) -> Option<(HumanBody, HumanOutfit)> {
     human_parts(scene, root).into_iter().next().map(|(_, _, b, o)| (b, o))
 }
 
-fn human_root(scene: &Scene, id: &str) -> CmdResult<String> {
+pub fn human_root(scene: &Scene, id: &str) -> CmdResult<String> {
     let root = person_root(scene, id)?;
     if human_of(scene, &root).is_none() {
         return Err(CommandError::new(
@@ -617,8 +619,12 @@ struct ExpressionParams {
     expression: Option<String>,
     /// How strong, 0 … 1.5 (default 1).
     amount: Option<f32>,
-    /// Raw expression units with weights, added on top of `expression`.
+    /// Raw expression units with weights, added on top of `expression` (not with
+    /// `keyframeAt`).
     units: Option<BTreeMap<String, f32>>,
+    /// Keyframe the named expression at this frame: between keys the face cross-fades from
+    /// one expression to the next. Once a person has expression keys, their face follows them.
+    keyframe_at: Option<f32>,
 }
 
 fn set_expression(scene: &mut Scene, p: ExpressionParams) -> CmdResult<Value> {
@@ -646,8 +652,21 @@ fn set_expression(scene: &mut Scene, p: ExpressionParams) -> CmdResult<Value> {
         return Err(CommandError::invalid("give `expression` and/or `units`"));
     }
     face.retain(|_, w| w.abs() > 1e-4);
+    if let Some(f) = p.keyframe_at {
+        let f = frame_ok(f)?;
+        let (Some(name), None) = (&p.expression, &p.units) else {
+            return Err(CommandError::invalid("keyframes take a named `expression` (no raw `units`)"));
+        };
+        let index = shotstage_core::human::expression_index(name).unwrap_or(0);
+        scene.timeline.track_mut_or_insert(&root, TrackProperty::Expression).set_key(Key {
+            frame: f,
+            value: KeyValue::Expression(ExpressionMix::single(index, amount)),
+            interp: Interp::default(),
+        });
+    }
     update_parts(scene, &root, |b, _| b.face = face.clone())?;
-    Ok(json!({ "id": root, "units": face }))
+    let keys = scene.timeline.track(&root, TrackProperty::Expression).map_or(0, |t| t.keys.len());
+    Ok(json!({ "id": root, "units": face, "keys": keys }))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -676,7 +695,7 @@ pub fn commands() -> Vec<Command> {
     vec![
         command!("person.setBody", "Change a realistic person's body: gender (0 female … 1 male), age in years (11 … 90), weight, muscle and height (-1 … 1). Joints follow; the feet stay on the ground.", mutates: true, BodyParams, set_body),
         command!("person.setOutfit", "Change a realistic person's clothes and hair length (top + sleeve length, trousers / shorts + leg length, shoes, hair) and part colours.", mutates: true, OutfitParams, set_outfit),
-        command!("person.setExpression", "Give a realistic person a facial expression (smile, laugh, surprised, angry, sad, talking… see person.expressions), optionally with raw expression units.", mutates: true, ExpressionParams, set_expression),
+        command!("person.setExpression", "Give a realistic person a facial expression (smile, laugh, surprised, angry, sad, talking… see person.expressions), optionally with raw expression units. With keyframeAt the expression is keyed on the timeline and the face cross-fades between keys.", mutates: true, ExpressionParams, set_expression),
         command!("person.expressions", "Named facial expressions and the raw expression units person.setExpression accepts.", mutates: false, crate::builtin::NoParams,
         |_, _| Ok(json!({
             "expressions": EXPRESSIONS.iter().map(|e| json!({ "name": e.name, "description": e.description })).collect::<Vec<_>>(),
@@ -731,6 +750,45 @@ mod tests {
         assert!(b["size"][1].as_f64().unwrap() < 1.45, "sitting is lower: {b}");
         let got = s.dispatch("person.get", json!({"id": "h_head"})).unwrap().result;
         assert_eq!(got["kind"], "human");
+    }
+
+    #[test]
+    fn expressions_keyframe_and_cross_fade() {
+        let mut s = Session::default();
+        s.dispatch("prefab.create", json!({"kind": "humanMan", "id": "h"})).unwrap();
+        s.dispatch("person.setExpression", json!({"id": "h_head", "expression": "neutral", "keyframeAt": 0})).unwrap();
+        let r = s
+            .dispatch("person.setExpression", json!({"id": "h", "expression": "smile", "keyframeAt": 20}))
+            .unwrap()
+            .result;
+        assert_eq!(r["keys"], 2);
+        // raw units cannot be keyed
+        assert!(
+            s.dispatch("person.setExpression", json!({"id": "h", "units": {"mouth-open": 0.5}, "keyframeAt": 5}))
+                .is_err()
+        );
+        let mouth = |s: &Session, f: f32| {
+            let m = shotstage_core::eval::posed_mesh(s.scene(), "h_skin", f).unwrap();
+            m.positions.iter().map(|p| p[0] * 3.1 + p[1] * 1.7 + p[2] * 0.3).sum::<f32>()
+        };
+        let (a, b, c) = (mouth(&s, 0.0), mouth(&s, 10.0), mouth(&s, 20.0));
+        assert!((a - c).abs() > 1e-3, "the face changes between keys");
+        assert!((b - a) * (c - b) > 0.0, "and passes through in between");
+        // re-key whatever shows at a frame, from any part
+        s.dispatch("keyframe.set", json!({"id": "h_skin", "property": "expression", "frame": 40})).unwrap();
+        let keys = &s.scene().timeline.track("h", shotstage_core::TrackProperty::Expression).unwrap().keys;
+        assert_eq!(keys.len(), 3);
+        // duplicates carry their expression track along
+        s.dispatch("entity.duplicate", json!({"id": "h"})).unwrap();
+        assert_eq!(
+            s.scene()
+                .timeline
+                .tracks
+                .iter()
+                .filter(|t| t.property == shotstage_core::TrackProperty::Expression)
+                .count(),
+            2
+        );
     }
 
     #[test]

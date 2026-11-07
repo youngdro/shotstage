@@ -105,6 +105,13 @@ pub const PRESETS: &[Preset] = &[
     preset!("pickUp", "Pick up", Character, 2.5, "Bend down to pick something up and stand again"),
     preset!("turnHead", "Look around", Character, 3.0, "Turn the head left and right"),
     preset!("nod", "Nod", Character, 1.2, "Nod twice"),
+    preset!(
+        "laugh",
+        "Laugh",
+        Character,
+        2.5,
+        "Laugh: head back, shoulders shaking (realistic people laugh with their face too)"
+    ),
     preset!("sitDown", "Sit down", Character, 1.5, "Sit down from standing"),
     preset!("standUp", "Stand up", Character, 1.5, "Stand up from sitting"),
 ];
@@ -898,9 +905,81 @@ fn character(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, k:
             n += key_pose(scene, root, start, &pose_map(a), pelvis_drop(a), Interp::Ease)?;
             n += key_pose(scene, root, end, &pose_map(b), pelvis_drop(b), Interp::Ease)?;
         }
+        "laugh" => {
+            let shakes = (frames / fps * 4.0).round().max(2.0) as usize;
+            for i in 0..=shakes {
+                let u = i as f32 / shakes as f32;
+                let mut p = stand.clone();
+                if i != 0 && i != shakes {
+                    let up = if i % 2 == 0 { 1.0 } else { 0.0 };
+                    p.insert("head", [-12.0 - 4.0 * up, 0.0, 0.0]);
+                    p.insert("chest", [-4.0 - 3.0 * up, 0.0, 0.0]);
+                    p.insert("shoulder_l", [0.0, 0.0, 6.0 + 4.0 * up]);
+                    p.insert("shoulder_r", [0.0, 0.0, -6.0 - 4.0 * up]);
+                }
+                n += key_pose(scene, root, start + frames * u, &p, cur_drop, Interp::Ease)?;
+            }
+        }
         _ => {}
     }
+    n += character_face(scene, root, name, start, end, fps)?;
     Ok(n)
+}
+
+/// Facial keys that go with a character action, for realistic people (mannequins have no face).
+fn character_face(scene: &mut Scene, root: &str, name: &str, start: f32, end: f32, fps: f32) -> CmdResult<usize> {
+    if crate::humans::human_of(scene, root).is_none() {
+        return Ok(0);
+    }
+    let frames = end - start;
+    let ex = |n: &str| shotstage_core::human::expression_index(n).unwrap_or(0);
+    let mut keys: Vec<(f32, u8, f32)> = vec![];
+    match name {
+        "talk" => {
+            // the mouth opens and closes about four times a second, never quite the same
+            let flaps = (frames / fps * 4.0).round().max(2.0) as usize;
+            for i in 0..=flaps {
+                let u = i as f32 / flaps as f32;
+                let open = if i == 0 || i == flaps {
+                    0.0
+                } else if i % 2 == 1 {
+                    [0.9, 0.6, 1.0, 0.7][(i / 2) % 4]
+                } else {
+                    0.15
+                };
+                keys.push((start + frames * u, ex("talking"), open));
+            }
+        }
+        "wave" => {
+            keys = vec![(start, ex("neutral"), 1.0), (start + frames * 0.2, ex("smile"), 1.0), (end, ex("smile"), 0.6)]
+        }
+        "laugh" => {
+            keys = vec![
+                (start, ex("smile"), 0.6),
+                (start + frames * 0.15, ex("laugh"), 1.0),
+                (end - frames * 0.15, ex("laugh"), 0.9),
+                (end, ex("smile"), 0.8),
+            ]
+        }
+        "pickUp" => {
+            keys = vec![
+                (start, ex("neutral"), 1.0),
+                (start + frames * 0.45, ex("focused"), 0.8),
+                (end, ex("neutral"), 1.0),
+            ]
+        }
+        _ => return Ok(0),
+    }
+    let track = scene.timeline.track_mut_or_insert(root, TrackProperty::Expression);
+    track.keys.retain(|k| k.frame < start - 1e-3 || k.frame > end + 1e-3);
+    for (f, i, w) in &keys {
+        track.set_key(Key {
+            frame: *f,
+            value: KeyValue::Expression(shotstage_core::ExpressionMix::single(*i, *w)),
+            interp: Interp::Ease,
+        });
+    }
+    Ok(keys.len())
 }
 
 #[derive(Deserialize, JsonSchema)]
