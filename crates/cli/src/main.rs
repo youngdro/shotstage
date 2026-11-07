@@ -18,6 +18,7 @@
 //! server accept exactly the catalog that `shotstage commands` prints.
 
 mod bridge;
+mod docs;
 mod host;
 mod mcp;
 
@@ -49,6 +50,9 @@ enum Cmd {
         /// Only ids and summaries.
         #[arg(long)]
         brief: bool,
+        /// The API reference as Markdown (docs/api.md is generated with this).
+        #[arg(long)]
+        markdown: bool,
     },
     /// Run one command and print its JSON result.
     Run {
@@ -295,9 +299,11 @@ fn finish(r: Result<Outcome, CommandError>) -> ExitCode {
 fn real_main() -> Result<ExitCode, String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Commands { brief } => {
+        Cmd::Commands { brief, markdown } => {
             let list = Session::default().list();
-            if brief {
+            if markdown {
+                print!("{}", docs::markdown(&list));
+            } else if brief {
                 for c in list {
                     let tag = if !c.needs.is_empty() {
                         format!("  ({})", c.needs.join(", "))

@@ -302,7 +302,8 @@ struct DescribeParams {
     id: Option<String>,
     /// Default: the timeline start.
     frame: Option<f32>,
-    /// Entity to measure the shot size against (e.g. the actor).
+    /// Entity to measure the shot size against (e.g. the actor). Default: the person nearest
+    /// the centre of the frame, else the nearest-to-centre object.
     subject: Option<String>,
 }
 
@@ -785,7 +786,8 @@ pub fn registry() -> Vec<Command> {
         |s, p| {
             let frame = frame_ok(p.frame.unwrap_or(s.timeline.start as f32))?;
             let cam = pick_camera(s, p.id, frame)?;
-            Ok(serde_json::to_value(describe_shot(s, &cam, frame, p.subject.as_deref())?).unwrap_or(Value::Null))
+            let subject = p.subject.or_else(|| crate::host::auto_subject(s, &cam, frame));
+            Ok(serde_json::to_value(describe_shot(s, &cam, frame, subject.as_deref())?).unwrap_or(Value::Null))
         }),
         command!("camera.trajectory", "Per-frame intrinsics and world-to-camera matrices (OpenCV axes) for camera-controlled video models.", mutates: false, TrajectoryParams,
         |s, p| {

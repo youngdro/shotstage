@@ -220,6 +220,62 @@ pub fn view_command(view: &mut ViewState, scene: &Scene, id: &str, params: Value
     Some(r)
 }
 
+// ---------------------------------------------------------------- subject
+
+/// What a shot is of, when nobody said: the person nearest the centre of the frame, else the
+/// nearest-to-centre unlocked object (locked things are floors and backdrops). `None` when
+/// nothing is in view.
+pub fn auto_subject(scene: &Scene, camera: &str, frame: f32) -> Option<String> {
+    use shotstage_core::EntityKind;
+    use shotstage_core::eval::{camera_data_at, world_at};
+    let lens = camera_data_at(scene, camera, frame).ok()?;
+    let world = world_at(scene, camera, frame).ok()?;
+    let (eye, inv) = (world.w_axis.truncate(), world.inverse());
+    let ty = (lens.vfov() / 2.0).tan();
+    let tx = ty * lens.aspect;
+    let mut best: Option<(bool, f32, String)> = None;
+    for e in scene.entities.iter().filter(|e| e.parent.is_none() && e.visible && e.id != camera) {
+        if matches!(e.kind, EntityKind::Camera(_) | EntityKind::Light(_)) {
+            continue;
+        }
+        let person = crate::rig::person_root(scene, &e.id).is_ok_and(|r| r == e.id);
+        if e.locked && !person {
+            continue;
+        }
+        let Some(b) = shotstage_core::spatial::bounds(scene, &e.id, frame).ok().flatten() else { continue };
+        // the box on screen (corners behind the camera left out)
+        let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for i in 0..8 {
+            let corner = glam::Vec3::new(
+                if i & 1 == 0 { b.min.x } else { b.max.x },
+                if i & 2 == 0 { b.min.y } else { b.max.y },
+                if i & 4 == 0 { b.min.z } else { b.max.z },
+            );
+            let c = inv.transform_point3(corner);
+            if c.z > -0.05 {
+                continue;
+            }
+            let (x, y) = (c.x / -c.z / tx, c.y / -c.z / ty);
+            (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+        }
+        if x0 > x1 || x1 < -1.0 || x0 > 1.0 || y1 < -1.0 || y0 > 1.0 {
+            continue; // not in frame
+        }
+        // how far the frame centre is from the box: 0 when the box covers it; nearer wins, and
+        // distance from the camera breaks ties between things lined up
+        let (dx, dy) = ((x0.max(0.0) + x1.min(0.0)).abs(), (y0.max(0.0) + y1.min(0.0)).abs());
+        let score = (dx * dx + dy * dy).sqrt() + 0.02 * (b.center() - eye).length();
+        let better = match &best {
+            None => true,
+            Some((bp, bs, _)) => (person && !bp) || (person == *bp && score < *bs),
+        };
+        if better {
+            best = Some((person, score, e.id.clone()));
+        }
+    }
+    best.map(|(_, _, id)| id)
+}
+
 // ---------------------------------------------------------------- storyboard
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -315,7 +371,8 @@ pub fn storyboard_plan(scene: &Scene, params: Value) -> CmdResult<BoardPlan> {
         return Err(CommandError::invalid("that storyboard has more than 600 pictures; pick fewer shots or passes"));
     }
     let describe = |cam: &str, f: u32| {
-        shotstage_core::eval::describe_shot(scene, cam, f as f32, None)
+        let subject = auto_subject(scene, cam, f as f32);
+        shotstage_core::eval::describe_shot(scene, cam, f as f32, subject.as_deref())
             .ok()
             .and_then(|d| serde_json::to_value(d).ok())
             .unwrap_or(Value::Null)
@@ -890,6 +947,27 @@ mod tests {
         assert!(html.contains("<img src=\"a.png\""));
         assert!(storyboard_plan(s.scene(), json!({"shots": [99]})).is_err());
         assert!(storyboard_plan(Session::default().scene(), json!({})).is_err());
+    }
+
+    #[test]
+    fn describe_finds_the_subject() {
+        let mut s = Session::default();
+        s.dispatch("scene.template", json!({"name": "interview"})).unwrap();
+        // every shot of the interview has a person in it: the shot size is known
+        for shot in s.scene().timeline.shots.clone() {
+            let d = s.dispatch("camera.describe", json!({"id": shot.camera, "frame": shot.start})).unwrap().result;
+            assert!(d["shotSize"].is_string(), "{}: {d}", shot.name);
+            assert!(
+                d["summary"].as_str().unwrap().contains("shot") || d["summary"].as_str().unwrap().contains("close-up")
+            );
+        }
+        // looking at nothing: no subject
+        s.dispatch(
+            "entity.create",
+            json!({"type": "camera", "id": "sky", "position": [0, 50, 0], "rotationEuler": [90, 0, 0]}),
+        )
+        .unwrap();
+        assert!(auto_subject(s.scene(), "sky", 0.0).is_none());
     }
 
     #[test]
