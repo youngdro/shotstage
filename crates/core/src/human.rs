@@ -1012,10 +1012,10 @@ pub fn skin_matrices(rest: &HumanRest, to_local: Mat4, joint_world: &[Option<Mat
         .collect()
 }
 
-/// Up to four joints and their weights.
 /// How far a vertex is covered by a garment (> 0 covered), from the outfit.
 type Field = fn(&HumanOutfit, usize) -> f32;
 
+/// Up to four joints and their weights.
 type Influence = ([u8; 4], [f32; 4]);
 
 fn influence(v: u32) -> Influence {
@@ -1047,11 +1047,21 @@ fn blend(x: Influence, y: Influence, t: f32) -> Influence {
     out
 }
 
+/// A limb segment between two joints with its surface radius along it (11 samples, rest pose),
+/// used to keep loose garments outside it.
+struct Limb {
+    from: usize,
+    to: usize,
+    radius: [f32; 11],
+}
+
 /// A part ready to skin: rest (A-pose) positions, skin weights and polygons.
 struct Geometry {
     rest: Vec<Vec3>,
     skin: Vec<Influence>,
     faces: Vec<Vec<u32>>,
+    /// Limbs the part is kept outside of once posed (the apron over the thighs when sitting).
+    collide: Vec<Limb>,
 }
 
 impl Geometry {
@@ -1091,7 +1101,11 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
             return hair(&r, outfit);
         }
         if part == HumanPart::Apron {
-            return if outfit.apron { apron(&r) } else { Geometry { rest: vec![], skin: vec![], faces: vec![] } };
+            return if outfit.apron {
+                apron(&r)
+            } else {
+                Geometry { rest: vec![], skin: vec![], faces: vec![], collide: vec![] }
+            };
         }
         let s = slice(part, outfit);
         // shoes stand a little proud of the feet
@@ -1101,7 +1115,7 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
             let p = r.positions[v as usize];
             if inflate > 0.0 { p + normals[v as usize] * inflate } else { p }
         };
-        let mut g = Geometry { rest: vec![], skin: vec![], faces: s.faces.clone() };
+        let mut g = Geometry { rest: vec![], skin: vec![], faces: s.faces.clone(), collide: vec![] };
         for v in &s.verts {
             match *v {
                 SliceVert::Asset(i) => {
@@ -1122,7 +1136,7 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
 fn hair(r: &HumanRest, outfit: &HumanOutfit) -> Geometry {
     let a = asset();
     let length = outfit.hair;
-    let mut g = Geometry { rest: vec![], skin: vec![], faces: vec![] };
+    let mut g = Geometry { rest: vec![], skin: vec![], faces: vec![], collide: vec![] };
     if length <= 0.0 {
         return g;
     }
@@ -1278,12 +1292,12 @@ fn hair(r: &HumanRest, outfit: &HumanOutfit) -> Geometry {
 /// bib follows the chest; the skirt moves with the pelvis (it hangs, it does not wrap the legs).
 fn apron(r: &HumanRest) -> Geometry {
     let a = asset();
-    let mut g = Geometry { rest: vec![], skin: vec![], faces: vec![] };
+    let mut g = Geometry { rest: vec![], skin: vec![], faces: vec![], collide: vec![] };
     let skel = skeleton();
     let joint = |n: &str| skel.iter().position(|(s, _)| *s == n).unwrap_or(0);
     let (chest, spine, pelvis, knee) = (joint("chest"), joint("spine"), joint("pelvis"), joint("knee_l"));
     let (hip_l, hip_r) = (joint("hip_l"), joint("hip_r"));
-    let top = r.joints[chest].y + 0.07;
+    let top = r.joints[chest].y + 0.12;
     let waist = r.joints[spine].y;
     let bottom = r.joints[knee].y + 0.04;
     // the front of the body by height (1 cm bins): (x, z, vertex)
@@ -1352,6 +1366,33 @@ fn apron(r: &HumanRest) -> Geometry {
         }
         grid.push(line);
     }
+    // keep the skirt outside the thighs (sitting, kneeling, a knee coming up)
+    for (hip, knee) in [(hip_l, joint("knee_l")), (hip_r, joint("knee_r"))] {
+        let (j0, j1) = (r.joints[hip], r.joints[knee]);
+        let axis = j1 - j0;
+        let len2 = axis.length_squared().max(1e-6);
+        let mut radius = [0.05f32; 11];
+        for (q, quad) in a.quads.iter().enumerate() {
+            if !matches!(a.part[q], 0 | 1) || a.region[q] != REGION_LEG {
+                continue;
+            }
+            for v in quad {
+                let p = r.positions[*v as usize];
+                let t = (p - j0).dot(axis) / len2;
+                if !(0.0..=1.0).contains(&t) || (p.x - j0.x).abs() > 0.12 {
+                    continue;
+                }
+                // the front of the thigh (the seat and the hip bone would bulge it)
+                let d = p - (j0 + axis * t);
+                if d.z < 0.7 * d.length() {
+                    continue;
+                }
+                let k = (t * 10.0).round() as usize;
+                radius[k] = radius[k].max(d.length());
+            }
+        }
+        g.collide.push(Limb { from: hip, to: knee, radius });
+    }
     for row in 0..rows {
         for c in 0..cols {
             let (a0, b0, c0, d0) = (grid[row][c], grid[row + 1][c], grid[row + 1][c + 1], grid[row][c + 1]);
@@ -1378,8 +1419,9 @@ fn eye_center(p: &[Vec3]) -> Vec3 {
     sum / n.max(1.0)
 }
 
-fn skinned_positions(g: &Geometry, mats: &[Mat4]) -> Vec<Vec3> {
-    g.rest
+fn skinned_positions(g: &Geometry, rest: &HumanRest, mats: &[Mat4]) -> Vec<Vec3> {
+    let mut out: Vec<Vec3> = g
+        .rest
         .iter()
         .zip(&g.skin)
         .map(|(p, (js, ws))| {
@@ -1391,13 +1433,49 @@ fn skinned_positions(g: &Geometry, mats: &[Mat4]) -> Vec<Vec3> {
             }
             out
         })
-        .collect()
+        .collect();
+    for limb in &g.collide {
+        let (m, mt) = (mats[limb.from], mats[limb.to]);
+        let a = m.transform_point3(rest.joints[limb.from]);
+        let b = mt.transform_point3(rest.joints[limb.to]);
+        let axis = b - a;
+        let len2 = axis.length_squared().max(1e-6);
+        let dir = axis / len2.sqrt();
+        // the limb's front, carried by its joint: pushed garments go that way
+        let front = {
+            let f = m.transform_vector3(Vec3::Z);
+            (f - dir * f.dot(dir)).normalize_or(Vec3::Y)
+        };
+        for p in &mut out {
+            let t = (*p - a).dot(axis) / len2;
+            if !(-0.05..=1.05).contains(&t) {
+                continue;
+            }
+            let k = (t.clamp(0.0, 1.0) * 10.0).round() as usize;
+            let r = limb.radius[k] + 0.012;
+            let c = a + axis * t;
+            let d = *p - c;
+            let fd = d.dot(front);
+            let side = d - front * fd;
+            if d.length_squared() >= r * r || side.length_squared() >= r * r {
+                continue;
+            }
+            let need = (r * r - side.length_squared()).sqrt();
+            if fd < need {
+                *p = c + side + front * need;
+            }
+        }
+    }
+    out
 }
 
 /// A posed part as an editable mesh (export, mesh edits).
 pub fn part_mesh(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit, mats: &[Mat4]) -> Mesh {
     let g = geometry(body, part, outfit);
-    Mesh { positions: skinned_positions(&g, mats).into_iter().map(|p| p.to_array()).collect(), faces: g.faces.clone() }
+    Mesh {
+        positions: skinned_positions(&g, &rest(body), mats).into_iter().map(|p| p.to_array()).collect(),
+        faces: g.faces.clone(),
+    }
 }
 
 /// A posed part triangulated with smooth normals (cached by shape, outfit and joint matrices).
@@ -1413,7 +1491,7 @@ pub fn part_tris(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit, mats: 
     }
     cached(&POSED, h.0, 128, || {
         let g = geometry(body, part, outfit);
-        let pos = skinned_positions(&g, mats);
+        let pos = skinned_positions(&g, &rest(body), mats);
         let mut normals = vec![Vec3::ZERO; pos.len()];
         let mut indices = Vec::with_capacity(g.faces.len() * 6);
         for f in &g.faces {
