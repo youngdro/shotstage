@@ -1608,6 +1608,312 @@ pub fn bisect(m: &Mesh, sel: &Elements, point: Vec3, normal: Vec3, clear: ClearS
     Ok(finish(out, Elements::edges(new_edges)))
 }
 
+/// How the knife looks at the mesh: from an eye point (perspective) or along a direction
+/// (orthographic). Each cut runs in the plane through two path points and the view ray.
+#[derive(Clone, Copy, Debug)]
+pub enum KnifeView {
+    Eye(Vec3),
+    Direction(Vec3),
+}
+
+impl KnifeView {
+    fn ray(self, p: Vec3) -> Vec3 {
+        match self {
+            KnifeView::Eye(e) => (p - e).normalize_or_zero(),
+            KnifeView::Direction(d) => d.normalize_or_zero(),
+        }
+    }
+}
+
+/// Whether `p` lies on face `f` (near its plane and inside its outline).
+fn point_on_face(m: &Mesh, f: &[u32], p: Vec3, tol: f32) -> bool {
+    let n = face_normal(m, f);
+    if n == Vec3::ZERO || (p - pos(m, f[0])).dot(n).abs() > tol {
+        return false;
+    }
+    let u = n.any_orthonormal_vector();
+    let w = n.cross(u);
+    let to2 = |q: Vec3| ((q - p).dot(u), (q - p).dot(w));
+    let mut inside = false;
+    for i in 0..f.len() {
+        let (ax, ay) = to2(pos(m, f[i]));
+        let (bx, by) = to2(pos(m, f[(i + 1) % f.len()]));
+        if (ay > 0.0) != (by > 0.0) && 0.0 < ax + (0.0 - ay) / (by - ay) * (bx - ax) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+/// Cut along a path of points on the surface, like Blender's knife: each step cuts the faces
+/// between its two points (in the plane through them and the view ray), and a point inside a
+/// face becomes a new vertex there, so the cut turns corners on the surface. Only `faces`
+/// are cut (all when empty; the editor passes the visible ones). Selects the new edges.
+pub fn knife(m: &Mesh, faces: &[u32], path: &[Vec3], view: KnifeView) -> Result<(Mesh, Elements)> {
+    need(path.len() >= 2, "give at least two points for the knife path")?;
+    need(path.len() <= 1000, "the knife path has too many points (limit 1000)")?;
+    need(path.iter().all(|p| p.is_finite()), "knife points must be finite")?;
+    let nf = m.faces.len() as u32;
+    need(faces.iter().all(|&f| f < nf), "a face to cut does not exist")?;
+    let limit: BTreeSet<u32> = if faces.is_empty() { (0..nf).collect() } else { faces.iter().copied().collect() };
+    let size = m.positions.iter().map(|p| Vec3::from_array(*p).abs().max_element()).fold(1.0f32, f32::max);
+    let eps = 1e-5 * size;
+    let mut out = m.clone();
+    // points made on edges: edge -> [(t from the edge's first vertex, vertex)]
+    let mut on_edge: HashMap<Edge, Vec<(f32, u32)>> = HashMap::new();
+    // per face, the path's events in order: (vertex, on the border?)
+    let mut events: HashMap<u32, Vec<(u32, bool)>> = HashMap::new();
+    let mut corner_vertex: HashMap<(usize, u32), u32> = HashMap::new();
+    let corner = |out: &mut Mesh, cv: &mut HashMap<(usize, u32), u32>, i: usize, f: u32| -> u32 {
+        *cv.entry((i, f)).or_insert_with(|| push_vertex(out, path[i]))
+    };
+    for i in 0..path.len() - 1 {
+        let (a, b) = (path[i], path[i + 1]);
+        if (b - a).length_squared() < eps * eps {
+            continue;
+        }
+        let (ra, rb) = (view.ray(a), view.ray(b));
+        let n = (b - a).cross(ra);
+        if n.length_squared() < 1e-12 {
+            continue;
+        }
+        let n = n.normalize();
+        let mut sa = n.cross(ra);
+        if (b - a).dot(sa) < 0.0 {
+            sa = -sa;
+        }
+        let mut sb = n.cross(rb);
+        if (a - b).dot(sb) < 0.0 {
+            sb = -sb;
+        }
+        let within = |x: Vec3| (x - a).dot(sa) >= -eps && (x - b).dot(sb) >= -eps;
+        let along = |x: Vec3| (x - a).dot(b - a);
+        let dist = |v: u32| (pos(m, v) - a).dot(n);
+        for &fi in &limit {
+            let f = &m.faces[fi as usize];
+            if i == 0 && point_on_face(m, f, a, eps * 100.0) {
+                let v = corner(&mut out, &mut corner_vertex, 0, fi);
+                events.entry(fi).or_default().push((v, false));
+            }
+            let mut hits: Vec<(f32, u32)> = Vec::new();
+            for k in 0..f.len() {
+                let (u, w) = (f[k], f[(k + 1) % f.len()]);
+                let (du, dw) = (dist(u), dist(w));
+                if du.abs() <= eps {
+                    if within(pos(m, u)) {
+                        hits.push((along(pos(m, u)), u));
+                    }
+                    continue;
+                }
+                if dw.abs() <= eps || (du > 0.0) == (dw > 0.0) {
+                    continue;
+                }
+                let x = pos(m, u).lerp(pos(m, w), du / (du - dw));
+                if !within(x) {
+                    continue;
+                }
+                let key = ek(u, w);
+                let t = (x - pos(m, key.0)).length() / (pos(m, key.1) - pos(m, key.0)).length().max(1e-12);
+                let list = on_edge.entry(key).or_default();
+                let v = match list.iter().find(|(s, _)| (s - t).abs() < 1e-6) {
+                    Some(&(_, v)) => v,
+                    None => {
+                        let v = push_vertex(&mut out, x);
+                        list.push((t, v));
+                        v
+                    }
+                };
+                hits.push((along(x), v));
+            }
+            hits.sort_by(|x, y| x.0.total_cmp(&y.0));
+            hits.dedup_by_key(|h| h.1);
+            let list = events.entry(fi).or_default();
+            list.extend(hits.into_iter().map(|(_, v)| (v, true)));
+            if point_on_face(m, f, b, eps * 100.0) {
+                let v = corner(&mut out, &mut corner_vertex, i + 1, fi);
+                list.push((v, false));
+            }
+        }
+    }
+    for list in on_edge.values_mut() {
+        list.sort_by(|x, y| x.0.total_cmp(&y.0));
+    }
+    let mut faces_out: Vec<Vec<u32>> = Vec::with_capacity(m.faces.len() + 8);
+    let mut new_edges: Vec<[u32; 2]> = Vec::new();
+    for (fi, f) in m.faces.iter().enumerate() {
+        let mut g = Vec::with_capacity(f.len() + 2);
+        for k in 0..f.len() {
+            let (u, w) = (f[k], f[(k + 1) % f.len()]);
+            g.push(u);
+            if let Some(list) = on_edge.get(&ek(u, w)) {
+                if u < w {
+                    g.extend(list.iter().map(|x| x.1));
+                } else {
+                    g.extend(list.iter().rev().map(|x| x.1));
+                }
+            }
+        }
+        let mut polys = vec![g];
+        if let Some(ev) = events.get(&(fi as u32)) {
+            // chains: border, inner..., border
+            let mut chains: Vec<Vec<u32>> = Vec::new();
+            let mut cur: Option<Vec<u32>> = None;
+            for &(v, border) in ev {
+                match (&mut cur, border) {
+                    (None, true) => cur = Some(vec![v]),
+                    (None, false) => {}
+                    (Some(c), false) => c.push(v),
+                    (Some(c), true) => {
+                        if c.last() != Some(&v) {
+                            c.push(v);
+                            chains.push(std::mem::take(c));
+                            cur = None;
+                        }
+                    }
+                }
+            }
+            for chain in chains {
+                let (s, e) = (chain[0], *chain.last().unwrap_or(&chain[0]));
+                if s == e {
+                    continue;
+                }
+                let inner = &chain[1..chain.len() - 1];
+                let Some(pi) = polys.iter().position(|p| p.contains(&s) && p.contains(&e)) else { continue };
+                let p = polys.swap_remove(pi);
+                let n = p.len();
+                let i = p.iter().position(|&x| x == s).unwrap_or(0);
+                let j = p.iter().position(|&x| x == e).unwrap_or(0);
+                if inner.is_empty() && ((i + 1) % n == j || (j + 1) % n == i) {
+                    polys.push(p);
+                    continue;
+                }
+                // s → … → e along the border, then back through the inner points
+                let mut first = Vec::new();
+                let mut k = i;
+                loop {
+                    first.push(p[k]);
+                    if k == j {
+                        break;
+                    }
+                    k = (k + 1) % n;
+                }
+                first.extend(inner.iter().rev());
+                let mut second = Vec::new();
+                let mut k = j;
+                loop {
+                    second.push(p[k]);
+                    if k == i {
+                        break;
+                    }
+                    k = (k + 1) % n;
+                }
+                second.extend(inner.iter());
+                polys.push(first);
+                polys.push(second);
+                for w in chain.windows(2) {
+                    new_edges.push([w[0], w[1]]);
+                }
+            }
+        }
+        faces_out.extend(polys);
+    }
+    need(!new_edges.is_empty(), "the knife path does not cross any face from edge to edge")?;
+    out.faces = faces_out;
+    Ok(finish(out, Elements::edges(new_edges)))
+}
+
+/// How proportional editing fades out with distance (Blender's falloff types).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Falloff {
+    #[default]
+    Smooth,
+    Linear,
+    Sharp,
+    Sphere,
+    Constant,
+}
+
+impl Falloff {
+    /// Weight at `t` = distance / radius in 0..1.
+    pub fn weight(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        let s = 1.0 - t;
+        match self {
+            Falloff::Smooth => 3.0 * s * s - 2.0 * s * s * s,
+            Falloff::Linear => s,
+            Falloff::Sharp => s * s,
+            Falloff::Sphere => (1.0 - t * t).max(0.0).sqrt(),
+            Falloff::Constant => 1.0,
+        }
+    }
+}
+
+/// Distance from each vertex to the nearest selected vertex, for vertices within `radius`.
+fn near_selection(m: &Mesh, sel: &BTreeSet<u32>, radius: f32) -> Vec<(u32, f32)> {
+    let cell = radius.max(1e-6);
+    let key = |p: Vec3| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64);
+    let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    for &v in sel {
+        grid.entry(key(pos(m, v))).or_default().push(v);
+    }
+    let mut out = Vec::new();
+    for v in 0..m.positions.len() as u32 {
+        if sel.contains(&v) {
+            continue;
+        }
+        let p = pos(m, v);
+        let (x, y, z) = key(p);
+        let mut best = f32::MAX;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for &s in grid.get(&(x + dx, y + dy, z + dz)).map(Vec::as_slice).unwrap_or(&[]) {
+                        best = best.min(pos(m, s).distance(p));
+                    }
+                }
+            }
+        }
+        if best < radius {
+            out.push((v, best));
+        }
+    }
+    out
+}
+
+/// [`transform`] with proportional editing: vertices within `radius` of the selection follow
+/// it, less the farther they are (`falloff`).
+#[allow(clippy::too_many_arguments)]
+pub fn transform_proportional(
+    m: &Mesh,
+    sel: &Elements,
+    translate: Vec3,
+    rotate: Vec3,
+    scale: Vec3,
+    pivot: Option<Vec3>,
+    radius: f32,
+    falloff: Falloff,
+) -> Result<(Mesh, Elements)> {
+    need(radius.is_finite() && radius > 0.0 && radius <= 10_000.0, "radius must be between 0 and 10000")?;
+    let f = flush(m, sel)?;
+    need(!f.verts.is_empty(), "select some vertices, edges or faces to transform")?;
+    let center = pivot.unwrap_or_else(|| selection_center(m, &f.verts));
+    let q = Quat::from_euler(EulerRot::YXZ, rotate.y.to_radians(), rotate.x.to_radians(), rotate.z.to_radians());
+    let mut out = m.clone();
+    let apply = |p: Vec3, w: f32| -> Vec3 {
+        let qw = Quat::IDENTITY.slerp(q, w);
+        let sw = Vec3::ONE.lerp(scale, w);
+        center + qw * ((p - center) * sw) + translate * w
+    };
+    for &v in &f.verts {
+        out.positions[v as usize] = apply(pos(m, v), 1.0).to_array();
+    }
+    for (v, d) in near_selection(m, &f.verts, radius) {
+        out.positions[v as usize] = apply(pos(m, v), falloff.weight(d / radius)).to_array();
+    }
+    Ok((out, sel.clone().normalized()))
+}
+
 /// Every edge of the mesh as `[a, b]` (a < b), in a stable order.
 pub fn all_edges(m: &Mesh) -> Vec<[u32; 2]> {
     Topology::new(m).edges.into_iter().map(|(a, b)| [a, b]).collect()
@@ -1736,6 +2042,62 @@ mod tests {
         assert_eq!(sel.edges.len(), 1);
         assert!(closed(&one));
         assert!(bisect(&m, &Elements::default(), Vec3::new(0.0, 5.0, 0.0), Vec3::Y, ClearSide::None).is_err());
+    }
+
+    #[test]
+    fn knife_path_turns_on_a_face() {
+        let m = cube(); // -1..1
+        let top = face_facing(&m, Vec3::Y);
+        let eye = KnifeView::Direction(-Vec3::Y);
+        // straight across the top: splits it, neighbours get the end points
+        let path = [Vec3::new(-1.5, 1.0, 0.0), Vec3::new(1.5, 1.0, 0.0)];
+        let (a, sel) = knife(&m, &[top], &path, eye).unwrap();
+        assert_eq!(a.faces.len(), 7);
+        assert_eq!(sel.edges.len(), 1);
+        assert!(closed(&a));
+        // an L-shaped cut: in from -x, turn in the middle, out through +z
+        let path = [Vec3::new(-1.5, 1.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.0, 1.5)];
+        let (b, sel) = knife(&m, &[top], &path, eye).unwrap();
+        assert_eq!(b.faces.len(), 7);
+        assert_eq!(sel.edges.len(), 2);
+        assert_eq!(b.positions.len(), 11);
+        assert!(closed(&b));
+        // a short stroke that stays inside one face cuts nothing
+        let path = [Vec3::new(-0.2, 1.0, 0.0), Vec3::new(0.2, 1.0, 0.0)];
+        assert!(knife(&m, &[top], &path, eye).is_err());
+        // the cut stops at the path's ends: a path ending inside the top only cuts up to there
+        let path = [
+            Vec3::new(-1.5, 1.0, -0.5),
+            Vec3::new(-0.5, 1.0, 0.5),
+            Vec3::new(0.5, 1.0, -0.5),
+            Vec3::new(1.5, 1.0, 0.5),
+        ];
+        let (c, sel) = knife(&m, &[top], &path, eye).unwrap();
+        assert!(closed(&c));
+        assert_eq!(sel.edges.len(), 3);
+    }
+
+    #[test]
+    fn proportional_move_fades_out() {
+        let m = grid(10);
+        let mid = 5 * 11 + 5;
+        let (out, _) = transform_proportional(
+            &m,
+            &Elements::vertices([mid]),
+            Vec3::Y,
+            Vec3::ZERO,
+            Vec3::ONE,
+            None,
+            3.0,
+            Falloff::Smooth,
+        )
+        .unwrap();
+        let y = |v: u32| out.positions[v as usize][1];
+        assert!((y(mid) - 1.0).abs() < 1e-6);
+        assert!(y(mid + 1) > 0.5 && y(mid + 1) < 1.0);
+        assert!(y(mid + 2) > 0.0 && y(mid + 2) < y(mid + 1));
+        assert_eq!(y(mid + 3), 0.0);
+        assert_eq!(y(0), 0.0);
     }
 
     #[test]

@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shotstage_core::csg::{self, BoolOp};
-use shotstage_core::meshedit::{self as me, ClearSide, DeleteMode, Elements, MergeAt, Offset};
+use shotstage_core::meshedit::{self as me, ClearSide, DeleteMode, Elements, Falloff, KnifeView, MergeAt, Offset};
 use shotstage_core::{EntityKind, Mesh, MeshSource, Scene, mesh::evaluate_mesh};
 
 use crate::builtin::finite3;
@@ -124,6 +124,46 @@ struct TransformParams {
     scale: Option<[f32; 3]>,
     /// Pivot in mesh space. Default: centre of the selected vertices.
     pivot: Option<[f32; 3]>,
+    /// Proportional editing: unselected vertices this close (metres) to the selection follow
+    /// it, fading out (Blender's O).
+    proportional: Option<Proportional>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Proportional {
+    /// How far the effect reaches, metres (mesh space).
+    radius: f32,
+    /// `smooth` (default), `linear`, `sharp`, `sphere` or `constant`.
+    falloff: Option<Falloff>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct KnifeParams {
+    id: String,
+    /// Points on the surface to cut through, in order (mesh space). Each step cuts the faces
+    /// between its two points; a point inside a face becomes a vertex, so the cut can turn.
+    path: Vec<[f32; 3]>,
+    /// Where the cut is seen from (mesh space); the cut runs along the view rays like
+    /// drawing on screen. Give this or `direction`.
+    eye: Option<[f32; 3]>,
+    /// View direction for an orthographic cut (mesh space).
+    direction: Option<[f32; 3]>,
+    /// Only cut these faces (the editor passes the ones you can see). Default: all faces, so
+    /// the cut goes through to the back.
+    faces: Option<Vec<u32>>,
+}
+
+fn knife(s: &mut Scene, p: KnifeParams) -> CmdResult<Value> {
+    let path: Vec<Vec3> = p.path.iter().map(|v| finite3(*v, "path")).collect::<CmdResult<_>>()?;
+    let view = match (p.eye, p.direction) {
+        (Some(e), None) => KnifeView::Eye(finite3(e, "eye")?),
+        (None, Some(d)) => KnifeView::Direction(finite3(d, "direction")?),
+        _ => return Err(CommandError::invalid("give either `eye` or `direction`")),
+    };
+    let faces = p.faces.unwrap_or_default();
+    edit(s, &p.id, |m| me::knife(m, &faces, &path, view))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -376,7 +416,12 @@ pub fn commands() -> Vec<Command> {
             let sc = opt3(p.scale, "scale", Vec3::ONE)?;
             let pivot = p.pivot.map(|v| finite3(v, "pivot")).transpose()?;
             let sel = p.sel.elements();
-            edit(s, &p.id, |m| me::transform(m, &sel, t, r, sc, pivot))
+            match p.proportional {
+                Some(pr) => edit(s, &p.id, |m| {
+                    me::transform_proportional(m, &sel, t, r, sc, pivot, pr.radius, pr.falloff.unwrap_or_default())
+                }),
+                None => edit(s, &p.id, |m| me::transform(m, &sel, t, r, sc, pivot)),
+            }
         }),
         command!("mesh.extrude", "Extrude selected faces (as a region or each on its own) or edges, optionally moving the new geometry out. Keeps the extruded part selected.", mutates: true, ExtrudeParams,
         |s, p| {
@@ -423,6 +468,7 @@ pub fn commands() -> Vec<Command> {
             let sel = p.sel.elements();
             edit(s, &p.id, |m| me::bisect(m, &sel, point, normal, p.clear.unwrap_or_default()))
         }),
+        command!("mesh.knife", "Cut along a path of surface points as seen from an eye (or direction), like Blender's knife: the cut stops at the path's ends and turns at points inside faces. Selects the new edges.", mutates: true, KnifeParams, knife),
         command!("mesh.boolean", "Combine a mesh with another: union, difference (carve `with` out) or intersect. Both should be closed solids. The other mesh is hidden unless hideOther is false.", mutates: true, BooleanParams, boolean),
     ]
 }
@@ -465,6 +511,27 @@ mod tests {
         let r = s.dispatch("mesh.boolean", json!({"id": "a", "with": "rod"})).unwrap().result;
         assert!(r["faces"].as_u64().unwrap() > 6);
         assert!(!s.scene().get("rod").unwrap().visible);
+        // knife across the top of a fresh box, seen from above
+        s.dispatch(
+            "entity.create",
+            json!({"id": "k", "type": "mesh", "primitive": {"shape": "cube", "size": [2, 2, 2]}}),
+        )
+        .unwrap();
+        let kn = s
+            .dispatch(
+                "mesh.knife",
+                json!({"id": "k", "path": [[-2, 1, 0], [0, 1, 0], [0, 1, 2]], "eye": [0, 10, 0], "faces": [4]}),
+            )
+            .unwrap()
+            .result;
+        assert_eq!(kn["selection"]["edges"].as_array().unwrap().len(), 2);
+        assert!(s.dispatch("mesh.knife", json!({"id": "k", "path": [[0, 1, 0]], "eye": [0, 10, 0]})).is_err());
+        // proportional move drags the neighbours part way
+        s.dispatch(
+            "mesh.transformElements",
+            json!({"id": "k", "vertices": [0], "translate": [0, -1, 0], "proportional": {"radius": 5, "falloff": "linear"}}),
+        )
+        .unwrap();
         assert!(s.dispatch("mesh.boolean", json!({"id": "a", "with": "a"})).is_err());
         // a single face has only one border loop: nothing to bridge to
         s.dispatch(

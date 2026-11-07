@@ -812,6 +812,8 @@ pub struct EditorApp {
     edit_swallow: bool,
     /// Frames left to clear the keyboard focus a Tab gave to some button.
     edit_unfocus: u8,
+    /// Proportional editing (O).
+    edit_prop: bool,
     /// Boolean panel: the other mesh and the operation.
     bool_with: Option<String>,
     bool_op: shotstage_core::csg::BoolOp,
@@ -902,6 +904,7 @@ impl EditorApp {
             edit_hover: None,
             edit_swallow: false,
             edit_unfocus: 0,
+            edit_prop: false,
             bool_with: None,
             bool_op: Default::default(),
         }
@@ -4460,10 +4463,11 @@ impl EditorApp {
                 ScrollMode::Zoom => false,
                 ScrollMode::Orbit => true,
             };
-            let tool_scroll = self
-                .edit_modal
-                .as_ref()
-                .is_some_and(|m| matches!(m.tool, editmode::Tool::Bevel | editmode::Tool::LoopCut));
+            let tool_scroll = self.edit_modal.as_ref().is_some_and(|m| {
+                matches!(m.tool, editmode::Tool::Bevel | editmode::Tool::LoopCut)
+                    || (self.edit_prop
+                        && matches!(m.tool, editmode::Tool::Grab | editmode::Tool::Rotate | editmode::Tool::Scale))
+            });
             if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && delta != Vec2::ZERO && !tool_scroll {
                 if !orbit_scroll {
                     self.orbit.distance = (self.orbit.distance * (1.0 - delta.y * 0.0015)).clamp(0.3, 500.0);

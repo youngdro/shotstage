@@ -137,8 +137,8 @@ pub(super) struct Modal {
     shown: String,
     /// The pointer as last seen.
     pointer: Pos2,
-    /// Knife: where the line starts (after the first click).
-    knife: Option<Pos2>,
+    /// Knife: the points clicked so far (world, on the surface where possible).
+    knife: Vec<Vec3>,
     /// Edge slide: one vertex and where it goes on side A and side B (world), to read the
     /// pointer against.
     rail: Option<(Vec3, Vec3, Option<Vec3>)>,
@@ -152,38 +152,24 @@ pub(super) struct EditAmounts {
     pub bevel: f32,
     pub segments: u32,
     pub cuts: u32,
+    /// Proportional editing reach (world metres) and fall-off.
+    pub prop_radius: f32,
+    pub falloff: me::Falloff,
 }
 
 impl Default for EditAmounts {
     fn default() -> Self {
-        Self { extrude: 0.2, inset: 0.05, depth: 0.0, bevel: 0.05, segments: 1, cuts: 1 }
-    }
-}
-
-/// Whether the screen segment `a`–`b` crosses or lies in the polygon.
-fn segment_meets_polygon(a: Pos2, b: Pos2, poly: &[Pos2]) -> bool {
-    let cross = |o: Pos2, p: Pos2, q: Pos2| (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x);
-    let n = poly.len();
-    for i in 0..n {
-        let (p, q) = (poly[i], poly[(i + 1) % n]);
-        let (d1, d2) = (cross(a, b, p), cross(a, b, q));
-        let (d3, d4) = (cross(p, q, a), cross(p, q, b));
-        if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
-            return true;
+        Self {
+            extrude: 0.2,
+            inset: 0.05,
+            depth: 0.0,
+            bevel: 0.05,
+            segments: 1,
+            cuts: 1,
+            prop_radius: 1.0,
+            falloff: me::Falloff::Smooth,
         }
     }
-    // both ends inside (a short line within one face)
-    let inside = |pt: Pos2| {
-        let mut c = false;
-        for i in 0..n {
-            let (p, q) = (poly[i], poly[(i + 1) % n]);
-            if (p.y > pt.y) != (q.y > pt.y) && pt.x < p.x + (pt.y - p.y) / (q.y - p.y) * (q.x - p.x) {
-                c = !c;
-            }
-        }
-        c
-    };
-    inside(a) || inside(b)
 }
 
 fn plane_hit(o: Vec3, d: Vec3, p: Vec3, n: Vec3) -> Option<Vec3> {
@@ -628,8 +614,8 @@ impl EditorApp {
     /// Run an edit command on the selection; the result's selection becomes the selection.
     pub(super) fn edit_apply(&mut self, command: &str, extra: Value) -> bool {
         let Some(st) = self.edit_state() else { return false };
-        // (a loop cut takes an edge, not the selection)
-        let mut p = if command == "mesh.loopCut" {
+        // (a loop cut takes an edge and the knife its own faces, not the selection)
+        let mut p = if matches!(command, "mesh.loopCut" | "mesh.knife") {
             json!({})
         } else {
             serde_json::to_value(&st.selection).unwrap_or(json!({}))
@@ -742,7 +728,7 @@ impl EditorApp {
             preview: Vec::new(),
             shown: String::new(),
             pointer,
-            knife: None,
+            knife: Vec::new(),
             rail,
         });
     }
@@ -761,13 +747,16 @@ impl EditorApp {
     pub(super) fn edit_confirm(&mut self) {
         let Some(mut m) = self.edit_modal.take() else { return };
         if m.tool == Tool::Knife {
-            match m.knife {
-                None => {
-                    m.knife = Some(m.pointer);
-                    self.edit_modal = Some(m);
-                }
-                Some(a) => self.edit_knife(a, m.pointer),
+            // clicking the last point again finishes, like Enter
+            let last = m.knife.last().and_then(|p| self.last_view.and_then(|(r, v)| project(r, &v, *p)));
+            if last.is_some_and(|l| (l - m.pointer).length() < 6.0) {
+                self.edit_knife(m.knife);
+                return;
             }
+            if let Some(p) = self.edit_knife_point(m.pointer, m.knife.last().copied()) {
+                m.knife.push(p);
+            }
+            self.edit_modal = Some(m);
             return;
         }
         if m.tool == Tool::LoopCut {
@@ -812,6 +801,10 @@ impl EditorApp {
         let typed: Option<f32> = m.typed.parse::<f32>().ok();
         let snap =
             |v: f32| if self.snap && !modifiers.command { (v / self.snap_step).round() * self.snap_step } else { v };
+        if scroll != 0.0 && self.edit_prop && matches!(m.tool, Tool::Grab | Tool::Rotate | Tool::Scale) {
+            let r = &mut self.edit_amounts.prop_radius;
+            *r = (*r * (1.0 + scroll * 0.002).clamp(0.5, 2.0)).clamp(0.001, 1000.0);
+        }
         if scroll != 0.0 && matches!(m.tool, Tool::Bevel | Tool::LoopCut) {
             self.edit_scroll += scroll;
             let steps = (self.edit_scroll / 60.0).trunc();
@@ -820,9 +813,15 @@ impl EditorApp {
                 m.segments = (m.segments as i32 + steps as i32).clamp(1, 16) as u32;
             }
         }
+        let prop = (self.edit_prop && matches!(m.tool, Tool::Grab | Tool::Rotate | Tool::Scale)).then(
+            || json!({"radius": self.edit_amounts.prop_radius / obj_scale, "falloff": self.edit_amounts.falloff}),
+        );
         let sel_json = |extra: Value| {
             let mut p = serde_json::to_value(&m.sel).unwrap_or(json!({}));
             p["id"] = json!(st.id);
+            if let Some(pr) = &prop {
+                p["proportional"] = pr.clone();
+            }
             if let (Some(o), Some(x)) = (p.as_object_mut(), extra.as_object()) {
                 for (k, v) in x {
                     o.insert(k.clone(), v.clone());
@@ -974,10 +973,10 @@ impl EditorApp {
                 (f.abs() > 1e-4).then(|| ("mesh.edgeSlide".to_string(), sel_json(json!({"factor": f}))))
             }
             Tool::Knife => {
-                m.shown = if m.knife.is_none() {
-                    "click where the cut starts".into()
-                } else {
-                    "click where it ends (cuts the faces the line crosses, or the selected faces)".into()
+                m.shown = match m.knife.len() {
+                    0 => "click where the cut starts".into(),
+                    1 => "click the next point (inside a face to turn a corner)".into(),
+                    n => format!("{} points · click more, Enter or click the last point again to cut", n),
                 };
                 None
             }
@@ -1087,10 +1086,28 @@ impl EditorApp {
         }
         // loop cut preview
         if let Some(m) = &self.edit_modal {
-            if let Some(a) = m.knife {
-                let p = painter.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(m.pointer);
-                painter.line_segment([a, p], (2.0, Color32::from_rgb(255, 230, 60)));
-                painter.circle_filled(a, 3.5, Color32::from_rgb(255, 230, 60));
+            if !m.knife.is_empty() {
+                let yellow = Color32::from_rgb(255, 230, 60);
+                let pts: Vec<Pos2> = m.knife.iter().filter_map(|p| project(rect, view, *p)).collect();
+                for w in pts.windows(2) {
+                    painter.line_segment([w[0], w[1]], (2.0, yellow));
+                }
+                for p in &pts {
+                    painter.circle_filled(*p, 3.5, yellow);
+                }
+                if let Some(last) = pts.last() {
+                    let p = painter.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(m.pointer);
+                    painter.add(egui::Shape::dashed_line(&[*last, p], (1.5, yellow), 6.0, 4.0));
+                }
+            }
+            if self.edit_prop
+                && matches!(m.tool, Tool::Grab | Tool::Rotate | Tool::Scale)
+                && let Some(cs) = project(rect, view, m.center)
+            {
+                let right = view.view.inverse().x_axis.truncate().normalize_or_zero();
+                if let Some(e) = project(rect, view, m.center + right * self.edit_amounts.prop_radius) {
+                    painter.circle_stroke(cs, (e - cs).length(), (1.0, Color32::from_white_alpha(120)));
+                }
             }
             for (a, b) in &m.preview {
                 if let (Some(a), Some(b)) = (project(rect, view, *a), project(rect, view, *b)) {
@@ -1146,6 +1163,9 @@ impl EditorApp {
                 let typed = if m.typed.is_empty() { String::new() } else { format!(" · typed {}", m.typed) };
                 let how = if m.release_confirms { "release to apply" } else { "click or Enter to apply" };
                 let extra = match m.tool {
+                    Tool::Grab | Tool::Rotate | Tool::Scale if self.edit_prop => {
+                        " · X Y Z lock an axis · type a number · scroll: proportional radius"
+                    }
                     Tool::Grab | Tool::Rotate | Tool::Scale => " · X Y Z lock an axis · type a number",
                     Tool::Extrude | Tool::Inset | Tool::Bevel | Tool::Slide => " · type a number",
                     Tool::LoopCut | Tool::Knife => "",
@@ -1186,6 +1206,9 @@ impl EditorApp {
                         ui.separator();
                         ui.toggle_value(&mut self.edit_xray, "X-ray")
                             .on_hover_text("See and pick through the mesh (Alt+Z)");
+                        ui.toggle_value(&mut self.edit_prop, "◎ Proportional").on_hover_text(
+                            "Moving, rotating or scaling also pulls nearby vertices, fading out (O; scroll while moving to resize)",
+                        );
                         if ui.button("Done").on_hover_text("Back to objects (Tab)").clicked() {
                             leave = true;
                         }
@@ -1253,7 +1276,11 @@ impl EditorApp {
                 return true;
             }
             if enter {
-                self.edit_confirm();
+                if let Some(m) = self.edit_modal.take_if(|m| m.tool == Tool::Knife) {
+                    self.edit_knife(m.knife);
+                } else {
+                    self.edit_confirm();
+                }
                 return true;
             }
             if let Some(m) = self.edit_modal.as_mut() {
@@ -1337,6 +1364,14 @@ impl EditorApp {
         // (Cmd+R reloads the page in a browser: Ctrl+R on a Mac, or C anywhere)
         if press(egui::Key::R).is_some_and(|m| m.ctrl) || kp(egui::Key::C) {
             self.edit_start(Tool::LoopCut, pointer, None, false);
+        }
+        if kp(egui::Key::O) {
+            self.edit_prop = !self.edit_prop;
+            self.toast(if self.edit_prop {
+                "Proportional editing on (scroll while moving to resize)"
+            } else {
+                "Proportional editing off"
+            });
         }
         if kp(egui::Key::K) {
             self.edit_start(Tool::Knife, pointer, None, false);
@@ -1500,6 +1535,24 @@ impl EditorApp {
             }
         });
         ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.edit_prop, "Proportional").on_hover_text("O: G / R / S also pull nearby vertices");
+            let a = &mut self.edit_amounts;
+            ui.add(
+                egui::DragValue::new(&mut a.prop_radius).speed(0.01).range(0.001..=1000.0).prefix("r ").suffix(" m"),
+            );
+            egui::ComboBox::from_id_salt("falloff").selected_text(format!("{:?}", a.falloff)).show_ui(ui, |ui| {
+                for f in [
+                    me::Falloff::Smooth,
+                    me::Falloff::Linear,
+                    me::Falloff::Sharp,
+                    me::Falloff::Sphere,
+                    me::Falloff::Constant,
+                ] {
+                    ui.selectable_value(&mut a.falloff, f, format!("{f:?}"));
+                }
+            });
+        });
+        ui.horizontal_wrapped(|ui| {
             for (label, cmd, tip) in [
                 ("Subdivide", "mesh.subdivideFaces", "Split the selected faces into smaller quads"),
                 ("Connect", "mesh.connect", "J: a new edge between two selected vertices of a face"),
@@ -1536,27 +1589,43 @@ impl EditorApp {
         );
     }
 
-    /// Cut along the screen line `a`–`b`: the plane through the eye and the line, on the
-    /// selected faces or else the visible faces the line crosses.
-    fn edit_knife(&mut self, a: Pos2, b: Pos2) {
+    /// Where a knife click lands: on the surface under the pointer, else at the depth of the
+    /// previous point (or the mesh's centre) facing the view.
+    fn edit_knife_point(&self, pointer: Pos2, prev: Option<Vec3>) -> Option<Vec3> {
+        let st = self.hub.borrow().edit.clone()?;
+        let (rect, view) = self.last_view?;
+        let scene = self.scene();
+        let cage = self.edit_cage(&scene, &st.id, self.frame(), rect, &view, self.edit_xray)?;
+        let (o, d) = ray_at(rect, &view, pointer);
+        if let Some((_, t)) = self.edit_ray_face(&cage, o, d, false) {
+            return Some(o + d * t);
+        }
+        let anchor = prev.or(cage.center).unwrap_or_else(|| cage.world.w_axis.truncate());
+        let n = (view.view.inverse().w_axis.truncate() - anchor).normalize_or_zero();
+        plane_hit(o, d, anchor, n)
+    }
+
+    /// Cut along the knife path: on the selected faces, else on the faces you can see.
+    fn edit_knife(&mut self, path: Vec<Vec3>) {
+        if path.len() < 2 {
+            self.toast("Knife: click at least two points");
+            return;
+        }
         let Some(st) = self.edit_state() else { return };
         let Some((rect, view)) = self.last_view else { return };
-        if (b - a).length() < 4.0 {
-            self.toast("Knife: draw a longer line");
-            return;
-        }
         let scene = self.scene();
         let Some(cage) = self.edit_cage(&scene, &st.id, self.frame(), rect, &view, self.edit_xray) else { return };
-        let (o0, d0) = ray_at(rect, &view, a);
-        let (o1, d1) = ray_at(rect, &view, b);
-        // the plane holding both rays (they share the eye, or are parallel in an ortho view)
-        let n_world = d0.cross(o1 + d1 - o0);
-        if n_world.length_squared() < 1e-12 {
-            return;
+        let inv = cage.world.inverse();
+        let local: Vec<[f32; 3]> = path.iter().map(|p| inv.transform_point3(*p).to_array()).collect();
+        // perspective views share an eye; orthographic ones share a direction
+        let (_, d0) = ray_at(rect, &view, rect.left_top());
+        let (_, d1) = ray_at(rect, &view, rect.right_bottom());
+        let mut p = json!({ "path": local });
+        if d0.dot(d1) > 0.99999 {
+            p["direction"] = json!(inv.transform_vector3(d0).to_array());
+        } else {
+            p["eye"] = json!(inv.transform_point3(view.view.inverse().w_axis.truncate()).to_array());
         }
-        let world = cage.world;
-        let n_local = glam::Mat3::from_mat4(world).transpose() * n_world;
-        let p_local = world.inverse().transform_point3(o0);
         let faces: Vec<u32> = {
             let Some(c) = self.cache_for(&cage) else { return };
             let picked = me::flush_with(&c.mesh, &c.topo, &st.selection).map(|f| f.faces).unwrap_or_default();
@@ -1565,24 +1634,11 @@ impl EditorApp {
             } else {
                 (0..c.mesh.faces.len() as u32)
                     .filter(|&f| self.edit_xray || cage.face_vis.get(f as usize).copied().unwrap_or(false))
-                    .filter(|&f| {
-                        let poly: Option<Vec<Pos2>> = c.mesh.faces[f as usize]
-                            .iter()
-                            .map(|&v| cage.pts.get(v as usize).copied().flatten())
-                            .collect();
-                        poly.is_some_and(|p| segment_meets_polygon(a, b, &p))
-                    })
                     .collect()
             }
         };
-        if faces.is_empty() {
-            self.toast("Knife: draw the line across the mesh");
-            return;
-        }
-        self.edit_apply(
-            "mesh.bisect",
-            json!({"vertices": [], "edges": [], "faces": faces, "point": p_local.to_array(), "normal": n_local.to_array()}),
-        );
+        p["faces"] = json!(faces);
+        self.edit_apply("mesh.knife", p);
     }
 
     /// Combine this mesh with another one: union, difference or intersect (`mesh.boolean`).
