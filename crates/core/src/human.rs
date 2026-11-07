@@ -108,6 +108,8 @@ pub enum HumanPart {
     /// Irises and pupils.
     Irises,
     Teeth,
+    /// A bib apron over the clothes (when `apron` is on).
+    Apron,
 }
 
 pub const PARTS: &[HumanPart] = &[
@@ -119,6 +121,7 @@ pub const PARTS: &[HumanPart] = &[
     HumanPart::Eyes,
     HumanPart::Irises,
     HumanPart::Teeth,
+    HumanPart::Apron,
 ];
 
 impl HumanPart {
@@ -132,6 +135,7 @@ impl HumanPart {
             HumanPart::Eyes => "eyes",
             HumanPart::Irises => "irises",
             HumanPart::Teeth => "teeth",
+            HumanPart::Apron => "apron",
         }
     }
 }
@@ -152,11 +156,13 @@ pub struct HumanOutfit {
     pub shoes: bool,
     /// Hair length: 0 none, 0.3 cropped, 0.5 short, 0.75 chin, 1 shoulder, 1.4 long.
     pub hair: f32,
+    /// Wear a bib apron (shop staff, kitchen, market).
+    pub apron: bool,
 }
 
 impl Default for HumanOutfit {
     fn default() -> Self {
-        Self { top: true, sleeves: 0.35, bottom: true, legs: 2.0, shoes: true, hair: 0.5 }
+        Self { top: true, sleeves: 0.35, bottom: true, legs: 2.0, shoes: true, hair: 0.5, apron: false }
     }
 }
 
@@ -170,7 +176,7 @@ impl HumanOutfit {
     }
 
     fn key(&self, h: &mut Hasher) {
-        h.word(self.top as u32 | (self.bottom as u32) << 1 | (self.shoes as u32) << 2);
+        h.word(self.top as u32 | (self.bottom as u32) << 1 | (self.shoes as u32) << 2 | (self.apron as u32) << 3);
         for v in [self.sleeves, self.legs, self.hair] {
             h.word(v.to_bits());
         }
@@ -935,6 +941,7 @@ fn slice(part: HumanPart, outfit: &HumanOutfit) -> Rc<Slice> {
             HumanPart::Bottom => (1, Some(bottom_field)),
             HumanPart::Shoes => (0, Some(shoe_field)),
             HumanPart::Hair => (0, Some(hair_field)),
+            HumanPart::Apron => (u8::MAX, None),
             HumanPart::Eyes | HumanPart::Irises => (3, None),
             HumanPart::Teeth => (4, None),
         };
@@ -1082,6 +1089,9 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
         let r = rest(body);
         if part == HumanPart::Hair {
             return hair(&r, outfit);
+        }
+        if part == HumanPart::Apron {
+            return if outfit.apron { apron(&r) } else { Geometry { rest: vec![], skin: vec![], faces: vec![] } };
         }
         let s = slice(part, outfit);
         // shoes stand a little proud of the feet
@@ -1259,6 +1269,94 @@ fn hair(r: &HumanRest, outfit: &HumanOutfit) -> Geometry {
             }
             // the bottom edge
             g.faces.push(vec![cx[steps][0], cy[steps][0], cy[steps][1], cx[steps][1]]);
+        }
+    }
+    g
+}
+
+/// A bib apron: a sheet over the chest that hangs flat from the hips to below the knees. The
+/// bib follows the chest; the skirt moves with the pelvis (it hangs, it does not wrap the legs).
+fn apron(r: &HumanRest) -> Geometry {
+    let a = asset();
+    let mut g = Geometry { rest: vec![], skin: vec![], faces: vec![] };
+    let skel = skeleton();
+    let joint = |n: &str| skel.iter().position(|(s, _)| *s == n).unwrap_or(0);
+    let (chest, spine, pelvis, knee) = (joint("chest"), joint("spine"), joint("pelvis"), joint("knee_l"));
+    let (hip_l, hip_r) = (joint("hip_l"), joint("hip_r"));
+    let top = r.joints[chest].y + 0.07;
+    let waist = r.joints[spine].y;
+    let bottom = r.joints[knee].y + 0.04;
+    // the front of the body by height (1 cm bins): (x, z, vertex)
+    let bin = 0.01f32;
+    let mut front: HashMap<i32, Vec<(f32, f32, u32)>> = HashMap::new();
+    for (q, quad) in a.quads.iter().enumerate() {
+        if matches!(a.part[q], 0 | 1) && matches!(a.region[q], REGION_TORSO | REGION_HIPS | REGION_LEG) {
+            for v in quad {
+                let p = r.positions[*v as usize];
+                if p.y > bottom - 0.05 && p.y < top + 0.05 {
+                    front.entry((p.y / bin).floor() as i32).or_default().push((p.x, p.z, *v));
+                }
+            }
+        }
+    }
+    let surface = |x: f32, y: f32| -> Option<(f32, u32)> {
+        let b = (y / bin).floor() as i32;
+        let mut best: Option<(f32, u32)> = None;
+        for k in b - 1..=b + 1 {
+            for (px, pz, v) in front.get(&k).into_iter().flatten() {
+                if (px - x).abs() < 0.025 && best.is_none_or(|(z, _)| *pz > z) {
+                    best = Some((*pz, *v));
+                }
+            }
+        }
+        best
+    };
+    let (cols, rows) = (14usize, 30usize);
+    let off = 0.014;
+    let mut hang = f32::MIN;
+    let mut grid: Vec<Vec<u32>> = vec![];
+    for row in 0..=rows {
+        let y = top + (bottom - top) * row as f32 / rows as f32;
+        // narrow bib above the waist, a wide skirt below
+        let s = ((waist + 0.03 - y) / 0.08).clamp(0.0, 1.0);
+        let half = 0.115 + 0.105 * s * s * (3.0 - 2.0 * s);
+        let xs: Vec<f32> = (0..=cols).map(|c| -half + 2.0 * half * c as f32 / cols as f32).collect();
+        let fronts: Vec<Option<(f32, u32)>> = xs.iter().map(|x| surface(*x, y)).collect();
+        let widest = fronts.iter().flatten().map(|f| f.0).fold(f32::MIN, f32::max);
+        if y < waist {
+            hang = hang.max(widest);
+        }
+        let mut line = vec![];
+        for (c, x) in xs.iter().enumerate() {
+            let u = x / half;
+            let body_z = fronts[c].map(|f| f.0);
+            let (z, inf) = if y >= waist {
+                let z = body_z.unwrap_or(widest - 0.02) + off;
+                let inf = fronts[c].map(|f| influence(f.1)).unwrap_or(([chest as u8, 0, 0, 0], [1.0, 0.0, 0.0, 0.0]));
+                (z, inf)
+            } else {
+                // hangs straight down from the widest point, wrapping a little round the sides
+                let z = (hang + off - 0.07 * u * u).max(body_z.unwrap_or(f32::MIN) + off);
+                // lower down the legs push it about: part thighs (figure's left is +X)
+                let t = ((waist - y) / (waist - bottom) * 4.0).clamp(0.0, 1.0) * 0.95;
+                let wl = t * (0.5 + 0.6 * u).clamp(0.0, 1.0);
+                let wr = t * (0.5 - 0.6 * u).clamp(0.0, 1.0);
+                (z, ([pelvis as u8, hip_l as u8, hip_r as u8, 0], [1.0 - wl - wr, wl, wr, 0.0]))
+            };
+            let i = g.rest.len() as u32;
+            g.rest.push(Vec3::new(*x, y, z));
+            g.skin.push(inf);
+            g.rest.push(Vec3::new(*x, y, z - 0.003));
+            g.skin.push(inf);
+            line.push(i);
+        }
+        grid.push(line);
+    }
+    for row in 0..rows {
+        for c in 0..cols {
+            let (a0, b0, c0, d0) = (grid[row][c], grid[row + 1][c], grid[row + 1][c + 1], grid[row][c + 1]);
+            g.faces.push(vec![a0, b0, c0, d0]);
+            g.faces.push(vec![d0 + 1, c0 + 1, b0 + 1, a0 + 1]);
         }
     }
     g

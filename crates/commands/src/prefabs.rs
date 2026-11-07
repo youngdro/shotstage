@@ -24,6 +24,9 @@ pub enum PrefabKind {
     HumanAthlete,
     HumanShopper,
     HumanStaff,
+    HumanCashier,
+    HumanDeli,
+    HumanCasual,
     Table,
     Chair,
     Sofa,
@@ -187,7 +190,27 @@ pub const PREFABS: &[PrefabInfo] = &[
     ),
     info!(
         HumanStaff,
-        "humanStaff", "staff", "Store staff", People, "Realistic man in a green work shirt: shop assistant, cashier"
+        "humanStaff",
+        "staff",
+        "Store staff",
+        People,
+        "Realistic man in a light work shirt and green apron: shop assistant"
+    ),
+    info!(
+        HumanCashier,
+        "humanCashier", "cashier", "Cashier", People, "Realistic young woman in a red uniform polo: cashier, promoter"
+    ),
+    info!(
+        HumanDeli,
+        "humanDeli",
+        "deli",
+        "Deli / chef",
+        People,
+        "Realistic man in whites and a white apron: deli counter, butcher, kitchen"
+    ),
+    info!(
+        HumanCasual,
+        "humanCasual", "casual", "Casual", People, "Realistic young man in a yellow tee, chinos and white trainers"
     ),
     info!(Table, "table", "table", "Table", Furniture, "Dining table 1.2 × 0.8 m, 0.75 m high"),
     info!(Chair, "chair", "chair", "Chair", Furniture, "Dining chair, seat at 0.45 m"),
@@ -452,7 +475,7 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
         Woman => crate::rig::person(crate::rig::Body::Woman),
         // realistic people are built by `humans::build`, not from parts
         HumanMan | HumanWoman | HumanBoy | HumanGirl | HumanOldMan | HumanOldWoman | HumanAthlete | HumanShopper
-        | HumanStaff => vec![],
+        | HumanStaff | HumanCashier | HumanDeli | HumanCasual => vec![],
         Table => {
             let mut v = vec![part("top", cube(1.2, 0.04, 0.8), [0.0, 0.73, 0.0], WOOD)];
             v.extend(legs4(["leg_1", "leg_2", "leg_3", "leg_4"], 1.1, 0.7, 0.71, 0.05, WOOD));

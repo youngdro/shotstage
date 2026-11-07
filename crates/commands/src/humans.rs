@@ -33,6 +33,7 @@ pub struct HumanColors {
     pub shoes: Option<[f32; 3]>,
     pub hair: Option<[f32; 3]>,
     pub eyes: Option<[f32; 3]>,
+    pub apron: Option<[f32; 3]>,
 }
 
 /// A ready-made person.
@@ -43,6 +44,7 @@ pub struct HumanPreset {
     pub bottom: [f32; 3],
     pub shoes: [f32; 3],
     pub hair: [f32; 3],
+    pub apron: [f32; 3],
 }
 
 fn preset(gender: f32, age: f32) -> HumanPreset {
@@ -53,6 +55,7 @@ fn preset(gender: f32, age: f32) -> HumanPreset {
         bottom: [0.22, 0.24, 0.3],
         shoes: [0.14, 0.14, 0.16],
         hair: HAIR,
+        apron: [0.14, 0.3, 0.22],
     }
 }
 
@@ -110,10 +113,34 @@ pub fn preset_for(kind: crate::prefabs::PrefabKind) -> Option<HumanPreset> {
             ..preset(0.0, 38.0)
         },
         HumanStaff => HumanPreset {
-            outfit: HumanOutfit { sleeves: 0.35, hair: 0.4, ..Default::default() },
-            top: [0.18, 0.5, 0.32],
+            outfit: HumanOutfit { sleeves: 0.35, hair: 0.4, apron: true, ..Default::default() },
+            top: [0.86, 0.84, 0.78],
             bottom: [0.16, 0.16, 0.18],
+            apron: [0.12, 0.26, 0.18],
             ..preset(1.0, 32.0)
+        },
+        HumanCashier => HumanPreset {
+            body: HumanBody { gender: 0.0, age: 24.0, ..Default::default() },
+            outfit: HumanOutfit { sleeves: 0.35, hair: 0.42, ..Default::default() },
+            top: [0.7, 0.16, 0.16],
+            bottom: [0.14, 0.14, 0.17],
+            ..preset(0.0, 24.0)
+        },
+        HumanDeli => HumanPreset {
+            body: HumanBody { gender: 1.0, age: 45.0, weight: 0.35, ..Default::default() },
+            outfit: HumanOutfit { sleeves: 2.0, hair: 0.3, apron: true, ..Default::default() },
+            top: [0.9, 0.9, 0.88],
+            bottom: [0.2, 0.2, 0.22],
+            apron: [0.92, 0.92, 0.9],
+            ..preset(1.0, 45.0)
+        },
+        HumanCasual => HumanPreset {
+            body: HumanBody { gender: 1.0, age: 22.0, weight: -0.1, ..Default::default() },
+            outfit: HumanOutfit { sleeves: 0.35, legs: 1.0, hair: 0.75, ..Default::default() },
+            top: [0.92, 0.78, 0.3],
+            bottom: [0.55, 0.5, 0.4],
+            shoes: [0.85, 0.85, 0.85],
+            ..preset(1.0, 22.0)
         },
         _ => return None,
     })
@@ -129,6 +156,7 @@ fn part_color(p: &HumanPreset, part: HumanPart) -> [f32; 3] {
         HumanPart::Eyes => [0.86, 0.85, 0.82],
         HumanPart::Irises => [0.12, 0.08, 0.06],
         HumanPart::Teeth => [0.9, 0.88, 0.82],
+        HumanPart::Apron => p.apron,
     }
 }
 
@@ -208,6 +236,28 @@ pub fn human_root(scene: &Scene, id: &str) -> CmdResult<String> {
         ));
     }
     Ok(root)
+}
+
+/// Add part meshes a person made by an older version lacks (the apron), so outfits can use them.
+fn ensure_parts(scene: &mut Scene, root: &str) -> CmdResult<()> {
+    let have = human_parts(scene, root);
+    let Some((template, ..)) = have.first() else { return Ok(()) };
+    let template = scene.get(template)?.clone();
+    for part in PARTS {
+        if have.iter().any(|(_, p, ..)| p == part) {
+            continue;
+        }
+        let mut e = template.clone();
+        let want = format!("{root}_{}", part.name());
+        e.id = if scene.contains(&want) { scene.unique_id(&want) } else { want };
+        e.name = part.name().to_string();
+        if let EntityKind::Mesh { source: MeshSource::Human { part: p, .. }, color, .. } = &mut e.kind {
+            *p = *part;
+            *color = part_color(&preset(1.0, 30.0), *part);
+        }
+        scene.insert(e)?;
+    }
+    Ok(())
 }
 
 fn update_parts(scene: &mut Scene, root: &str, f: impl Fn(&mut HumanBody, &mut HumanOutfit)) -> CmdResult<()> {
@@ -379,6 +429,33 @@ fn hand_rotations(scene: &Scene, root: &str, side: &str, shape: &HandShape) -> C
     Ok(out)
 }
 
+/// Where a realistic person's palm is at `frame` (world): its centre and the way it faces.
+pub fn palm(scene: &Scene, root: &str, side: &str, frame: f32) -> CmdResult<(Vec3, Vec3)> {
+    let (body, _) = human_of(scene, root).ok_or_else(|| CommandError::new("failed", "not a realistic person"))?;
+    let rest = human::rest(&body);
+    let skel = human::skeleton();
+    let at = |n: &str| -> CmdResult<Vec3> {
+        let name = format!("{n}_{side}");
+        skel.iter()
+            .position(|(s, _)| *s == name)
+            .map(|i| rest.joints[i])
+            .ok_or_else(|| CommandError::new("failed", format!("no joint {name}")))
+    };
+    let (wrist, index, middle, pinky) = (at("wrist")?, at("index_01")?, at("middle_01")?, at("pinky_01")?);
+    let along = (middle - wrist).normalize();
+    let sign = if side == "l" { 1.0 } else { -1.0 };
+    let mut n = (index - pinky).cross(along).normalize() * sign;
+    if n.x * sign > 0.0 {
+        n = -n;
+    }
+    // the hand's rest frame is the wrist joint's (identity at rest), so carry the rest palm along
+    let w = shotstage_core::eval::world_at(scene, &format!("{root}_wrist_{side}"), frame)?;
+    let (_, rot, _) = w.to_scale_rotation_translation();
+    let centre_rest = wrist.lerp(middle, 0.55) + n * 0.012;
+    let centre = w.transform_point3(centre_rest - wrist);
+    Ok((centre, (rot * n).normalize_or(Vec3::Y)))
+}
+
 /// Shape one or both hands of a realistic person (mannequins have no fingers: skipped).
 pub fn set_hands(
     scene: &mut Scene,
@@ -487,12 +564,15 @@ struct OutfitParams {
     shoes: Option<bool>,
     /// Hair length: 0 none, 0.3 cropped, 0.5 short, 0.75 chin, 1 shoulder, 1.4 long.
     hair: Option<f32>,
+    /// Wear a bib apron.
+    apron: Option<bool>,
     /// Part colours, linear RGB 0..1.
     colors: Option<HumanColors>,
 }
 
 fn set_outfit(scene: &mut Scene, p: OutfitParams) -> CmdResult<Value> {
     let root = human_root(scene, &p.id)?;
+    ensure_parts(scene, &root)?;
     update_parts(scene, &root, |_, o| {
         if let Some(v) = p.top {
             o.top = v;
@@ -512,6 +592,9 @@ fn set_outfit(scene: &mut Scene, p: OutfitParams) -> CmdResult<Value> {
         if let Some(v) = p.hair {
             o.hair = v;
         }
+        if let Some(v) = p.apron {
+            o.apron = v;
+        }
     })?;
     if let Some(c) = &p.colors {
         for (id, part, ..) in human_parts(scene, &root) {
@@ -524,6 +607,7 @@ fn set_outfit(scene: &mut Scene, p: OutfitParams) -> CmdResult<Value> {
                 HumanPart::Eyes => None,
                 HumanPart::Irises => c.eyes,
                 HumanPart::Teeth => None,
+                HumanPart::Apron => c.apron,
             };
             if let Some(v) = want {
                 let v = color(v)?;
@@ -789,6 +873,32 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn holding_a_prop_grips_it_and_aprons_come_and_go() {
+        let mut s = Session::default();
+        s.dispatch("prefab.create", json!({"kind": "humanMan", "id": "h"})).unwrap();
+        s.dispatch("pose.set", json!({"id": "h", "pose": "stand"})).unwrap();
+        let before = s.scene().get("h_index_02_r").unwrap().transform.rotation;
+        s.dispatch("prefab.create", json!({"kind": "cup", "id": "c", "position": [1, 0, 0]})).unwrap();
+        s.dispatch("entity.attach", json!({"id": "c", "to": "h", "hand": "right"})).unwrap();
+        let b = s.dispatch("entity.bounds", json!({"id": "c"})).unwrap().result;
+        let c = glam::Vec3::new(
+            b["center"][0].as_f64().unwrap() as f32,
+            b["center"][1].as_f64().unwrap() as f32,
+            b["center"][2].as_f64().unwrap() as f32,
+        );
+        assert!(c.distance(world(&s, "h_wrist_r")) < 0.15, "in the hand: {c}");
+        assert_ne!(s.scene().get("h_index_02_r").unwrap().transform.rotation, before, "fingers close");
+        // an apron, also on a person saved before aprons existed
+        s.dispatch("entity.delete", json!({"id": "h_apron"})).unwrap();
+        s.dispatch("person.setOutfit", json!({"id": "h", "apron": true, "colors": {"apron": [0.2, 0.4, 0.3]}}))
+            .unwrap();
+        let m = shotstage_core::eval::posed_mesh(s.scene(), "h_apron", 0.0).unwrap();
+        assert!(m.positions.len() > 100);
+        s.dispatch("person.setOutfit", json!({"id": "h", "apron": false})).unwrap();
+        assert!(shotstage_core::eval::posed_mesh(s.scene(), "h_apron", 0.0).unwrap().positions.is_empty());
     }
 
     #[test]

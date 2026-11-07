@@ -39,6 +39,11 @@ pub const TEMPLATES: &[(&str, &str, &str)] = &[
         "Street corner",
         "A car, trees and a doorway; a person walking past; a tracking shot and a drone flyover; golden-hour sun",
     ),
+    (
+        "checkout",
+        "Checkout",
+        "A checkout counter: the cashier scans and chats while a shopper pays by phone; a medium two-shot then a close-up on the payment",
+    ),
     ("cafe", "Cafe", "Tables and chairs, two people talking, a counter with a clerk; a gentle arc around them"),
     ("studio", "Empty studio", "Just an infinity cove, a camera and three-point light, ready for your own blocks"),
 ];
@@ -46,7 +51,8 @@ pub const TEMPLATES: &[(&str, &str, &str)] = &[
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TemplateParams {
-    /// groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, cafe or studio.
+    /// groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout, cafe or
+    /// studio.
     name: String,
     /// Clear the scene first. Default true.
     replace: Option<bool>,
@@ -218,6 +224,32 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
             ("light.preset", json!({"preset": "goldenHour", "camera": "cam_track"})),
             shot("cam_track", "tracking", 0, 71),
             shot("cam_drone", "drone", 72, 143),
+        ],
+        "checkout" => vec![
+            floor,
+            p("wall", "wall", [0.0, 0.0, -2.0], 0.0),
+            p("checkout", "counter", [0.0, 0.0, 0.0], 0.0),
+            p("humanCashier", "cashier", [0.15, 0.0, -0.62], 0.0),
+            ("pose.set", json!({"id": "cashier", "pose": "scan"})),
+            ("person.setExpression", json!({"id": "cashier", "expression": "smile", "amount": 0.7})),
+            p("humanShopper", "shopper", [-0.5, 0.0, 0.72], 180.0),
+            ("pose.set", json!({"id": "shopper", "pose": "pay"})),
+            p("phone", "phone", [-0.5, 1.2, 0.4], 180.0),
+            ("entity.attach", json!({"id": "phone", "to": "shopper", "hand": "right"})),
+            p("jar", "jar", [0.55, 0.9, 0.05], 0.0),
+            p("cup", "cup", [0.3, 0.9, -0.05], 0.0),
+            p("pumpBottle", "bottle", [0.1, 0.9, 0.08], 0.0),
+            p("basket", "basket", [0.2, 0.0, 0.85], 0.0),
+            timeline(119),
+            motion("talk", "cashier", None, 0, 3.0),
+            cam("cam_a", "Two-shot"),
+            frame("cam_a", "counter", "full", "right", "eyeLevel", 32.0),
+            motion("handheld", "cam_a", Some("counter"), 0, 3.0),
+            cam("cam_b", "Payment"),
+            frame("cam_b", "phone", "wide", "left", "high", 50.0),
+            ("light.preset", json!({"preset": "daylight", "camera": "cam_a"})),
+            shot("cam_a", "two-shot", 0, 71),
+            shot("cam_b", "payment", 72, 119),
         ],
         "cafe" => vec![
             floor,

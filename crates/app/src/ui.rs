@@ -3210,6 +3210,10 @@ impl EditorApp {
                 ui.label("");
                 self.part_color_button(ui, root, "shoes", part_color("shoes"));
                 ui.end_row();
+                changed |= ui.checkbox(&mut o.apron, "Apron").changed();
+                ui.label("");
+                self.part_color_button(ui, root, "apron", part_color("apron"));
+                ui.end_row();
                 ui.label("Skin");
                 ui.label("");
                 self.part_color_button(ui, root, "skin", part_color("skin"));
@@ -3226,7 +3230,7 @@ impl EditorApp {
                 self.run_merged(
                     &format!("outfit:{root}"),
                     "person.setOutfit",
-                    json!({"id": root, "top": o.top, "sleeves": o.sleeves, "bottom": o.bottom, "legs": o.legs, "shoes": o.shoes}),
+                    json!({"id": root, "top": o.top, "sleeves": o.sleeves, "bottom": o.bottom, "legs": o.legs, "shoes": o.shoes, "apron": o.apron}),
                 );
             }
         });
