@@ -461,7 +461,8 @@ struct Asset {
     quads: Vec<[u32; 4]>,
     part: Vec<u8>,
     region: Vec<u8>,
-    along: Vec<u8>,
+    /// Per vertex: where clothing edges fall.
+    vfield: Vec<VField>,
     base: [Vec<Vec3>; 2],
     bones: Vec<Bone>,
     skin_joints: Vec<[u8; 4]>,
@@ -506,12 +507,21 @@ fn asset() -> &'static Asset {
     A.get_or_init(|| {
         let mut r = Reader { b: DATA, o: 0 };
         assert_eq!(r.take(4), b"SSHM", "human asset magic");
-        assert_eq!(r.u32(), 1, "human asset version");
+        assert_eq!(r.u32(), 3, "human asset version");
         let (verts, quads, bones, morphs) = (r.u32() as usize, r.u32() as usize, r.u32() as usize, r.u32() as usize);
         let quad_list = (0..quads).map(|_| [0; 4].map(|_: u32| r.u16() as u32)).collect();
         let part = r.take(quads).to_vec();
         let region = r.take(quads).to_vec();
-        let along = r.take(quads).to_vec();
+        r.take(quads); // per-face position along the limb (unused at runtime)
+        let vfield = (0..verts)
+            .map(|_| VField {
+                region: r.u8(),
+                limb: r.i16() as f32 / 10000.0,
+                neck: r.i16() as f32 / 1000.0,
+                waist: r.i16() as f32 / 1000.0,
+                armhole: r.i16() as f32 / 10000.0,
+            })
+            .collect();
         let mut base = [Vec::with_capacity(verts), Vec::with_capacity(verts)];
         for b in &mut base {
             for _ in 0..verts {
@@ -552,7 +562,7 @@ fn asset() -> &'static Asset {
             quads: quad_list,
             part,
             region,
-            along,
+            vfield,
             base,
             bones: bone_list,
             skin_joints,
@@ -771,12 +781,19 @@ impl HumanRest {
 
 // ---------------------------------------------------------------- parts
 
-/// The faces and vertices of one part.
+/// A vertex of a part: an asset vertex, or a point on the edge between two (where a clothing
+/// edge cuts through a face).
+#[derive(Clone, Copy)]
+enum SliceVert {
+    Asset(u32),
+    Cut(u32, u32, f32),
+}
+
+/// The faces and vertices of one part (independent of the body shape).
 struct Slice {
-    /// Asset vertex indices used, in order.
-    verts: Vec<u32>,
-    /// Quads in slice-local indices.
-    quads: Vec<[u32; 4]>,
+    verts: Vec<SliceVert>,
+    /// Polygons (3 … 6 corners) in slice-local indices.
+    faces: Vec<Vec<u32>>,
 }
 
 const REGION_HEAD: u8 = 0;
@@ -786,12 +803,63 @@ const REGION_ARM: u8 = 3;
 const REGION_LEG: u8 = 5;
 const REGION_FOOT: u8 = 6;
 
-fn covered_by_top(o: &HumanOutfit, region: u8, along: f32) -> bool {
-    o.top && (region == REGION_TORSO || (region == REGION_ARM && along < o.sleeves))
+/// Per-vertex measures that clothing edges are cut along (smooth, so cuts come out clean).
+#[derive(Clone, Copy)]
+struct VField {
+    region: u8,
+    /// Position along the limb: 0 shoulder / hip, 1 elbow / knee, 2 wrist / ankle (negative
+    /// just before the shoulder).
+    limb: f32,
+    /// Metres below the neckline.
+    neck: f32,
+    /// Metres above the waist.
+    waist: f32,
+    /// Inside a sleeveless armhole (> 0).
+    armhole: f32,
 }
 
-fn covered_by_bottom(o: &HumanOutfit, region: u8, along: f32) -> bool {
-    o.bottom && (region == REGION_HIPS || (region == REGION_LEG && along < o.legs.max(0.15)))
+/// How far inside the top a vertex is (> 0 = covered), in units of about 25 cm.
+fn top_field(o: &HumanOutfit, v: usize) -> f32 {
+    if !o.top {
+        return -1.0;
+    }
+    let f = asset().vfield[v];
+    match f.region {
+        REGION_HEAD | REGION_TORSO | REGION_HIPS => {
+            let trunk = f.neck.min(f.waist) / 0.25;
+            if o.sleeves > 0.0 { trunk } else { trunk.min(f.armhole) }
+        }
+        REGION_ARM if o.sleeves > 0.0 => o.sleeves - f.limb,
+        REGION_ARM => f.armhole,
+        _ => -1.0,
+    }
+}
+
+/// How far inside the trousers a vertex is (> 0 = covered and not under the top).
+fn bottom_field(o: &HumanOutfit, v: usize) -> f32 {
+    if !o.bottom {
+        return -1.0;
+    }
+    let f = asset().vfield[v];
+    let b = match f.region {
+        REGION_HEAD | REGION_TORSO | REGION_HIPS => -f.waist / 0.25,
+        REGION_LEG => o.legs.max(0.15) - f.limb,
+        _ => -1.0,
+    };
+    if o.top { b.min(-top_field(o, v)) } else { b }
+}
+
+/// How far inside a shoe a vertex is.
+fn shoe_field(o: &HumanOutfit, v: usize) -> f32 {
+    if !o.shoes {
+        return -1.0;
+    }
+    let f = asset().vfield[v];
+    match f.region {
+        REGION_FOOT => 1.0,
+        REGION_LEG => (f.limb - 1.93) * 4.0,
+        _ => -1.0,
+    }
 }
 
 fn slice(part: HumanPart, outfit: &HumanOutfit) -> Rc<Slice> {
@@ -812,45 +880,72 @@ fn slice(part: HumanPart, outfit: &HumanOutfit) -> Rc<Slice> {
             let radius = side.iter().map(|p| (p.z - centre.z).abs()).fold(0.0, f32::max);
             c.z > centre.z + radius * 0.86
         };
-        let keep = |q: usize| -> bool {
-            let (p, r, t) = (a.part[q], a.region[q], a.along[q] as f32 / 100.0);
-            match part {
-                HumanPart::Skin => {
-                    // skin stays under the edge of clothes (they sit a few mm off it), so a
-                    // slightly different cut never opens a hole
-                    let deep = match r {
-                        REGION_TORSO => t > 1.03,
-                        REGION_ARM | REGION_LEG => true,
-                        _ => true,
-                    };
-                    let t_in = if r == REGION_ARM || r == REGION_LEG { t + 0.1 } else { t };
-                    p == 0
-                        && !(outfit.shoes && r == REGION_FOOT)
-                        && !(deep && (covered_by_top(outfit, r, t_in) || covered_by_bottom(outfit, r, t_in)))
-                }
-                // clothes are the fitted "tights" shell, a little off the skin
-                HumanPart::Top => p == 1 && covered_by_top(outfit, r, t),
-                HumanPart::Bottom => p == 1 && !covered_by_top(outfit, r, t) && covered_by_bottom(outfit, r, t),
-                HumanPart::Shoes => p == 0 && outfit.shoes && r == REGION_FOOT,
-                HumanPart::Hair => false,
-                HumanPart::Eyes => p == 3 && !iris(q),
-                HumanPart::Irises => p == 3 && iris(q),
-                HumanPart::Teeth => p == 4,
-            }
+        // skin stays under the edges of clothes (they sit a few mm off it): hidden only well inside
+        let covered = |v: u32| {
+            let v = v as usize;
+            top_field(outfit, v).max(bottom_field(outfit, v)).max(shoe_field(outfit, v)) > 0.12
         };
-        let mut map: HashMap<u32, u32> = HashMap::new();
-        let mut verts = Vec::new();
-        let mut quads = Vec::new();
-        for q in (0..a.quads.len()).filter(|q| keep(*q)) {
-            let loop_ = a.quads[q].map(|v| {
-                *map.entry(v).or_insert_with(|| {
-                    verts.push(v);
-                    verts.len() as u32 - 1
+        // (source part, field to cut by)
+        let (source, field): (u8, Option<Field>) = match part {
+            HumanPart::Skin => (0, None),
+            HumanPart::Top => (1, Some(top_field)),
+            HumanPart::Bottom => (1, Some(bottom_field)),
+            HumanPart::Shoes => (0, Some(shoe_field)),
+            HumanPart::Hair => (u8::MAX, None),
+            HumanPart::Eyes | HumanPart::Irises => (3, None),
+            HumanPart::Teeth => (4, None),
+        };
+        let mut out = Slice { verts: vec![], faces: vec![] };
+        let mut asset_map: HashMap<u32, u32> = HashMap::new();
+        let mut cut_map: HashMap<(u32, u32), u32> = HashMap::new();
+        for q in (0..a.quads.len()).filter(|q| a.part[*q] == source) {
+            let quad = a.quads[q];
+            let keep_whole = match part {
+                HumanPart::Skin => !quad.iter().all(|v| covered(*v)),
+                HumanPart::Eyes => !iris(q),
+                HumanPart::Irises => iris(q),
+                _ => true,
+            };
+            if !keep_whole {
+                continue;
+            }
+            let mut add_asset = |out: &mut Slice, v: u32| {
+                *asset_map.entry(v).or_insert_with(|| {
+                    out.verts.push(SliceVert::Asset(v));
+                    out.verts.len() as u32 - 1
                 })
-            });
-            quads.push(loop_);
+            };
+            let Some(f) = field else {
+                let face = quad.iter().map(|v| add_asset(&mut out, *v)).collect();
+                out.faces.push(face);
+                continue;
+            };
+            let vals = quad.map(|v| f(outfit, v as usize));
+            if vals.iter().all(|x| *x < 0.0) {
+                continue;
+            }
+            let mut poly = vec![];
+            for k in 0..4 {
+                let (va, vb, fa, fb) = (quad[k], quad[(k + 1) % 4], vals[k], vals[(k + 1) % 4]);
+                if fa >= 0.0 {
+                    poly.push(add_asset(&mut out, va));
+                }
+                if (fa >= 0.0) != (fb >= 0.0) {
+                    // the same edge point for both faces sharing the edge
+                    let (lo, hi, flo, fhi) = if va < vb { (va, vb, fa, fb) } else { (vb, va, fb, fa) };
+                    let t = (flo / (flo - fhi)).clamp(0.0, 1.0);
+                    let i = *cut_map.entry((lo, hi)).or_insert_with(|| {
+                        out.verts.push(SliceVert::Cut(lo, hi, t));
+                        out.verts.len() as u32 - 1
+                    });
+                    poly.push(i);
+                }
+            }
+            if poly.len() >= 3 {
+                out.faces.push(poly);
+            }
         }
-        Slice { verts, quads }
+        out
     })
 }
 
@@ -867,12 +962,54 @@ pub fn skin_matrices(rest: &HumanRest, to_local: Mat4, joint_world: &[Option<Mat
         .collect()
 }
 
-/// A part ready to skin: rest (A-pose) positions, the asset vertex whose weights each vertex
-/// uses, and quads.
+/// Up to four joints and their weights.
+/// How far a vertex is covered by a garment (> 0 covered), from the outfit.
+type Field = fn(&HumanOutfit, usize) -> f32;
+
+type Influence = ([u8; 4], [f32; 4]);
+
+fn influence(v: u32) -> Influence {
+    let a = asset();
+    (a.skin_joints[v as usize], a.skin_weights[v as usize])
+}
+
+/// Weights of a point between two vertices.
+fn blend(x: Influence, y: Influence, t: f32) -> Influence {
+    let mut acc: Vec<(u8, f32)> = vec![];
+    for (inf, w) in [(x, 1.0 - t), (y, t)] {
+        for k in 0..4 {
+            if inf.1[k] > 0.0 {
+                match acc.iter_mut().find(|(j, _)| *j == inf.0[k]) {
+                    Some(e) => e.1 += inf.1[k] * w,
+                    None => acc.push((inf.0[k], inf.1[k] * w)),
+                }
+            }
+        }
+    }
+    acc.sort_by(|p, q| q.1.total_cmp(&p.1));
+    acc.truncate(4);
+    let total: f32 = acc.iter().map(|e| e.1).sum::<f32>().max(1e-6);
+    let mut out = ([0u8; 4], [0f32; 4]);
+    for (k, (j, w)) in acc.into_iter().enumerate() {
+        out.0[k] = j;
+        out.1[k] = w / total;
+    }
+    out
+}
+
+/// A part ready to skin: rest (A-pose) positions, skin weights and polygons.
 struct Geometry {
     rest: Vec<Vec3>,
-    src: Vec<u32>,
-    quads: Vec<[u32; 4]>,
+    skin: Vec<Influence>,
+    faces: Vec<Vec<u32>>,
+}
+
+impl Geometry {
+    fn push(&mut self, p: Vec3, v: u32) -> u32 {
+        self.rest.push(p);
+        self.skin.push(influence(v));
+        self.rest.len() as u32 - 1
+    }
 }
 
 /// Vertex normals of the rest body (area-weighted over the skin faces).
@@ -907,15 +1044,23 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
         // shoes stand a little proud of the feet
         let inflate = if part == HumanPart::Shoes { 0.006 } else { 0.0 };
         let normals = if inflate > 0.0 { rest_normals(&r) } else { vec![] };
-        let rest_pos = s
-            .verts
-            .iter()
-            .map(|v| {
-                let p = r.positions[*v as usize];
-                if inflate > 0.0 { p + normals[*v as usize] * inflate } else { p }
-            })
-            .collect();
-        Geometry { rest: rest_pos, src: s.verts.clone(), quads: s.quads.clone() }
+        let at = |v: u32| {
+            let p = r.positions[v as usize];
+            if inflate > 0.0 { p + normals[v as usize] * inflate } else { p }
+        };
+        let mut g = Geometry { rest: vec![], skin: vec![], faces: s.faces.clone() };
+        for v in &s.verts {
+            match *v {
+                SliceVert::Asset(i) => {
+                    g.push(at(i), i);
+                }
+                SliceVert::Cut(i, j, t) => {
+                    g.rest.push(at(i).lerp(at(j), t));
+                    g.skin.push(blend(influence(i), influence(j), t));
+                }
+            }
+        }
+        g
     })
 }
 
@@ -923,7 +1068,7 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
 /// for longer styles a curtain hanging from the sides and back (both sides drawn).
 fn hair(r: &HumanRest, length: f32) -> Geometry {
     let a = asset();
-    let mut g = Geometry { rest: vec![], src: vec![], quads: vec![] };
+    let mut g = Geometry { rest: vec![], skin: vec![], faces: vec![] };
     if length <= 0.0 {
         return g;
     }
@@ -955,11 +1100,11 @@ fn hair(r: &HumanRest, length: f32) -> Geometry {
                 // more volume on the crown than at the hairline
                 let up = ((base[v as usize].y - eye.y) / 0.12).clamp(0.0, 1.0);
                 g.rest.push(p + normals[v as usize] * thick * (0.6 + 0.6 * up));
-                g.src.push(v);
+                g.skin.push(influence(v));
                 g.rest.len() as u32 - 1
             })
         });
-        g.quads.push(loop_);
+        g.faces.push(loop_.to_vec());
         for k in 0..4 {
             let (x, y) = (quad[k], quad[(k + 1) % 4]);
             *edge_count.entry((x.min(y), x.max(y))).or_default() += 1;
@@ -981,13 +1126,13 @@ fn hair(r: &HumanRest, length: f32) -> Geometry {
     let mut skin_vert = |g: &mut Geometry, v: u32| {
         *skin_of.entry(v).or_insert_with(|| {
             g.rest.push(r.positions[v as usize] - normals[v as usize] * 0.001);
-            g.src.push(v);
+            g.skin.push(influence(v));
             g.rest.len() as u32 - 1
         })
     };
     for (x, y) in &boundary {
         let (sx, sy) = (skin_vert(&mut g, *x), skin_vert(&mut g, *y));
-        g.quads.push([cap[y], cap[x], sx, sy]);
+        g.faces.push(vec![cap[y], cap[x], sx, sy]);
     }
     // a curtain from the sides and back for chin-length and longer hair
     if length > 0.6 {
@@ -1058,9 +1203,9 @@ fn hair(r: &HumanRest, length: f32) -> Geometry {
                             let p = if k == 0 { top } else { axis + out * len };
                             let outer = g.rest.len() as u32;
                             g.rest.push(p);
-                            g.src.push(v);
+                            g.skin.push(influence(v));
                             g.rest.push(p - out * 0.006);
-                            g.src.push(v);
+                            g.skin.push(influence(v));
                             [outer, outer + 1]
                         })
                         .collect()
@@ -1076,11 +1221,11 @@ fn hair(r: &HumanRest, length: f32) -> Geometry {
             let (cx, cy) = (column(&mut g, *x), column(&mut g, *y));
             for k in 0..steps {
                 // outer side faces away from the head, inner side towards it
-                g.quads.push([cy[k][0], cx[k][0], cx[k + 1][0], cy[k + 1][0]]);
-                g.quads.push([cx[k][1], cy[k][1], cy[k + 1][1], cx[k + 1][1]]);
+                g.faces.push(vec![cy[k][0], cx[k][0], cx[k + 1][0], cy[k + 1][0]]);
+                g.faces.push(vec![cx[k][1], cy[k][1], cy[k + 1][1], cx[k + 1][1]]);
             }
             // the bottom edge
-            g.quads.push([cx[steps][0], cy[steps][0], cy[steps][1], cx[steps][1]]);
+            g.faces.push(vec![cx[steps][0], cy[steps][0], cy[steps][1], cx[steps][1]]);
         }
     }
     g
@@ -1103,13 +1248,10 @@ fn eye_center(p: &[Vec3]) -> Vec3 {
 }
 
 fn skinned_positions(g: &Geometry, mats: &[Mat4]) -> Vec<Vec3> {
-    let a = asset();
     g.rest
         .iter()
-        .zip(&g.src)
-        .map(|(p, v)| {
-            let v = *v as usize;
-            let (js, ws) = (a.skin_joints[v], a.skin_weights[v]);
+        .zip(&g.skin)
+        .map(|(p, (js, ws))| {
             let mut out = Vec3::ZERO;
             for k in 0..4 {
                 if ws[k] > 0.0 {
@@ -1124,10 +1266,7 @@ fn skinned_positions(g: &Geometry, mats: &[Mat4]) -> Vec<Vec3> {
 /// A posed part as an editable mesh (export, mesh edits).
 pub fn part_mesh(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit, mats: &[Mat4]) -> Mesh {
     let g = geometry(body, part, outfit);
-    Mesh {
-        positions: skinned_positions(&g, mats).into_iter().map(|p| p.to_array()).collect(),
-        faces: g.quads.iter().map(|q| q.to_vec()).collect(),
-    }
+    Mesh { positions: skinned_positions(&g, mats).into_iter().map(|p| p.to_array()).collect(), faces: g.faces.clone() }
 }
 
 /// A posed part triangulated with smooth normals (cached by shape, outfit and joint matrices).
@@ -1145,15 +1284,18 @@ pub fn part_tris(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit, mats: 
         let g = geometry(body, part, outfit);
         let pos = skinned_positions(&g, mats);
         let mut normals = vec![Vec3::ZERO; pos.len()];
-        let mut indices = Vec::with_capacity(g.quads.len() * 6);
-        for q in &g.quads {
-            let [a, b, c, d] = q.map(|i| i as usize);
-            // area-weighted quad normal
-            let n = (pos[c] - pos[a]).cross(pos[d] - pos[b]);
-            for i in [a, b, c, d] {
-                normals[i] += n;
+        let mut indices = Vec::with_capacity(g.faces.len() * 6);
+        for f in &g.faces {
+            // area-weighted normal of the polygon, fanned into triangles
+            let p0 = pos[f[0] as usize];
+            let mut n = Vec3::ZERO;
+            for k in 1..f.len() - 1 {
+                n += (pos[f[k] as usize] - p0).cross(pos[f[k + 1] as usize] - p0);
+                indices.extend_from_slice(&[f[0], f[k], f[k + 1]]);
             }
-            indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
+            for i in f {
+                normals[*i as usize] += n;
+            }
         }
         TriMesh {
             positions: pos.iter().map(|p| p.to_array()).collect(),
@@ -1210,12 +1352,12 @@ mod tests {
     #[test]
     fn outfit_parts_do_not_overlap() {
         let o = HumanOutfit::default();
-        let n = |p| slice(p, &o).quads.len();
+        let n = |p| slice(p, &o).faces.len();
         let all: usize = PARTS.iter().map(|p| n(*p)).sum();
         assert!(n(HumanPart::Top) > 100 && n(HumanPart::Bottom) > 100 && n(HumanPart::Shoes) > 50);
         assert!(all < asset().quads.len());
         let bare = HumanOutfit { top: false, bottom: false, shoes: false, ..o };
-        assert!(slice(HumanPart::Skin, &bare).quads.len() > n(HumanPart::Skin));
+        assert!(slice(HumanPart::Skin, &bare).faces.len() > n(HumanPart::Skin));
     }
 
     #[test]

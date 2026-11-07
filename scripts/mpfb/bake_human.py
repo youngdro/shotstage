@@ -17,6 +17,7 @@ Format (little endian):
     quads × u8             region (0 head/neck, 1 torso, 2 hips, 3 arm, 4 hand, 5 leg, 6 foot)
     quads × u8             along  (arm: 0 shoulder → 100 elbow → 200 wrist; leg: hip → knee → ankle;
                                    head / torso: 100 + cm below the neckline)
+    verts × (u8 region, u8 limb ×100, i8 cm below the neckline, i8 cm above the waist)
     2 × verts × 3 i16      rest positions (female, male), 1/16000 m, Y up, +Z forward, +X the figure's left
     bones × { u8 len, name, i16 parent, u16 n, n × (u16 vertex, f32 weight) }   joint = Σ w·v
     verts × (4 u8 bone, 4 u8 weight)                                             weights sum to 255
@@ -291,6 +292,34 @@ def main():
             raise SystemExit(f"no region for {n}")
         region_of_bone[bone_index[n]] = r
 
+    neck = jpos("neck_01")
+
+    def neck_cut(c):
+        front = max(0.0, min(1.0, (c[2] - neck[2]) / 0.08))
+        return neck[1] - 0.025 - 0.02 * front
+
+    def classify(c, score):
+        """Region and position along the limb for a point driven by bones with `score`."""
+        r = max(score.items(), key=lambda kv: kv[1])[0]
+        a = 0.0
+        # a clean crew neckline, a little lower at the front
+        if r in (0, 1):
+            cut = neck_cut(c)
+            r = 0 if c[1] > cut else 1
+            a = 1.0 + max(-1.0, min(1.5, cut - c[1]))
+        if r == 1 and c[1] < waist_y:
+            r = 2
+        if r == 2 and score.get(5, 0) > 0 and c[1] < jpos("thigh_l")[1] - 0.06:
+            r = 5
+        side = "l" if c[0] > 0 else "r"
+        if r == 3:
+            a = along(c, [f"upperarm_{side}", f"lowerarm_{side}", f"hand_{side}"])
+        elif r in (5, 6):
+            a = along(c, [f"thigh_{side}", f"calf_{side}", f"foot_{side}"])
+            if r == 6:
+                a = max(a, 2.0)
+        return r, a
+
     quads, parts, regions, alongs = [], [], [], []
     for part, f in kept_faces:
         assert len(f) == 4
@@ -299,38 +328,52 @@ def main():
         for i in loop:
             for b, w in zip(*skin[i]):
                 score[region_of_bone[b]] += w
-        r = max(score.items(), key=lambda kv: kv[1])[0]
         c = [sum(avg[i][k] for i in loop) / 4 for k in range(3)]
-        a = 0.0
-        # a clean crew neckline, a little lower at the front
-        if r in (0, 1):
-            neck = jpos("neck_01")
-            front = max(0.0, min(1.0, (c[2] - neck[2]) / 0.08))
-            cut = neck[1] - 0.025 - 0.02 * front
-            r = 0 if c[1] > cut else 1
-            a = 1.0 + max(-1.0, min(1.5, cut - c[1])) * 1.0  # 1 = on the neckline, +0.01 per cm below
-        if r == 1 and c[1] < waist_y:
-            r = 2
-        if r == 2 and score.get(5, 0) > 0 and c[1] < jpos("thigh_l")[1] - 0.06:
-            r = 5
-        if r == 3:
-            side = "l" if c[0] > 0 else "r"
-            a = along(c, [f"upperarm_{side}", f"lowerarm_{side}", f"hand_{side}"])
-        elif r == 5:
-            side = "l" if c[0] > 0 else "r"
-            a = along(c, [f"thigh_{side}", f"calf_{side}", f"foot_{side}"])
+        r, a = classify(c, score)
         quads.append(loop)
         parts.append(part)
         regions.append(r)
         alongs.append(max(0, min(255, round(a * 100))))
 
+    # the same per vertex, for clean cuts along clothing edges
+    vfields = []
+    for i in range(len(used)):
+        score = defaultdict(float)
+        for b, w in zip(*skin[i]):
+            if w:
+                score[region_of_bone[b]] += w
+        c = avg[i]
+        r, a = classify(c, score)
+        side = "l" if c[0] > 0 else "r"
+        leg = along(c, [f"thigh_{side}", f"calf_{side}", f"foot_{side}"]) if r in (5, 6) else 0.0
+        arm = along(c, [f"upperarm_{side}", f"lowerarm_{side}", f"hand_{side}"]) if r in (3, 4) else 0.0
+        if r == 4:
+            arm = max(arm, 2.0)
+        # signed position along the upper arm, before the shoulder too: a clean armhole plane
+        sh, el = jpos(f"upperarm_{side}"), jpos(f"lowerarm_{side}")
+        ab = [el[k] - sh[k] for k in range(3)]
+        t = sum((c[k] - sh[k]) * ab[k] for k in range(3)) / sum(x * x for x in ab)
+        if r == 3 and t < 0:
+            arm = t
+        # sleeveless armhole: inside a side plane a little in from the shoulder joint, plus the
+        # trunk below the armpit
+        armpit_y = sh[1] - 0.11
+        hole = (abs(sh[0]) - 0.03 - abs(c[0])) / 0.1
+        if r in (0, 1, 2):
+            hole = max(hole, (armpit_y - c[1]) / 0.1)
+        limb = arm if r in (3, 4) else leg
+        mm = lambda x: max(-32767, min(32767, round(x * 1000)))
+        vfields.append((r, max(-32767, min(32767, round(limb * 10000))), mm(neck_cut(c) - c[1]), mm(c[1] - waist_y), max(-32767, min(32767, round(hole * 10000)))))
+
     # write
     out = bytearray()
-    out += b"SSHM" + struct.pack("<I", 1)
+    out += b"SSHM" + struct.pack("<I", 3)
     out += struct.pack("<4I", len(used), len(quads), len(order), len(morphs))
     for q in quads:
         out += struct.pack("<4H", *q)
     out += bytes(parts) + bytes(regions) + bytes(alongs)
+    for r, limb, nd, wd, hole in vfields:
+        out += struct.pack("<Bhhhh", r, limb, nd, wd, hole)
     for sex in ("female", "male"):
         for p in bases[sex]:
             out += struct.pack("<3h", *(round(x * POS_SCALE) for x in p))
