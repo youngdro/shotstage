@@ -40,6 +40,7 @@
   - **People**：男、女（带骨骼，见下）。
   - **Fresh retail 生鲜零售**：果蔬堆头、苹果 / 橙子 / 绿叶菜筐、西瓜箱、货架、风幕柜、卧式冰柜、熟食柜、冰鲜鱼台、面包架、收银台、购物车、购物篮、电子秤、价签牌、栈板。
   - **Product shoot 产品拍摄**：瓶、罐、易拉罐、盒、软管、立袋、咖啡杯、礼盒、按压瓶；圆台、阶梯台、方块垫高、柱台、蛋糕架、托盘、亚克力架、拱形背景板、无影墙（infinity cove）、背景纸卷、拍摄桌、柔光箱、反光板；叶枝、花、柑橘片、鹅卵石、冰块、布料、丝带、水花、装饰球。产品类可以用 `prefab.create` 的 `size: [宽, 高, 深]` 拉伸到真实产品尺寸。
+- **车削形体**：基础形状里的 Vase / Bowl 是 `lathe` 形体，给一串 `[半径, 高度]` 轮廓点绕 Y 轴旋转而成，脚本可以直接做任意瓶罐杯碗：`{"shape": "lathe", "segments": 32, "profile": [[0, 0], [0.04, 0], [0.04, 0.15], [0.015, 0.2], [0.015, 0.23]]}`（半径为 0 的点封口，其余端口自动补平盖）。
   - **Furniture & set**：餐桌、椅子、沙发、床、落地灯、箱子、楼梯、墙、门洞、车、树，以及办公桌、显示器、笔记本电脑、办公椅、长椅、路灯、自行车、路锥、栅栏、盆栽。
   每个预制件都是一个组，整组一起拖动；在已选中的组里再点一次，可以选中单个部件。
 - **直接拖动场景里的物体**：物体沿表面滑动，并且始终停在鼠标下面。**Shift** 竖直抬高；**Alt** 拖动时复制整组；拖动中滚动滚轮或按 **R** 旋转 15°（Shift+R 反向）；默认按 0.25 m 吸附网格，按住 **Ctrl** 可自由摆放；**Esc** 撤回这次拖动。拖动时会显示落点的投影。
@@ -71,6 +72,29 @@
 - OBJ / STL 没有单位：默认按尺寸猜（大于 200 按毫米，大于 20 按厘米），可以用 `unit` 指定；STL 默认 Z 轴朝上。`fitHeight` 可以把模型缩放到指定高度。
 - **导出**：顶栏 **Export** 可以导出 GLB（含相机和灯光）、glTF、OBJ+MTL、STL，以及经 Blender 转换的 FBX。导出的是当前帧摆好的姿势。
 - 命令：`model.import`、`model.export`；CLI：`shotstage import chair.glb -s shot.json --fit-height 0.9`、`shotstage export set.fbx -s shot.json`。
+
+## 编辑网格（类 Blender 编辑模式）
+
+选中一个网格（道具里的某个部件、导入的模型、基础形体都行），按 **Tab** 或在右侧点 **✏ Edit mesh** 进入编辑模式，再按 Tab 或点 **Done** 回到物体模式。视口顶部的条可以切换点 / 边 / 面和 X 光。
+
+- **选择**：`1` / `2` / `3` 切换点、边、面；单击选中，Shift+单击加选或取消，Alt(Option)+单击选整条边环（面模式下是面环），Cmd/Ctrl+拖动框选，双击或 `L` 选鼠标下相连的整块，Ctrl+L 选和当前选择相连的部分，`A` 全选、Alt+A 全不选，Ctrl+= 扩大一圈。背面的元素默认不显示也选不到，打开 X-ray（Alt+Z）可以透视选择。
+- **移动**：直接拖选中的元素就能移动；也可以拖选区中心的红绿蓝箭头沿轴移动。`G` 移动、`R` 旋转、`S` 缩放跟随鼠标，按 `X` / `Y` / `Z` 锁定轴，直接输入数字给精确值，单击或回车确认，Esc 或右键取消。打开 Snap 时按网格步长吸附（按住 Ctrl 自由移动）。
+- **工具**：`E` 挤出（面沿法线，边向外），`I` 内插，Ctrl+B 倒角（滚轮加段数，变圆角），Ctrl+R 或 `C` 环切（浏览器里 Cmd+R 会刷新页面，所以 Mac 上用 Ctrl+R；鼠标悬停在边上预览，滚轮加刀数，单击切下），`F` 补面，`J` 连接两点切开面，`M` 合并顶点，`X` / Delete 删除。右侧面板里有同样的按钮，可以填精确数值，另有细分、翻转法线和 **Clean up**（合并重合顶点，修好导入时被拆开的网格）。
+- **更多工具**：连按两次 `G` 边滑移（选中的边沿相邻边滑动，可输入 -1~1 的比例）；`K` 刀切（在模型表面依次单击多个点，按 Enter 或再点一次最后一个点完成；刀口贴着看得见的表面走，只切到点与点之间，点落在面内时会在那里拐弯；先选了面就只切选中的面）；`O` 开关**衰减编辑**（G / R / S 时周围的顶点按距离渐弱地跟着动，移动中滚轮调范围，面板里可选衰减曲线）；移动（G 或拖动）时按住 Cmd/Ctrl 可**吸附到顶点**；面板里的 **Spin** 把选中的边或面绕物体原点的 X/Y/Z 轴旋转挤出（360° 自动接上）；**Bridge** 桥接两个边界环（选两个面会先删掉它们再连成通道，点数不同的环用三角面连）。
+- **布尔运算**：选中一个网格，在属性面板 **Boolean** 里选另一个网格和运算（差集 / 并集 / 交集），点 Apply。结果写回当前网格，另一个网格被隐藏（和 Blender 应用布尔修改器一样）。两个网格都应是封闭实体。
+- 每次操作都是一步撤销。基础形体第一次被编辑时会变成可编辑网格（尺寸滑块随之消失），修改器（镜像、阵列、细分）保持在上面实时生效；带骨骼的模型不能在这里改网格。
+
+所有工具都是普通命令，网页 JS、CLI 和 MCP 都能调用。元素用索引指定：`vertices: [3, 7]`、`edges: [[3, 7]]`、`faces: [0, 4]`，`mesh.editData` 返回顶点、面和边列表。每个工具都会返回 `selection`，也就是操作之后应该选中的元素（新索引），可以直接接着用：
+
+```json
+{"batch": [
+  {"command": "mesh.extrude", "params": {"id": "box_1", "faces": [4], "distance": 0.3}},
+  {"command": "mesh.inset", "params": {"id": "box_1", "faces": [4], "thickness": 0.05, "depth": -0.02}},
+  {"command": "mesh.loopCut", "params": {"id": "box_1", "edge": [0, 1], "cuts": 2}}
+]}
+```
+
+编辑器的编辑模式状态也开放给脚本：`editor.editMesh`（`{id, mode}` 进入，`{id: null}` 退出）、`editor.editSelect`（设置选择）、`editor.state` 会带上 `edit`。
 
 ## 图片
 
@@ -193,6 +217,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 积木摆放 | `prefab.create`（`size` 拉伸到指定尺寸） `prefab.list` `entity.place`（`ray` 落到射线击中处 / `on` 放到某物顶上 / `nextTo`+`side`(+`view` 按镜头左右) 并排 / 不带参数时落到正下方）`entity.moveTo` `entity.rotate` `entity.face` `entity.bounds` |
 | 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
+| 网格编辑 | `mesh.editData` `mesh.makeEditable` `mesh.select`（loop / ring / faceLoop / linked / more / all） `mesh.transformElements` `mesh.extrude` `mesh.inset` `mesh.bevel` `mesh.loopCut` `mesh.subdivideFaces` `mesh.connect` `mesh.merge` `mesh.mergeByDistance` `mesh.fill` `mesh.flipNormals` `mesh.deleteElements` `mesh.bridge` `mesh.edgeSlide` `mesh.bisect`（平面切割，可删除一侧） `mesh.knife`（沿表面点路径切） `mesh.spin`（旋转挤出） `mesh.transformElements` 的 `proportional` 参数（衰减编辑） `mesh.boolean`（union / difference / intersect） |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
 | 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
 | 模型 | `model.import` `model.export` |
@@ -222,7 +247,7 @@ cargo run -p shotstage-app [scene.json]          # 原生编辑器
 - **M2 镜头与时间线**：时间线 UI（关键帧拖拽、曲线）、相机支架（轨道 / 摇臂）、更多命名运镜
 - **M3 导出**：离屏逐帧渲染，导出首尾帧、mp4、深度 / 法线 / OpenPose / ID 序列，以及导出包
 - **M4 Agent**：`render_frame` 返回图片、MCP 实时桥（agent 驱动用户打开的网页编辑器）、权限分级
-- **二期网格编辑**：点 / 边 / 面编辑模式，挤出、倒角、循环切割、布尔运算、减面
+- **网格编辑**：点 / 边 / 面编辑模式、挤出、内插、倒角、环切、边滑移、刀切、桥接、布尔运算已完成；下一步是减面、UV 与材质
 
 ## License
 

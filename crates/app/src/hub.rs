@@ -33,6 +33,44 @@ pub struct Hub {
     pub(crate) snap_renderer: Option<Renderer>,
     /// Snapshots waiting for the GPU (the UI polls the device while > 0).
     pub(crate) pending_snapshots: u32,
+    /// Mesh edit mode: the mesh being edited and its selected vertices / edges / faces.
+    pub edit: Option<EditState>,
+}
+
+/// Which elements clicks pick in edit mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectMode {
+    #[default]
+    Vertex,
+    Edge,
+    Face,
+}
+
+/// Mesh edit mode state, shared with agents through `editor.editMesh` / `editor.editSelect`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditState {
+    pub id: String,
+    pub mode: SelectMode,
+    pub selection: shotstage_core::meshedit::Elements,
+}
+
+impl EditState {
+    pub fn json(&self) -> Value {
+        json!({ "id": self.id, "mode": self.mode, "selection": self.selection })
+    }
+}
+
+/// Can `id` be edited in edit mode? (a mesh that is not rigged)
+pub fn editable(scene: &shotstage_core::Scene, id: &str) -> Result<(), CommandError> {
+    match scene.get(id).map(|e| &e.kind) {
+        Ok(shotstage_core::EntityKind::Mesh { source: shotstage_core::MeshSource::Skinned { .. }, .. }) => {
+            Err(CommandError::new("failed", format!("`{id}` is rigged: pose it instead of editing its mesh")))
+        }
+        Ok(shotstage_core::EntityKind::Mesh { .. }) => Ok(()),
+        Ok(_) => Err(CommandError::new("failed", format!("`{id}` is not a mesh"))),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub(crate) fn render_pass(p: SnapshotPass) -> Pass {
@@ -132,7 +170,45 @@ fn editor_command(hub: &mut Hub, request: &Value) -> Option<Result<Outcome, Comm
             }
             ok(Value::Null)
         }
+        "editor.editMesh" => {
+            let id = params.get("id").and_then(Value::as_str).map(str::to_string);
+            let mode = match params.get("mode") {
+                None => None,
+                Some(m) => match serde_json::from_value::<SelectMode>(m.clone()) {
+                    Ok(m) => Some(m),
+                    Err(_) => return Some(Err(CommandError::invalid("`mode` must be vertex, edge or face"))),
+                },
+            };
+            match id {
+                None => hub.edit = None,
+                Some(id) => {
+                    if let Err(e) = editable(hub.session.scene(), &id) {
+                        return Some(Err(e));
+                    }
+                    hub.selected = Some(id.clone());
+                    let keep = hub.edit.as_ref().filter(|e| e.id == id).map(|e| e.selection.clone());
+                    hub.edit =
+                        Some(EditState { id, mode: mode.unwrap_or_default(), selection: keep.unwrap_or_default() });
+                }
+            }
+            ok(hub.edit.as_ref().map(EditState::json).unwrap_or(Value::Null))
+        }
+        "editor.editSelect" => {
+            let Some(edit) = hub.edit.as_mut() else {
+                return Some(Err(CommandError::new("failed", "not in edit mode: call editor.editMesh first")));
+            };
+            let sel: shotstage_core::meshedit::Elements = match serde_json::from_value(params.clone()) {
+                Ok(s) => s,
+                Err(e) => return Some(Err(CommandError::invalid(e.to_string()))),
+            };
+            if let Some(m) = params.get("mode").and_then(|m| serde_json::from_value::<SelectMode>(m.clone()).ok()) {
+                edit.mode = m;
+            }
+            edit.selection = sel.normalized();
+            ok(edit.json())
+        }
         "editor.state" => ok(json!({
+            "edit": hub.edit.as_ref().map(EditState::json),
             "selected": hub.selected, "frame": hub.frame, "lookThrough": hub.look_through,
             "pass": match hub.pass { shotstage_render::Pass::Clay => "clay", shotstage_render::Pass::Depth => "depth", shotstage_render::Pass::Normal => "normal" },
         })),
@@ -144,7 +220,15 @@ pub const EDITOR_COMMANDS: &[(&str, &str)] = &[
     ("editor.select", "Select an entity in the editor (params: {id: string|null})."),
     ("editor.setFrame", "Move the editor's playhead (params: {frame: number})."),
     ("editor.setView", "Viewport options (params: {pass?: \"clay\"|\"depth\"|\"normal\", lookThrough?: boolean})."),
-    ("editor.state", "The editor's selection, current frame and viewport options."),
+    ("editor.state", "The editor's selection, current frame, viewport options and mesh edit mode."),
+    (
+        "editor.editMesh",
+        "Enter mesh edit mode on a mesh (params: {id: string|null, mode?: \"vertex\"|\"edge\"|\"face\"}); null leaves it.",
+    ),
+    (
+        "editor.editSelect",
+        "Set the edit-mode selection (params: {vertices?, edges?, faces?, mode?}); tools' `selection` results fit here.",
+    ),
 ];
 
 /// Run a request (`{"command", "params"}` or `{"batch": [...]}`), then notify listeners.

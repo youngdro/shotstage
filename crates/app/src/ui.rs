@@ -12,6 +12,9 @@ use shotstage_render::{Overlay, Pass, Renderer, View, pick};
 
 use crate::hub::{self, SharedHub};
 
+#[path = "editmode.rs"]
+mod editmode;
+
 /// Something in the block palette.
 #[derive(Clone)]
 enum Block {
@@ -463,6 +466,16 @@ fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
             json!({"shape": "torus", "majorRadius": 0.3, "minorRadius": 0.08, "majorSegments": 32, "minorSegments": 12}),
             grey,
         ),
+        Block::Shape(
+            "Vase",
+            json!({"shape": "lathe", "segments": 32, "profile": [[0, 0], [0.07, 0], [0.11, 0.08], [0.12, 0.16], [0.07, 0.27], [0.045, 0.32], [0.06, 0.36]]}),
+            grey,
+        ),
+        Block::Shape(
+            "Bowl",
+            json!({"shape": "lathe", "segments": 32, "profile": [[0, 0], [0.05, 0], [0.06, 0.01], [0.13, 0.05], [0.16, 0.09], [0.15, 0.09], [0.12, 0.055], [0.0, 0.02]]}),
+            grey,
+        ),
         Block::Shape("Floor", json!({"shape": "plane", "size": [12, 12]}), [0.5, 0.5, 0.52]),
     ];
     let of = |c: Category| -> Vec<Block> {
@@ -571,6 +584,8 @@ enum Gesture {
     },
     /// Esc pressed: ignore the rest of this drag.
     Cancelled,
+    /// Edit mode: a tool follows this drag and applies on release.
+    EditTool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -795,6 +810,23 @@ pub struct EditorApp {
     toast: Option<(String, f64)>,
     /// Files picked or dropped, waiting to be imported: (name, bytes, drop position).
     incoming: crate::files::Inbox,
+    /// Mesh edit mode: the edited mesh's geometry, the running tool, view options.
+    edit_cache: Option<editmode::EditCache>,
+    edit_modal: Option<editmode::Modal>,
+    edit_xray: bool,
+    edit_amounts: editmode::EditAmounts,
+    edit_scroll: f32,
+    edit_hot_axis: Option<usize>,
+    edit_hover: Option<editmode::Elem>,
+    /// The press that applied a tool: its click must not also select.
+    edit_swallow: bool,
+    /// Frames left to clear the keyboard focus a Tab gave to some button.
+    edit_unfocus: u8,
+    /// Proportional editing (O).
+    edit_prop: bool,
+    /// Boolean panel: the other mesh and the operation.
+    bool_with: Option<String>,
+    bool_op: shotstage_core::csg::BoolOp,
 }
 
 impl EditorApp {
@@ -873,6 +905,18 @@ impl EditorApp {
             last_subject: None,
             toast: None,
             incoming: Default::default(),
+            edit_cache: None,
+            edit_modal: None,
+            edit_xray: false,
+            edit_amounts: Default::default(),
+            edit_scroll: 0.0,
+            edit_hot_axis: None,
+            edit_hover: None,
+            edit_swallow: false,
+            edit_unfocus: 0,
+            edit_prop: false,
+            bool_with: None,
+            bool_op: Default::default(),
         }
     }
 
@@ -1868,7 +1912,19 @@ impl eframe::App for EditorApp {
 
 impl EditorApp {
     fn shortcuts(&mut self, ui: &egui::Ui) {
+        if self.edit_unfocus > 0 {
+            self.edit_unfocus -= 1;
+            ui.ctx().memory_mut(|m| {
+                if let Some(f) = m.focused() {
+                    m.surrender_focus(f);
+                }
+            });
+            ui.ctx().request_repaint();
+        }
         if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        if self.edit_shortcuts(ui) {
             return;
         }
         let (undo, redo, del, space, turn, dup) = ui.input(|i| {
@@ -2395,6 +2451,12 @@ impl EditorApp {
             })
             .unwrap_or_default();
         ui.weak(format!("{kind} · {}{dims}", e.id));
+        // edit mode: the mesh tools come first, the object panels wait until you are done
+        if self.edit_state().is_some_and(|s| s.id == id) {
+            ui.add_space(4.0);
+            section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
+            return;
+        }
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let mut visible = e.visible;
@@ -2586,7 +2648,11 @@ impl EditorApp {
         });
 
         match &e.kind {
-            EntityKind::Mesh { modifiers, color, .. } => {
+            EntityKind::Mesh { modifiers, color, source } => {
+                if !matches!(source, shotstage_core::MeshSource::Skinned { .. }) {
+                    section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
+                    section(ui, "Boolean", false, |ui| self.boolean_panel(ui, &id));
+                }
                 section(ui, "Mesh", true, |ui| {
                     let mut c = *color;
                     ui.horizontal(|ui| {
@@ -3878,6 +3944,14 @@ impl EditorApp {
         };
 
         self.last_view = Some((rect, view));
+        // mesh edit mode: the cage of the edited mesh as seen now
+        let editing = if cam.is_some() { None } else { self.edit_state() };
+        let cage = editing.as_ref().and_then(|st| {
+            if !self.edit_refresh(&scene, &st.id) {
+                return None;
+            }
+            self.edit_cage(&scene, &st.id, f, rect, &view, self.edit_xray)
+        });
         let (pointer, modifiers, scroll, esc, released) = ui.input(|i| {
             (
                 i.pointer.hover_pos(),
@@ -3943,7 +4017,7 @@ impl EditorApp {
         }
 
         // 2. Gizmo handles of the selection (hidden in the clean camera view).
-        let selected = self.selected().filter(|s| scene.contains(s));
+        let selected = self.selected().filter(|s| scene.contains(s) && cage.is_none());
         // Objects get move arrows, a turn ring and a scale box; a person's joint gets three
         // rotation rings.
         let gizmo = selected.as_ref().filter(|s| !clean && !scene.get(s).is_ok_and(|e| e.locked)).and_then(|id| {
@@ -4050,8 +4124,44 @@ impl EditorApp {
             self.hot_handle = inside.and_then(handle_at);
         }
 
+        // Edit mode: the element under the pointer, the arrow under it, and the running tool.
+        if let Some(cg) = &cage {
+            self.hovered = None;
+            let st = self.edit_state();
+            if matches!(self.drag, Gesture::Idle) && self.edit_modal.is_none() {
+                self.edit_hot_axis = inside.and_then(|p| Self::edit_axis_at(cg, p));
+                self.edit_hover = match (inside, &st) {
+                    (Some(p), Some(st)) if self.edit_hot_axis.is_none() => {
+                        self.edit_pick(cg, st.mode, p, ray_at(rect, &view, p), self.edit_xray)
+                    }
+                    _ => None,
+                };
+            } else {
+                self.edit_hover = None;
+                self.edit_hot_axis = None;
+            }
+            if self.edit_modal.is_some() {
+                let ptr = pointer.unwrap_or(rect.center());
+                self.edit_modal_update(cg, rect, &view, ptr, modifiers, if inside.is_some() { scroll } else { 0.0 });
+                let (press, cancel) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed()));
+                let by_release = self.edit_modal.as_ref().is_some_and(|m| m.release_confirms);
+                if cancel {
+                    self.edit_cancel();
+                    self.drag = Gesture::Cancelled;
+                } else if press && !by_release && inside.is_some() {
+                    self.edit_confirm();
+                    self.edit_swallow = true;
+                    self.drag = Gesture::Cancelled;
+                }
+                ui.ctx().request_repaint();
+            }
+            if self.edit_hot_axis.is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+        }
+
         // 3. Hover highlight (whole group unless a part of it is selected).
-        if self.palette.is_none() && matches!(self.drag, Gesture::Idle) {
+        if self.palette.is_none() && matches!(self.drag, Gesture::Idle) && cage.is_none() {
             self.hovered = inside.filter(|_| self.hot_handle.is_none()).and_then(|p| {
                 let (o, d) = ray_at(rect, &view, p);
                 let hit = pick_grabbable(&scene, f, o, d)?;
@@ -4069,87 +4179,103 @@ impl EditorApp {
         // 4. Drags in the viewport.
         if self.palette.is_none() {
             let primary = resp.drag_started_by(egui::PointerButton::Primary);
-            if primary && let Some(start) = ui.input(|i| i.pointer.press_origin()).filter(|p| rect.contains(*p)) {
+            if primary
+                && !matches!(self.drag, Gesture::Cancelled)
+                && let Some(start) = ui.input(|i| i.pointer.press_origin()).filter(|p| rect.contains(*p))
+            {
                 let (o, d) = ray_at(rect, &view, start);
-                let hit = pick_grabbable(&scene, f, o, d);
-                // with a joint of this person selected, dragging a body part bends it
-                let hit_point = pick_point(&scene, f, o, d).map(|p| p.1).unwrap_or(o);
-                let pose_joint = hit
-                    .as_ref()
-                    .filter(|h| {
-                        selected
-                            .as_ref()
-                            .is_some_and(|s| rig::is_joint(&scene, s) && root_of(&scene, s) == root_of(&scene, h))
-                    })
-                    .and_then(|h| joint_at(&scene, h, hit_point, f))
-                    .map(|j| drive_joint(&scene, &j));
-                self.drag = if let Some(id) =
-                    aim.as_ref().filter(|(_, sp)| (*sp - start).length() < 9.0).map(|(id, _)| id.clone())
-                {
-                    let key = self.new_key("aim");
-                    Gesture::LightAim { id, key }
-                } else if let Some((id, frame, origin)) = path_key_at(start) {
-                    let key = self.new_key("path");
-                    self.hub.borrow_mut().frame = frame;
-                    Gesture::PathKey { id, frame, origin, key }
-                } else if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
-                    let key = self.new_key("gizmo");
-                    match h {
-                        Handle::Axis(i) => {
-                            let axis = [Vec3::X, Vec3::Y, Vec3::Z][i];
-                            let t0 = closest_on_line(*origin, axis, o, d).unwrap_or(0.0);
-                            Gesture::Axis { id: id.clone(), axis, start: *origin, t0, key }
-                        }
-                        Handle::Ring(axis) => {
-                            let c = gizmo.as_ref().map(|g| g.3).unwrap_or(start);
-                            Gesture::Ring { id: id.clone(), axis, last: (-(start.y - c.y)).atan2(start.x - c.x), key }
-                        }
-                        Handle::Scale => Gesture::Scale { id: id.clone(), key },
-                    }
-                } else if let Some(joint) = pose_joint {
-                    let key = self.new_key("pose");
-                    self.select(Some(joint.clone()));
-                    let grab = raycast(&scene, f, o, d, &RayOptions::default())
-                        .map(|h| Vec3::from_array(h.point))
-                        .unwrap_or(o + d * 3.0);
-                    Gesture::Aim { joint, grab, key }
-                } else if let Some(hit) = hit {
-                    // grab the group, or the selected part of it
-                    let root = root_of(&scene, &hit);
-                    let mut target = match &selected {
-                        Some(s) if spatial::subtree(&scene, &root).contains(s) => s.clone(),
-                        _ => root,
-                    };
-                    let key = self.new_key("move");
-                    if modifiers.alt
-                        && let Some(r) =
-                            self.run_key(&key, "entity.duplicate", json!({"id": target, "offset": [0, 0, 0]}))
-                        && let Some(copy) = r["id"].as_str()
-                    {
-                        target = copy.to_string();
-                    }
-                    self.select(Some(target.clone()));
-                    // Hold the object where it was grabbed: the pointer moves on the horizontal
-                    // plane through the grab point, and the object drops onto what is below.
-                    let scene = self.scene();
-                    let grab = raycast(&scene, f, o, d, &RayOptions::default())
-                        .map(|h| Vec3::from_array(h.point))
-                        .unwrap_or(o + d * 5.0);
-                    let centre = spatial::bounds(&scene, &target, f).ok().flatten().map(|b| b.center()).unwrap_or(grab);
-                    let offset = Vec3::new(centre.x - grab.x, 0.0, centre.z - grab.z);
-                    Gesture::Move { id: target, grab, offset, key, lift: None }
-                } else if cam.is_none() && modifiers.command {
-                    Gesture::Marquee { start }
-                } else if cam.is_none() {
-                    Gesture::Navigate
+                if let Some(cg) = cage.as_ref() {
+                    self.drag = self.edit_drag_start(cg, start, (o, d), modifiers, cam.is_none());
                 } else {
-                    Gesture::Idle
-                };
+                    let hit = pick_grabbable(&scene, f, o, d);
+                    // with a joint of this person selected, dragging a body part bends it
+                    let hit_point = pick_point(&scene, f, o, d).map(|p| p.1).unwrap_or(o);
+                    let pose_joint = hit
+                        .as_ref()
+                        .filter(|h| {
+                            selected
+                                .as_ref()
+                                .is_some_and(|s| rig::is_joint(&scene, s) && root_of(&scene, s) == root_of(&scene, h))
+                        })
+                        .and_then(|h| joint_at(&scene, h, hit_point, f))
+                        .map(|j| drive_joint(&scene, &j));
+                    self.drag = if let Some(id) =
+                        aim.as_ref().filter(|(_, sp)| (*sp - start).length() < 9.0).map(|(id, _)| id.clone())
+                    {
+                        let key = self.new_key("aim");
+                        Gesture::LightAim { id, key }
+                    } else if let Some((id, frame, origin)) = path_key_at(start) {
+                        let key = self.new_key("path");
+                        self.hub.borrow_mut().frame = frame;
+                        Gesture::PathKey { id, frame, origin, key }
+                    } else if let (Some(h), Some((id, origin, ..))) = (handle_at(start), gizmo.as_ref()) {
+                        let key = self.new_key("gizmo");
+                        match h {
+                            Handle::Axis(i) => {
+                                let axis = [Vec3::X, Vec3::Y, Vec3::Z][i];
+                                let t0 = closest_on_line(*origin, axis, o, d).unwrap_or(0.0);
+                                Gesture::Axis { id: id.clone(), axis, start: *origin, t0, key }
+                            }
+                            Handle::Ring(axis) => {
+                                let c = gizmo.as_ref().map(|g| g.3).unwrap_or(start);
+                                Gesture::Ring {
+                                    id: id.clone(),
+                                    axis,
+                                    last: (-(start.y - c.y)).atan2(start.x - c.x),
+                                    key,
+                                }
+                            }
+                            Handle::Scale => Gesture::Scale { id: id.clone(), key },
+                        }
+                    } else if let Some(joint) = pose_joint {
+                        let key = self.new_key("pose");
+                        self.select(Some(joint.clone()));
+                        let grab = raycast(&scene, f, o, d, &RayOptions::default())
+                            .map(|h| Vec3::from_array(h.point))
+                            .unwrap_or(o + d * 3.0);
+                        Gesture::Aim { joint, grab, key }
+                    } else if let Some(hit) = hit {
+                        // grab the group, or the selected part of it
+                        let root = root_of(&scene, &hit);
+                        let mut target = match &selected {
+                            Some(s) if spatial::subtree(&scene, &root).contains(s) => s.clone(),
+                            _ => root,
+                        };
+                        let key = self.new_key("move");
+                        if modifiers.alt
+                            && let Some(r) =
+                                self.run_key(&key, "entity.duplicate", json!({"id": target, "offset": [0, 0, 0]}))
+                            && let Some(copy) = r["id"].as_str()
+                        {
+                            target = copy.to_string();
+                        }
+                        self.select(Some(target.clone()));
+                        // Hold the object where it was grabbed: the pointer moves on the horizontal
+                        // plane through the grab point, and the object drops onto what is below.
+                        let scene = self.scene();
+                        let grab = raycast(&scene, f, o, d, &RayOptions::default())
+                            .map(|h| Vec3::from_array(h.point))
+                            .unwrap_or(o + d * 5.0);
+                        let centre =
+                            spatial::bounds(&scene, &target, f).ok().flatten().map(|b| b.center()).unwrap_or(grab);
+                        let offset = Vec3::new(centre.x - grab.x, 0.0, centre.z - grab.z);
+                        Gesture::Move { id: target, grab, offset, key, lift: None }
+                    } else if cam.is_none() && modifiers.command {
+                        Gesture::Marquee { start }
+                    } else if cam.is_none() {
+                        Gesture::Navigate
+                    } else {
+                        Gesture::Idle
+                    };
+                }
             }
             if esc && matches!(self.drag, Gesture::Marquee { .. }) {
                 self.drag = Gesture::Cancelled;
             }
-            if esc && !matches!(self.drag, Gesture::Idle | Gesture::Navigate | Gesture::Cancelled) {
+            if matches!(self.drag, Gesture::EditTool) && self.edit_modal.is_none() {
+                self.drag = Gesture::Cancelled;
+            }
+            if esc && !matches!(self.drag, Gesture::Idle | Gesture::Navigate | Gesture::Cancelled | Gesture::EditTool) {
                 self.run("history.undo", json!({}));
                 self.drag = Gesture::Cancelled;
             }
@@ -4305,12 +4431,22 @@ impl EditorApp {
             {
                 let r = Rect::from_two_pos(start, now).intersect(rect);
                 if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
-                    self.select_in_rect(r, rect, &view, f);
+                    match &cage {
+                        Some(cg) => self.edit_select_rect(cg, r, modifiers.shift),
+                        None => self.select_in_rect(r, rect, &view, f),
+                    }
                 } else {
                     self.marquee = Some(r);
                 }
             }
             if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                if matches!(self.drag, Gesture::EditTool) {
+                    self.edit_confirm();
+                }
+                // a drag never ends in a click: nothing left to swallow
+                if resp.drag_stopped() {
+                    self.edit_swallow = false;
+                }
                 self.drag = Gesture::Idle;
                 self.turn_acc = 0.0;
             }
@@ -4337,7 +4473,12 @@ impl EditorApp {
                 ScrollMode::Zoom => false,
                 ScrollMode::Orbit => true,
             };
-            if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && delta != Vec2::ZERO {
+            let tool_scroll = self.edit_modal.as_ref().is_some_and(|m| {
+                matches!(m.tool, editmode::Tool::Bevel | editmode::Tool::LoopCut)
+                    || (self.edit_prop
+                        && matches!(m.tool, editmode::Tool::Grab | editmode::Tool::Rotate | editmode::Tool::Scale))
+            });
+            if resp.hovered() && !matches!(self.drag, Gesture::Move { .. }) && delta != Vec2::ZERO && !tool_scroll {
                 if !orbit_scroll {
                     self.orbit.distance = (self.orbit.distance * (1.0 - delta.y * 0.0015)).clamp(0.3, 500.0);
                 } else if modifiers.shift {
@@ -4358,7 +4499,11 @@ impl EditorApp {
                 && let Some(pos) = resp.interact_pointer_pos()
             {
                 let (o, d) = ray_at(rect, &view, pos);
-                if let Some(hit) = pick(&scene, f, o, d)
+                if let Some(cg) = &cage {
+                    if self.edit_modal.is_none() {
+                        self.edit_select_linked_at(cg, pos, (o, d), modifiers.shift);
+                    }
+                } else if let Some(hit) = pick(&scene, f, o, d)
                     && let Ok(Some(b)) = spatial::bounds(&scene, &root_of(&scene, &hit), f)
                 {
                     self.orbit.target = b.center();
@@ -4367,6 +4512,25 @@ impl EditorApp {
             }
         }
         if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos().filter(|p| rect.contains(*p))
+            && let Some(cg) = &cage
+        {
+            if std::mem::take(&mut self.edit_swallow) || self.edit_modal.is_some() {
+                // the click that applied a tool
+            } else {
+                // modifiers as they were when the button went up (a quick Alt+click may let go
+                // of Alt before this frame)
+                let m = ui
+                    .input(|i| {
+                        i.events.iter().rev().find_map(|e| match e {
+                            egui::Event::PointerButton { pressed: false, modifiers, .. } => Some(*modifiers),
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or(modifiers);
+                self.edit_click(cg, pos, ray_at(rect, &view, pos), m);
+            }
+        } else if resp.clicked()
             && let Some(pos) = resp.interact_pointer_pos().filter(|p| rect.contains(*p))
         {
             let (o, d) = ray_at(rect, &view, pos);
@@ -4431,7 +4595,7 @@ impl EditorApp {
         let px = ((rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32);
         // Looking through the shot camera shows the clean reference frame: no grid, no gizmos.
         let overlay = Overlay {
-            selected: if clean { None } else { self.selected() },
+            selected: if clean || cage.is_some() { None } else { self.selected() },
             grid: !clean,
             cameras: !clean,
             looking_through: cam.clone(),
@@ -4563,6 +4727,16 @@ impl EditorApp {
         if let Some((id, _)) = self.texture {
             painter.image(id, rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
+        // (a tool may have changed the mesh since the cage was projected: project it again)
+        let cage = cage.and_then(|_| {
+            let st = self.edit_state()?;
+            let scene = self.scene();
+            self.edit_refresh(&scene, &st.id).then_some(())?;
+            self.edit_cage(&scene, &st.id, f, rect, &view, self.edit_xray)
+        });
+        if let Some(cg) = &cage {
+            self.edit_draw(&painter, cg, rect, &view, self.edit_hover);
+        }
         if let Some(m) = self.marquee {
             painter.rect(m, 0.0, ACCENT.gamma_multiply(0.12), (1.0, ACCENT), egui::StrokeKind::Inside);
         }
@@ -4683,6 +4857,9 @@ impl EditorApp {
             }
         }
         self.toolbar(ui, full, cam.is_some() || camera_id_at(&scene, f).is_some());
+        if cage.is_some() {
+            self.edit_bar(ui, full);
+        }
         if !clean {
             self.view_cube(ui, full);
             // name of what the pointer would grab

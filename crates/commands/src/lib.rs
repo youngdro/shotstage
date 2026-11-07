@@ -11,6 +11,7 @@ mod builtin;
 pub mod clipboard;
 pub mod images;
 pub mod lights;
+pub mod meshedit;
 pub mod model;
 pub mod motion;
 mod placement;
@@ -134,6 +135,11 @@ const SESSION_COMMANDS: &[(&str, &str, bool)] = &[
     ("history.undo", "Undo the last change (a batch undoes as one step).", true),
     ("history.redo", "Redo the last undone change.", true),
     ("history.info", "How many undo and redo steps are available.", false),
+    (
+        "history.discard",
+        "Undo the last change and forget it (no redo): for previews that are tried and thrown away.",
+        true,
+    ),
 ];
 
 /// An open document: the scene plus undo/redo history.
@@ -222,6 +228,13 @@ impl Session {
                 let cur = std::mem::replace(&mut self.scene, prev);
                 self.redo.push((label.clone(), cur));
                 return Ok(self.outcome(json!({ "undone": label }), true));
+            }
+            "history.discard" => {
+                let (label, prev) =
+                    self.undo.pop().ok_or_else(|| CommandError::new("nothing_to_undo", "nothing to undo"))?;
+                self.scene = prev;
+                self.last_merge = None;
+                return Ok(self.outcome(json!({ "discarded": label }), true));
             }
             "history.redo" => {
                 let (label, next) =
