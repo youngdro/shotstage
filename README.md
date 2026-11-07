@@ -62,6 +62,19 @@
 
 对应的命令是 `pose.set`（预设和/或关节角度）、`pose.aim`（让某段肢体指向一个点）、`person.lookAt`（转头看向相机或某处，人物面板里有 **Look at camera**）、`pose.get`、`pose.list`、`person.setHair`。
 
+### 真人模型
+
+**People** 分类里有真人模型：男人、女人、男孩、女孩、老年男性、老年女性、运动员、顾客、店员。它们基于 MakeHuman / MPFB 的人体（CC0 素材，见 `crates/core/assets/README.md`），是连续皮肤的真实人体，带 50 多根骨骼（脊柱三节、锁骨、每根手指三节）。
+
+- **Body**：性别、年龄、胖瘦、肌肉、身高滑块，人物原地变形，姿势保持不变。
+- **Clothes**：上衣（袖长可调，0 为背心）、裤子（裤长可调，短裤到长裤）、鞋子，各自可以换颜色，也能换肤色和瞳色。衣服沿着身体裁出干净的领口、袖口和裤脚。
+- **Hair**：短发、长发、波波头、马尾、丸子头、光头，长度和颜色可调。
+- **Face**：18 种表情（微笑、大笑、惊讶、难过、生气、思考、说话、闭眼、眨眼……），强度可调，也可以直接设置 34 个面部动作单元。
+- **Hands**：放松、张开、握拳、握持、捏取、指向、点赞、比耶、OK 等手势，可以只设左手或右手。
+- 姿势库多了 23 个日常 / 零售场景的姿势：叉腰、思考、试吃、喝东西、看手机、自拍、挑选商品、看高处货架、搬箱子、拎袋子、收银、切菜、靠柜台、讲解、耸肩、鼓掌、欢呼、伸懒腰、捂脸、鞠躬、单膝跪、席地而坐、背身走开。面板上先显示常用姿势，其余在 **More poses ▾** 里。积木人偶和真人共用同一套姿势与关节名。
+
+命令：`person.setBody`、`person.setOutfit`、`person.setExpression`、`person.expressions`、`pose.hand`、`person.get`。
+
 每一次拖动只算一步撤销，背后调用的是 `entity.place`、`entity.moveTo`、`entity.rotate`、`prefab.create`、`camera.frame` 这些命令，agent 可以用完全相同的方式操作。
 
 ## 导入导出模型
@@ -194,7 +207,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
-| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
+| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `pose.hand` `person.setHair` `person.setBody` `person.setOutfit` `person.setExpression` `person.expressions` `person.get` |
 | 模型 | `model.import` `model.export` |
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
