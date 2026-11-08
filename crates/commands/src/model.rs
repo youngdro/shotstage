@@ -94,7 +94,11 @@ enum UpAxis {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ImportParams {
-    format: ModelFormat,
+    /// glb, gltf, obj, stl, fbx or blend. Default: from the extension of `path`.
+    format: Option<ModelFormat>,
+    /// File on disk to read (CLI and MCP only; a browser passes `data`). An `.obj` picks up the
+    /// `.mtl` next to it.
+    path: Option<String>,
     /// File contents, base64.
     data: Option<String>,
     /// Or, for text files (`.gltf` with embedded buffers, `.obj`, ASCII `.stl`), the text.
@@ -455,20 +459,24 @@ fn sanitize(name: &str) -> String {
 }
 
 fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
+    if p.path.is_some() {
+        return Err(crate::host::needs_files("model.import", "path"));
+    }
+    let format = p.format.ok_or_else(|| bad("give `format` (glb, gltf, obj, stl, fbx or blend)"))?;
     let bytes = match (&p.data, &p.text) {
         (Some(d), None) => decode(d)?,
         (None, Some(t)) => t.as_bytes().to_vec(),
         _ => return Err(bad("give the file as `data` (base64) or `text`")),
     };
     let mut warnings: Vec<String> = vec![];
-    let mut nodes = match p.format {
+    let mut nodes = match format {
         ModelFormat::Glb | ModelFormat::Gltf => parse_gltf(&bytes)?,
         ModelFormat::Obj => {
             parse_obj(std::str::from_utf8(&bytes).map_err(|_| bad("the OBJ is not text"))?, p.mtl.as_deref())?
         }
         ModelFormat::Stl => parse_stl(&bytes)?,
         ModelFormat::Fbx | ModelFormat::Blend => {
-            let glb = blender_convert(&bytes, p.format.extension(), "glb")?;
+            let glb = blender_convert(&bytes, format.extension(), "glb")?;
             warnings.push("converted with the local Blender".into());
             parse_gltf(&glb)?
         }
@@ -477,8 +485,8 @@ fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
         return Err(bad("the file has nothing to import"));
     }
     // file axes and units -> scene (metres, +Y up)
-    let metric = matches!(p.format, ModelFormat::Glb | ModelFormat::Gltf | ModelFormat::Fbx | ModelFormat::Blend);
-    let up = p.up_axis.unwrap_or(if p.format == ModelFormat::Stl { UpAxis::Z } else { UpAxis::Y });
+    let metric = matches!(format, ModelFormat::Glb | ModelFormat::Gltf | ModelFormat::Fbx | ModelFormat::Blend);
+    let up = p.up_axis.unwrap_or(if format == ModelFormat::Stl { UpAxis::Z } else { UpAxis::Y });
     let z_up = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
     if up == UpAxis::Z {
         for n in nodes.iter_mut().filter(|n| n.parent.is_none()) {
@@ -623,6 +631,9 @@ struct ExportParams {
     /// glb / gltf / fbx: include the animation (camera moves, object motion, poses) sampled at
     /// every frame of the timeline. Default: when the scene has keyframes.
     animation: Option<bool>,
+    /// Write the file here (CLI and MCP only); `format` defaults to its extension. Without it
+    /// the file comes back in the result (`data` base64, or `text`).
+    path: Option<String>,
 }
 
 struct Baked {
@@ -874,6 +885,9 @@ fn glb(doc: &Value, bin: &[u8]) -> Vec<u8> {
 }
 
 fn export(scene: &mut Scene, p: ExportParams) -> CmdResult<Value> {
+    if p.path.is_some() {
+        return Err(crate::host::needs_files("model.export", "path"));
+    }
     let frame = frame_ok(p.frame.unwrap_or(scene.timeline.start as f32))?;
     let format = p.format.unwrap_or(ModelFormat::Glb);
     let animated = matches!(format, ModelFormat::Glb | ModelFormat::Gltf | ModelFormat::Fbx)

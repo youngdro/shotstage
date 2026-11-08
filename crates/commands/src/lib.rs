@@ -9,6 +9,7 @@ pub mod arrange;
 pub mod blender;
 mod builtin;
 pub mod clipboard;
+pub mod host;
 pub mod images;
 pub mod lights;
 pub mod model;
@@ -77,6 +78,10 @@ pub struct CommandInfo {
     pub mutates: bool,
     /// JSON Schema of the `params` object.
     pub params: Value,
+    /// Host commands only: what running it takes (`gpu`, `files`, `view`). Every entry point
+    /// (browser, CLI, MCP) lists the same catalog and runs these with what it has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
 }
 
 /// Parse `params` into a typed struct, mapping serde errors to `invalid_params`.
@@ -174,17 +179,23 @@ impl Session {
                 summary: summary.to_string(),
                 mutates: *mutates,
                 params: empty(),
+                needs: vec![],
             })
             .chain(self.commands.iter().map(|c| CommandInfo {
                 id: c.id.into(),
                 summary: c.summary.into(),
                 mutates: c.mutates,
                 params: (c.schema)(),
+                needs: vec![],
             }))
+            .chain(host::infos())
             .collect()
     }
 
     fn find(&self, id: &str) -> CmdResult<&Command> {
+        if host::is_host_command(id) {
+            return Err(host::unsupported(id));
+        }
         self.commands.iter().find(|c| c.id == id).ok_or_else(|| {
             CommandError::new("unknown_command", format!("no command `{id}`; call command.list for the catalog"))
         })

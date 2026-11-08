@@ -102,14 +102,6 @@ pub fn result_json(plan: &SnapshotPlan, png_base64: String) -> Value {
     })
 }
 
-pub(crate) fn unsupported(_: &mut Scene, _: Value) -> CmdResult<Value> {
-    Err(CommandError::new(
-        "unsupported",
-        "render.snapshot needs a GPU host: call it through the editor (await editor.snapshot(params) on the web), \
-         the CLI (`shotstage snapshot` / `run render.snapshot`) or the MCP server",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -120,7 +120,7 @@
 | `crates/commands` | 命令注册表、JSON Schema、撤销/重做、原子批量、拖拽合并撤销 | 否 |
 | `crates/render` | wgpu 渲染器：粘土 / 深度 / 法线 pass，网格、相机视锥、拾取 | GPU |
 | `crates/app` | egui 编辑器；wasm 导出 `mount(container, options)` | GPU / 浏览器 |
-| `crates/cli` | `shotstage` 命令行：`run` / `batch` / `serve` / `mcp` | 否 |
+| `crates/cli` | `shotstage` 命令行：`run` / `batch` / `serve` / `mcp`，实时桥（`--live`） | 否（渲染时用 GPU） |
 
 ## 在网页里嵌入
 
@@ -152,27 +152,33 @@ editor.scene();                    // 场景文档（保存它，下次 mount �
 const sub = editor.on(ev => {});   // { type: "change" | "command", revision, request }
 editor.off(sub);
 const shot = await editor.snapshot({ pass: "depth", width: 1024 }); // 透过镜头截图：{ dataUrl, data(base64), width, height, ... }
+const board = await editor.call("render.storyboard", { passes: ["clay", "depth"] }); // 分镜：每个镜头首/中/尾帧 + 镜头描述 + 相机数据，图片是 data URL，board.html 是独立网页
+const seq = await editor.call("render.sequence", { start: 0, end: 47, passes: ["depth"] }); // 逐帧控制序列（统一深度范围）+ 每帧相机参数
 editor.destroy();                  // 停止渲染并移除 canvas
 ```
 
-失败时 `dispatch` 会抛出 `Error`，`error.code` 取值为 `invalid_params`、`unknown_command`、`failed`、`nothing_to_undo` 等。除了文档命令，网页实例还多了四个编辑器命令：`editor.select`、`editor.setFrame`、`editor.setView`（`pass: clay|depth|normal`、`lookThrough`）和 `editor.state`。
+`editor.call(command, params)` 能调用命令目录里的**任何**命令（包括要渲染的那几个），返回 Promise；`dispatch` 是它的同步版本，适合文档命令。失败时抛出 `Error`，`error.code` 取值为 `invalid_params`、`unknown_command`、`failed`、`unsupported`、`nothing_to_undo` 等。编辑器视图命令 `editor.select`、`editor.setFrame`、`editor.setView`、`editor.state` 也在同一张命令表里，CLI 和 MCP 也能用。
 
 浏览器有 WebGPU 时用 WebGPU，没有时自动回退到 WebGL2（已在 SwiftShader WebGL2 下验证）。
 
 ## 命令行与 MCP
+
+**一张命令表，三个入口**：网页 JS、CLI、MCP 调用的是同一张命令表，参数（JSON Schema）和返回值完全一样。完整参考见 [docs/api.md](docs/api.md)（由 `shotstage commands --markdown` 从命令表生成）。需要场景以外资源的「宿主命令」也在表里，并标明需要什么：`gpu`（渲染）、`files`（读写文件）、`view`（编辑器的选中和播放头）；每个入口都实现了全部宿主命令，测试会检查没有遗漏。
 
 ```sh
 cargo build --release -p shotstage-cli
 shotstage commands --brief                       # 命令目录
 shotstage commands                               # 带 JSON Schema 的完整目录
 shotstage run entity.create '{"type":"mesh","primitive":{"shape":"sphere","radius":0.5,"segments":24,"rings":12}}' -s shot.json
+shotstage run model.import '{"path":"chair.glb","fitHeight":0.9}' -s shot.json   # 有文件系统的入口可以直接给路径
+shotstage run render.storyboard '{"out":"board","passes":["clay","depth"]}' -s shot.json
 shotstage batch steps.json -s shot.json          # [{"command": ..., "params": ...}, ...]
 shotstage serve -s shot.json                     # 常驻会话：stdin/stdout 每行一个 JSON 请求
 shotstage mcp -s shot.json                       # MCP（stdio），改动自动写回 shot.json
 shotstage snapshot -s shot.json -o frame.png --pass depth   # 透过镜头渲染 PNG（需要 GPU 或软件 Vulkan，如 lavapipe）
 ```
 
-`serve` 的每行请求格式为 `{"id": 1, "command": "...", "params": {...}}` 或 `{"id": 2, "batch": [...]}`，回复会带回同一个 `id`。
+`snapshot`、`storyboard`、`render`、`import`、`export` 这些子命令只是 `render.snapshot`、`render.storyboard`、`render.sequence`、`model.import`、`model.export` 的快捷写法。`serve` 的每行请求格式为 `{"id": 1, "command": "...", "params": {...}}` 或 `{"id": 2, "batch": [...]}`，回复会带回同一个 `id`；`serve` 和 `mcp` 里的 `editor.select` / `editor.setFrame` 作用于会话自己的视图，比如设了播放头之后 `render.snapshot` 默认渲染那一帧。
 
 接到 Claude Code：
 
@@ -180,32 +186,61 @@ shotstage snapshot -s shot.json -o frame.png --pass depth   # 透过镜头渲染
 claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json
 ```
 
-MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch`、`scene_save` 四个通用工具。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图。
+MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch` 三个通用工具；工具预算紧的客户端可以加 `--compact`，只发布通用工具和几个常用工具，其余照样能用 `command_run` 调。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图；`render_storyboard` 把分镜写到场景文件旁边的 `<场景>.storyboard/` 文件夹，同时把各镜头的画面作为图片返回。
+
+### 端到端示例
+
+[examples/fresh-produce-ad.json](examples/fresh-produce-ad.json) 是一串 MCP 工具调用，和 Claude 实际会做的一样：从空场景搭一个生鲜货架、放一位挑水果的顾客（手里挎着篮子）、布光、用景别给两台相机构图、加推镜、切两个镜头，再截图检查、出分镜。用 [examples/run-mcp-example.py](examples/run-mcp-example.py) 回放（只用 Python 标准库）：
+
+```sh
+cargo build -p shotstage-cli
+python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --scene /tmp/ad.shotstage.json
+python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --live    # 在浏览器里看着它搭
+```
+
+### 实时桥：让 Claude 直接操作你打开的编辑器
+
+```sh
+./scripts/build-web.sh
+claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json --live --web /path/to/shotstage/dist
+```
+
+`--live` 让 MCP 服务在 `127.0.0.1:7777`（`--port` 可改）开一个桥，并用 `--web` 指定的网页包提供编辑器。在浏览器里打开 http://127.0.0.1:7777/ ，页面会自己连上（右上角显示「agent connected」）。之后 Claude 的每个操作都在这个页面里执行：你能看着场景一步步搭起来，改动进同一个撤销历史，截图和分镜也由浏览器渲染（服务器不需要 GPU）。工具 `bridge_status` 告诉 Claude 有没有连上、该打开哪个地址。
+
+- 页面里本来有场景时，以页面为准；页面是空的，就把 Claude 手上的场景带过去。
+- 浏览器关掉或断开后，命令自动回到本地副本继续执行（每次改动后都同步过），场景仍会写回 `--scene` 文件；再打开页面会重新连上。
+- 自己的页面也能接：`import { connectBridge } from "./bridge.js"; connectBridge(editor, "ws://127.0.0.1:7777/bridge")`，或者在地址后加 `?bridge=ws://127.0.0.1:7777/bridge`。只接受 localhost 页面连接，其他来源用 `--allow-origin https://你的域名` 放行。
+- `shotstage serve --live` 同样可用，适合用脚本驱动浏览器里的编辑器。
 
 ## 命令目录
+
+完整的参数说明见 [docs/api.md](docs/api.md)。
 
 | 分组 | 命令 |
 | --- | --- |
 | 会话 | `command.list` `history.undo` `history.redo` `history.info` |
 | 模板 | `scene.template` `scene.templates` |
-| 场景 | `scene.inspect` `scene.summary` `scene.new` `scene.load` `scene.evaluate` `scene.raycast` |
+| 场景 | `scene.inspect` `scene.summary` `scene.new` `scene.load` `scene.evaluate` `scene.raycast` `scene.save` `scene.open` |
 | 编组排列 | `entity.group` `entity.ungroup` `entity.align` `entity.distribute` |
-| 积木摆放 | `prefab.create`（`size` 拉伸到指定尺寸） `prefab.list` `entity.place`（`ray` 落到射线击中处 / `on` 放到某物顶上 / `nextTo`+`side`(+`view` 按镜头左右) 并排 / 不带参数时落到正下方）`entity.moveTo` `entity.rotate` `entity.face` `entity.bounds` |
+| 积木摆放 | `prefab.create`（`size` 拉伸到指定尺寸） `prefab.list` `entity.place`（`ray` 落到射线击中处 / `on` 放到某物顶上 / `nextTo`+`side`(+`view` 按镜头左右) 并排 / 不带参数时落到正下方）`entity.moveTo` `entity.rotate` `entity.face` `entity.bounds` `entity.attach` |
 | 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
-| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
-| 模型 | `model.import` `model.export` |
+| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` `person.lookAt` |
+| 模型 | `model.import` `model.export`（都可以用 `path`） |
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
-| 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
+| 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG） `render.storyboard`（分镜） `render.sequence`（逐帧序列 + 相机数据，可出 MP4） |
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.cut` `shot.set` `shot.delete` |
 | 复制粘贴 | `entity.copy` `entity.paste` |
+| 编辑器视图 | `editor.select` `editor.setFrame` `editor.setView` `editor.state` |
 
 约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。
 
 参数一律当作不可信输入处理：缺字段、类型错误、越界或未知字段都会返回错误，场景保持不变。
+
+**新增命令时**：在 `crates/commands` 里注册，三个入口自动就有；然后运行 `cargo run -p shotstage-cli -- commands --markdown > docs/api.md` 更新参考文档。
 
 ## 开发
 
@@ -221,7 +256,7 @@ cargo run -p shotstage-app [scene.json]          # 原生编辑器
 - **M1 场景编辑**：glTF/GLB 导入（可以把 Blender 里做的模型带进来）、按名字引用物体、防穿插、IK 摆姿势、更多网格命令
 - **M2 镜头与时间线**：时间线 UI（关键帧拖拽、曲线）、相机支架（轨道 / 摇臂）、更多命名运镜
 - **M3 导出**：离屏逐帧渲染，导出首尾帧、mp4、深度 / 法线 / OpenPose / ID 序列，以及导出包
-- **M4 Agent**：`render_frame` 返回图片、MCP 实时桥（agent 驱动用户打开的网页编辑器）、权限分级
+- **M4 Agent**：~~`render_snapshot` 返回图片~~、~~MCP 实时桥（agent 驱动用户打开的网页编辑器）~~（已完成）；权限分级
 - **二期网格编辑**：点 / 边 / 面编辑模式，挤出、倒角、循环切割、布尔运算、减面
 
 ## License

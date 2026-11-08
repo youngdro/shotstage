@@ -355,3 +355,35 @@ fn lights_and_presets() {
     let list = run(&mut s, "light.list", json!({}));
     assert!(list["presets"].as_array().unwrap().len() >= 6);
 }
+
+#[test]
+fn framing_a_reaching_person_keeps_the_head_in_shot() {
+    let mut s = Session::default();
+    s.dispatch("prefab.create", json!({"kind": "woman", "id": "w"})).unwrap();
+    s.dispatch("pose.set", json!({"id": "w", "pose": "reach"})).unwrap();
+    s.dispatch("entity.create", json!({"type": "camera", "id": "cam"})).unwrap();
+    s.dispatch("camera.frame", json!({"camera": "cam", "subject": "w", "size": "medium"})).unwrap();
+    // the head's top is inside the frame: below the top edge of the view
+    let sc = s.scene();
+    let head = shotstage_core::spatial::bounds(sc, "w_head", 0.0).unwrap().unwrap();
+    let world = shotstage_core::eval::world_at(sc, "cam", 0.0).unwrap();
+    let lens = shotstage_core::eval::camera_data_at(sc, "cam", 0.0).unwrap();
+    let p = world.inverse().transform_point3(head.max);
+    let y = p.y / -p.z / (lens.vfov() / 2.0).tan();
+    assert!(y < 1.0, "head top at {y} of the half-frame");
+}
+
+#[test]
+fn push_in_keeps_the_framing_on_its_first_frame() {
+    let mut s = Session::default();
+    s.dispatch("prefab.create", json!({"kind": "woman", "id": "w"})).unwrap();
+    s.dispatch("entity.create", json!({"type": "camera", "id": "cam"})).unwrap();
+    s.dispatch("camera.frame", json!({"camera": "cam", "subject": "w", "size": "medium"})).unwrap();
+    let before = shotstage_core::eval::world_at(s.scene(), "cam", 0.0).unwrap();
+    s.dispatch("motion.apply", json!({"preset": "pushIn", "target": "cam", "subject": "w", "start": 0})).unwrap();
+    let after = shotstage_core::eval::world_at(s.scene(), "cam", 0.0).unwrap();
+    let (fa, fb) = (before.transform_vector3(glam::Vec3::NEG_Z), after.transform_vector3(glam::Vec3::NEG_Z));
+    assert!(fa.angle_between(fb) < 0.01, "the push-in re-aimed the camera by {} rad", fa.angle_between(fb));
+    // `id` is accepted for the target too
+    s.dispatch("motion.apply", json!({"preset": "orbitLeft", "id": "cam", "start": 100})).unwrap();
+}

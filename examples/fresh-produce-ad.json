@@ -1,0 +1,36 @@
+[
+  { "note": "Start empty, real-size: a floor and a white cove behind the set",
+    "tool": "scene_new", "arguments": {} },
+  { "tool": "entity_create", "arguments": { "type": "mesh", "id": "floor", "primitive": { "shape": "plane", "size": [12, 12] }, "color": [0.72, 0.72, 0.7], "locked": true } },
+  { "tool": "prefab_create", "arguments": { "kind": "produceStand", "id": "stand", "position": [0, 0, 0] } },
+  { "tool": "prefab_create", "arguments": { "kind": "appleCrate", "id": "apples", "position": [-1.2, 0, 0.2] } },
+  { "tool": "prefab_create", "arguments": { "kind": "openChiller", "id": "chiller", "position": [0.3, 0, -1.8] } },
+
+  { "note": "A shopper picking up produce at the stand, a basket in her other hand",
+    "tool": "prefab_create", "arguments": { "kind": "woman", "id": "shopper", "name": "Shopper", "position": [0.4, 0, 1.0], "rotationY": 180 } },
+  { "tool": "pose_set", "arguments": { "id": "shopper", "pose": "pickUp" } },
+  { "tool": "prefab_create", "arguments": { "kind": "basket", "id": "basket", "position": [1.2, 0, 1.2] } },
+  { "tool": "entity_attach", "arguments": { "id": "basket", "to": "shopper", "hand": "left" } },
+
+  { "note": "A custom price sign: a cube rounded off with a subdivision modifier",
+    "tool": "entity_create", "arguments": { "type": "mesh", "id": "sign", "primitive": { "shape": "cube", "size": [0.5, 0.3, 0.04] }, "color": [0.95, 0.85, 0.2], "position": [-0.9, 1.3, 0.3] } },
+  { "tool": "mesh_addModifier", "arguments": { "id": "sign", "modifier": { "type": "subdivide", "levels": 2, "smooth": true } } },
+
+  { "note": "Light it, frame a medium shot from the front-right, push in over 4 seconds",
+    "tool": "light_preset", "arguments": { "preset": "goldenHour" } },
+  { "tool": "entity_create", "arguments": { "type": "camera", "id": "cam_a", "name": "Cam A" } },
+  { "tool": "camera_frame", "arguments": { "camera": "cam_a", "subject": "shopper", "size": "medium", "side": "frontRight", "focalLengthMm": 35 } },
+  { "tool": "motion_apply", "arguments": { "target": "cam_a", "preset": "pushIn", "subject": "shopper", "start": 0 } },
+  { "tool": "shot_create", "arguments": { "camera": "cam_a", "start": 0, "end": 95, "name": "push-in" } },
+
+  { "note": "A second angle: a low wide shot of the stand, cut in at frame 96",
+    "tool": "entity_create", "arguments": { "type": "camera", "id": "cam_b", "name": "Cam B" } },
+  { "tool": "camera_frame", "arguments": { "camera": "cam_b", "subject": "stand", "size": "wide", "angle": "low", "side": "frontLeft", "makeActive": false } },
+  { "tool": "timeline_set", "arguments": { "end": 167 } },
+  { "tool": "shot_create", "arguments": { "camera": "cam_b", "start": 96, "end": 167, "name": "stand wide" } },
+
+  { "note": "Look at the result, the way the model checks its own work",
+    "tool": "render_snapshot", "arguments": { "camera": "cam_a", "width": 960 }, "save": "cam_a.png" },
+  { "tool": "camera_describe", "arguments": { "id": "cam_a" } },
+  { "tool": "render_storyboard", "arguments": { "width": 640, "passes": ["clay", "depth"] } }
+]

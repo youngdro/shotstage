@@ -37,7 +37,10 @@ pub enum ImageMode {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ImportParams {
     /// PNG, JPEG or WebP file, base64 (a `data:` URL works too).
+    #[serde(default)]
     data: String,
+    /// Or a file on disk to read (CLI and MCP only).
+    path: Option<String>,
     name: Option<String>,
     id: Option<String>,
     /// card, billboard, backdrop or floor. Default: billboard for a cut-out (transparent
@@ -93,6 +96,12 @@ pub fn add_asset(scene: &mut Scene, bytes: &[u8], stem: &str) -> CmdResult<(Stri
 }
 
 fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
+    if p.path.is_some() {
+        return Err(crate::host::needs_files("image.import", "path"));
+    }
+    if p.data.is_empty() {
+        return Err(CommandError::invalid("give the picture as `data` (base64) or `path`"));
+    }
     let bytes = {
         use base64::Engine as _;
         let b64 = p.data.rsplit_once("base64,").map(|(_, d)| d).unwrap_or(&p.data);
