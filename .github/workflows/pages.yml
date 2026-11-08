@@ -42,6 +42,9 @@ jobs:
           fi
           "$bin/wasm-bindgen" --version
       - run: ./scripts/build-web.sh
+        env:
+          # the relay behind the "Connect Claude" button (relay/); unset = no button
+          SHOTSTAGE_RELAY: ${{ vars.SHOTSTAGE_RELAY }}
       - name: No Jekyll processing
         run: |
           touch dist/.nojekyll
