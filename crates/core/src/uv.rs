@@ -243,7 +243,7 @@ pub fn tri_uvs(tri: &crate::mesh::TriMesh, mat: &Material) -> Vec<[f32; 2]> {
     }
     let b = Bounds::of(tri.positions.iter().map(|q| Vec3::from_array(*q)));
     let mut out = Vec::with_capacity(tri.indices.len());
-    for t in tri.indices.chunks_exact(3) {
+    for t in tri.indices.as_chunks::<3>().0 {
         let pts = [p(t[0]), p(t[1]), p(t[2])];
         let n = (pts[1] - pts[0]).cross(pts[2] - pts[0]).normalize_or_zero();
         // a smooth triangle's normal, for wrap seams and caps: the vertex normals' average
