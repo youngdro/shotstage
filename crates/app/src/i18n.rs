@@ -127,6 +127,10 @@ fn system_locale() -> Option<String> {
 /// the desktop a system Chinese font, when there is one, covers everything else people type.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // shot sheets draw Latin text with the same font as the interface (one copy in the bundle)
+    if let Some(data) = fonts.font_data.get("Ubuntu-Light") {
+        shotstage_commands::sheet::register_latin_font((*data.font).as_ref().to_vec());
+    }
     fonts.font_data.insert(
         "noto_sc".into(),
         std::sync::Arc::new(egui::FontData::from_static(shotstage_commands::sheet::CJK_FONT)),

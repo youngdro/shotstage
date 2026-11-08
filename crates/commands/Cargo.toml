@@ -16,4 +16,6 @@ gltf = { version = "1", default-features = false, features = ["utils", "names", 
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 ab_glyph = "0.2.32"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 epaint_default_fonts = "0.37"

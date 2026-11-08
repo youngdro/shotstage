@@ -23,8 +23,22 @@ use crate::{CmdResult, CommandError, parse};
 pub const SHEET_COMMAND: &str = "render.shotSheet";
 
 /// Chinese glyphs (Noto Sans SC, SIL OFL; the interface's characters plus the 3755 most common
-/// ones). The editor uses the same bytes for its own text.
-pub const CJK_FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSC-subset.otf");
+/// ones). The editor uses the same bytes for its own text (a `static`, so there is one copy).
+pub static CJK_FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSC-subset.otf");
+
+/// Latin fonts a host already carries (the editor passes egui's), so the browser bundle holds
+/// one copy; without one, native hosts use egui's default font from `epaint_default_fonts`.
+static LATIN: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
+/// Use `bytes` (a TrueType / OpenType font) for Latin text on sheets. Call before the first
+/// sheet is drawn.
+pub fn register_latin_font(bytes: Vec<u8>) {
+    if let Ok(mut v) = LATIN.lock()
+        && !v.contains(&bytes)
+    {
+        v.push(bytes);
+    }
+}
 
 // ---------------------------------------------------------------- params
 
@@ -509,8 +523,13 @@ pub fn sheet_plan(scene: &Scene, params: Value) -> CmdResult<SheetPlan> {
 fn fonts() -> &'static [FontArc] {
     static FONTS: OnceLock<Vec<FontArc>> = OnceLock::new();
     FONTS.get_or_init(|| {
-        let mut v = vec![];
-        if let Ok(f) = FontArc::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT) {
+        let latin: Vec<Vec<u8>> = LATIN.lock().map(|v| v.clone()).unwrap_or_default();
+        let mut v: Vec<FontArc> =
+            latin.into_iter().filter_map(|b| ab_glyph::FontVec::try_from_vec(b).ok().map(FontArc::new)).collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        if v.is_empty()
+            && let Ok(f) = FontArc::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT)
+        {
             v.push(f);
         }
         if let Ok(f) = FontArc::try_from_slice(CJK_FONT) {
