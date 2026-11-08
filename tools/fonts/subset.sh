@@ -2,7 +2,9 @@
 # Rebuild assets/fonts/NotoSansSC-subset.otf: Noto Sans SC (SIL OFL 1.1, from
 # github.com/notofonts/noto-cjk) cut down to the characters the interface uses plus the 3755
 # most common Chinese characters (GB2312 level 1), so typed names usually render too.
-# Usage: tools/fonts/subset.sh <path to NotoSansSC-Regular.otf>   (needs fonttools)
+# Usage: tools/fonts/subset.sh <path to NotoSansSC-Regular.otf or .ttf>   (needs fonttools)
+# The TrueType build also comes from npm: @expo-google-fonts/noto-sans-sc
+# (400Regular/NotoSansSC_400Regular.ttf), handy where GitHub downloads are blocked.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 src="$1"

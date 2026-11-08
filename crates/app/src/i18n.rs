@@ -815,7 +815,7 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("Macro fruit", "微距水果"),
     (
         "Strawberries, grapes and lemon on dark slate, warm backlight and soft side light; a 100 mm close lens sliding sideways",
-        "深色石板上的红色浆果、葡萄和柠檬，暖色逆光加柔和侧光；100mm 近摄镜头横移",
+        "深色石板上的草莓、葡萄和柠檬，暖色逆光加柔和侧光；100mm 近摄镜头横移",
     ),
     ("Empty studio", "空摄影棚"),
     (
