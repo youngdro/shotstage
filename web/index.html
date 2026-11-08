@@ -7,7 +7,8 @@
   <meta name="description" content="Block out scenes, people, cameras and moves in the browser; share a scene as a link.">
   <style>
     html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 13px system-ui, sans-serif; overflow: hidden; }
-    #bridge { position: fixed; right: 12px; bottom: 8px; color: #888; pointer-events: none; z-index: 5; }
+    #bridge { position: fixed; right: 12px; bottom: 8px; color: #888; background: #111d; padding: 1px 8px; border-radius: 9px; pointer-events: none; z-index: 5; }
+    #bridge:empty { display: none; }
     #bridge.connected { color: #6c6; }
     /* The editor fills whatever container you mount it in. */
     #stage { position: relative; height: 100%; }
@@ -16,16 +17,44 @@
     #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px 14px; box-shadow: 0 6px 24px #0008; display: none; z-index: 10; }
     #toast.show { display: flex; gap: 12px; align-items: center; }
     #toast button { font: inherit; color: #9cf; background: none; border: 0; cursor: pointer; padding: 0; white-space: nowrap; }
+    /* "Connect Claude" panel */
+    #agent { position: fixed; top: 44px; right: 12px; width: min(420px, calc(100% - 24px)); background: #1c1c1c; color: #ddd; border: 1px solid #444; border-radius: 8px; box-shadow: 0 8px 32px #000a; padding: 14px 16px; z-index: 11; line-height: 1.55; display: none; }
+    #agent.show { display: block; }
+    #agent h2 { font-size: 14px; margin: 0 0 6px; }
+    #agent p, #agent ol { margin: 6px 0; }
+    #agent ol { padding-left: 18px; }
+    #agent .row { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
+    #agent input { flex: 1; min-width: 0; font: 12px ui-monospace, monospace; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; padding: 5px 6px; }
+    #agent button { font: inherit; color: #eee; background: #333; border: 1px solid #555; border-radius: 4px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
+    #agent button.primary { background: #2d5a8a; border-color: #3b74b0; }
+    #agent button.link { background: none; border: 0; color: #9cf; padding: 0; }
+    #agent code { font: 12px ui-monospace, monospace; background: #111; padding: 1px 4px; border-radius: 3px; word-break: break-all; }
+    #agent .muted { color: #999; font-size: 12px; }
+    #agent .status.connected { color: #6c6; }
+    #agent .close { position: absolute; top: 8px; right: 10px; }
   </style>
 </head>
 <body>
   <div id="stage"><div id="overlay" data-zh="正在加载编辑器…" data-en="Loading the editor…"></div></div>
   <span id="bridge"></span>
+  <div id="agent" role="dialog" aria-labelledby="agent-title">
+    <button class="link close" id="agent-close" aria-label="Close">✕</button>
+    <h2 id="agent-title" data-zh="让 Claude 操控这个页面" data-en="Let Claude drive this editor"></h2>
+    <p class="muted" data-zh="把下面的地址加到 Claude 里，Claude 就能直接在这个页面里搭场景、摆机位、截图检查，你能看着它一步步完成，每一步都能撤销。不用安装任何东西。" data-en="Add the address below to Claude and it can build the scene, place cameras and check snapshots right in this page while you watch. Every step can be undone. Nothing to install."></p>
+    <div class="row"><span class="status" id="agent-status"></span><span style="flex:1"></span><button id="agent-toggle"></button></div>
+    <div class="row"><input id="agent-url" readonly aria-label="MCP address"><button id="agent-copy" data-zh="复制" data-en="Copy"></button></div>
+    <ol>
+      <li data-zh="claude.ai 或 Claude 桌面版：设置 → 连接器（Connectors）→ 添加自定义连接器，粘贴这个地址。之后在对话里打开它即可。" data-en="claude.ai or the Claude desktop app: Settings → Connectors → Add custom connector, and paste this address. Then turn it on in a chat."></li>
+      <li><span data-zh="Claude Code：" data-en="Claude Code: "></span><code id="agent-cli"></code></li>
+    </ol>
+    <p class="muted"><span data-zh="有这个地址的人都能改你打开的场景，不要公开发出去。" data-en="Anyone with this address can change the scene you have open, so keep it private."></span> <button class="link" id="agent-new" data-zh="换一个新地址" data-en="Make a new address"></button></p>
+  </div>
   <div id="toast"><span id="toast-text"></span><button id="toast-action" hidden></button></div>
   <script type="module">
     import init, { mount } from "./pkg/shotstage_app.js";
     import { connectBridge, findBridge } from "./bridge.js";
     import { sceneToLink, sceneFromLocation, clearSceneFromLocation } from "./share.js";
+    import { connectRelay, linkCode, mcpUrl } from "./agent.js";
 
     // ---- Interface language: follow the editor's own choice (it remembers it in localStorage). ----
     const store = {
@@ -53,17 +82,26 @@
       toastTimer = setTimeout(() => box.classList.remove("show"), ms);
     }
 
+    // ---- Where Claude connects: the relay (relay/) set at build time, or ?relay=https://... ----
+    let relay = new URLSearchParams(location.search).get("relay");
+    if (!relay) {
+      try { relay = (await (await fetch("config.json", { cache: "no-store" })).json()).relay || null; } catch { relay = null; }
+    }
+
     // ---- Start the editor. ----
     const overlay = document.getElementById("overlay");
     let editor;
     try {
       await init();
-      editor = await mount("#stage", {
-        toolbar: [{
-          id: "share", label: "🔗 Share link", labelZh: "🔗 分享链接",
-          tooltip: "Copy a link that opens a copy of this scene", tooltipZh: "复制一个链接，打开就是这个场景的副本",
-        }],
+      const toolbar = [{
+        id: "share", label: "🔗 Share link", labelZh: "🔗 分享链接",
+        tooltip: "Copy a link that opens a copy of this scene", tooltipZh: "复制一个链接，打开就是这个场景的副本",
+      }];
+      if (relay) toolbar.push({
+        id: "agent", label: "🤖 Claude", labelZh: "🤖 连接 Claude",
+        tooltip: "Let Claude build and edit this scene for you (no install)", tooltipZh: "让 Claude 直接在这个页面里搭场景（无需安装）",
       });
+      editor = await mount("#stage", { toolbar });
       overlay.remove();
     } catch (e) {
       console.error(e);
@@ -202,6 +240,73 @@
       }
     }
     editor.on(ev => { if (ev.type === "toolbar" && ev.id === "share") share(); });
+
+    // ---- Connect Claude through the relay: Claude's tool calls run in this editor. ----
+    if (relay && !bridgeUrl) {
+      const ON = "shotstage.agent.on";
+      const $ = (id) => document.getElementById(id);
+      const panel = $("agent"), badge = $("bridge");
+      let link = null, code = linkCode(store), state = "off", activity = "";
+      const render = () => {
+        const url = mcpUrl(relay, code);
+        $("agent-url").value = url;
+        $("agent-cli").textContent = `claude mcp add --transport http shotstage ${url}`;
+        const label = {
+          off: t("未连接", "Not connected"),
+          connecting: t("○ 正在连接…", "○ Connecting…"),
+          connected: t("● 已连接，等待 Claude 的指令", "● Connected: waiting for Claude"),
+          disconnected: t("○ 连接断开，正在重连…", "○ Connection lost, reconnecting…"),
+          replaced: t("已在另一个标签页打开，这里已停止", "Opened in another tab, stopped here"),
+        }[state];
+        $("agent-status").textContent = label;
+        $("agent-status").className = "status " + state;
+        $("agent-toggle").textContent = link ? t("断开", "Disconnect") : t("连接", "Connect");
+        $("agent-toggle").className = link ? "" : "primary";
+        badge.textContent = state === "off" ? "" : state === "connected" ? (activity || t("● Claude 已连接", "● Claude connected")) : label;
+        badge.className = state;
+      };
+      let activityTimer = 0;
+      const start = () => {
+        link?.close();
+        link = connectRelay(editor, relay, code, {
+          onStatus: (s) => {
+            state = s;
+            if (s === "replaced") { link = null; store.remove(ON); }
+            render();
+          },
+          onCall: (name, args) => {
+            const what = name === "command_run" ? args?.command : name === "command_batch" ? t(`${args?.steps?.length ?? 0} 步操作`, `${args?.steps?.length ?? 0} steps`) : name;
+            activity = t(`● Claude：${what}`, `● Claude: ${what}`);
+            clearTimeout(activityTimer);
+            activityTimer = setTimeout(() => { activity = ""; render(); }, 2500);
+            render();
+          },
+        });
+        store.set(ON, "1");
+      };
+      const stop = () => { link?.close(); link = null; state = "off"; store.remove(ON); render(); };
+      $("agent-toggle").onclick = () => (link ? stop() : start());
+      $("agent-close").onclick = () => panel.classList.remove("show");
+      $("agent-copy").onclick = async () => {
+        try { await navigator.clipboard.writeText($("agent-url").value); toast(t("地址已复制。", "Address copied.")); }
+        catch { $("agent-url").select(); }
+      };
+      $("agent-new").onclick = () => {
+        if (!confirm(t("换成新地址后，旧地址立刻失效，需要在 Claude 里重新添加。继续吗？", "The old address stops working at once and has to be replaced in Claude. Continue?"))) return;
+        code = linkCode(store, true);
+        if (link) start();
+        render();
+      };
+      editor.on(ev => {
+        if (ev.type !== "toolbar" || ev.id !== "agent") return;
+        relabel();
+        render();
+        panel.classList.toggle("show");
+        if (panel.classList.contains("show") && !link) start(); // opening the panel means "connect me"
+      });
+      if (store.get(ON)) start();
+      render();
+    }
     editor.on(ev => { if (ev.type === "change") console.debug("shotstage change", ev.revision); });
   </script>
 </body>

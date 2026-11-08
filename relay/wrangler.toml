@@ -1,0 +1,21 @@
+# shotstage relay: Cloudflare Worker + one Durable Object per link code (see src/index.js).
+# Deploy: `npx wrangler deploy` here, or the "Relay" GitHub workflow (needs the repository
+# secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID). Fits the Workers free plan.
+name = "shotstage-relay"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[vars]
+# where people open the editor (shown to Claude when no editor is connected)
+PAGE_URL = "https://youngdro.github.io/shotstage/"
+# page origins allowed to connect, comma-separated (any localhost is always allowed)
+ALLOWED_ORIGINS = "https://youngdro.github.io"
+
+[[durable_objects.bindings]]
+name = "LINKS"
+class_name = "Link"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Link"]

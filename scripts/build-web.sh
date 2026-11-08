@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build the browser bundle into dist/: dist/pkg/shotstage_app{.js,_bg.wasm} + dist/index.html.
+# SHOTSTAGE_RELAY=https://... adds the "Connect Claude" button, talking to that relay (relay/).
 # Needs: rustup target add wasm32-unknown-unknown; cargo install wasm-bindgen-cli (same version
 # as the wasm-bindgen crate in Cargo.lock).
 set -euo pipefail
@@ -9,6 +10,10 @@ cargo build -p shotstage-app --lib --target wasm32-unknown-unknown --profile "$p
 rm -rf dist && mkdir -p dist/pkg
 wasm-bindgen --target web --no-typescript --out-dir dist/pkg \
   "target/wasm32-unknown-unknown/$profile/shotstage_app.wasm"
-cp web/index.html web/bridge.js web/share.js dist/
+cp web/index.html web/bridge.js web/share.js web/agent.js web/agent-tools.js dist/
+# Where the "Claude" button connects (the relay in relay/); no relay, no button.
+if [ -n "${SHOTSTAGE_RELAY:-}" ]; then
+  printf '{"relay": "%s"}\n' "$SHOTSTAGE_RELAY" > dist/config.json
+fi
 ls -lh dist/pkg
 echo "serve dist/ with any static server, e.g. python3 -m http.server -d dist 8080"
