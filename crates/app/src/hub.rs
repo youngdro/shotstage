@@ -33,7 +33,11 @@ pub struct Hub {
     pub(crate) snap_renderer: Option<Renderer>,
     /// Snapshots waiting for the GPU (the UI polls the device while > 0).
     pub(crate) pending_snapshots: u32,
+    /// Mesh edit mode: the mesh being edited and its selected vertices / edges / faces.
+    pub edit: Option<EditState>,
 }
+
+pub use shotstage_commands::host::{EditState, SelectMode, editable};
 
 pub(crate) fn render_pass(p: SnapshotPass) -> Pass {
     match p {
@@ -109,8 +113,10 @@ fn editor_command(hub: &mut Hub, request: &Value) -> Option<Result<Outcome, Comm
             Pass::Normal => SnapshotPass::Normal,
         },
         look_through: hub.look_through,
+        edit: hub.edit.clone(),
     };
     let r = view_command(&mut view, hub.session.scene(), cmd, params)?;
+    hub.edit = view.edit;
     hub.selected = view.selected;
     hub.frame = view.frame.unwrap_or(hub.frame);
     hub.pass = render_pass(view.pass);

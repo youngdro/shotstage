@@ -4,14 +4,17 @@
 //! logic runs in the web editor (wasm), the CLI and the headless MCP server.
 
 pub mod camera;
+pub mod csg;
 pub mod eval;
 pub mod image;
 pub mod light;
 pub mod mesh;
 pub mod meshcache;
+pub mod meshedit;
 pub mod scene;
 pub mod spatial;
 pub mod timeline;
+pub mod uv;
 
 pub use camera::{CameraData, Intrinsics};
 pub use eval::{EvaluatedEntity, EvaluatedScene, evaluate};

@@ -64,11 +64,36 @@ pub struct ImageQuad {
 
 pub use shotstage_core::image::card_world as image_world;
 
+/// Vertex of a textured mesh: shaded like [`Vertex`], coloured by its texture.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct TexVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    /// Multiplies the texture (mesh colour, selection highlight).
+    pub color: [f32; 3],
+}
+
+/// The triangles of one textured mesh.
+pub struct TexBatch {
+    pub asset: String,
+    pub vertices: Vec<TexVertex>,
+}
+
 #[derive(Default)]
 pub struct Geometry {
     pub triangles: Vec<Vertex>,
     pub lines: Vec<LineVertex>,
     pub images: Vec<ImageQuad>,
+    pub textured: Vec<TexBatch>,
+}
+
+impl Geometry {
+    /// Every shaded triangle corner (plain and textured), for bounds and shadows.
+    pub fn solid_positions(&self) -> impl Iterator<Item = [f32; 3]> + '_ {
+        self.triangles.iter().map(|v| v.pos).chain(self.textured.iter().flat_map(|b| b.vertices.iter().map(|v| v.pos)))
+    }
 }
 
 const SELECT: [f32; 3] = [1.0, 0.62, 0.18];
@@ -92,8 +117,11 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         let selected = selected_set.contains(&e.id);
         let hovered = !selected && hovered_set.contains(&e.id);
         match &e.kind {
-            EntityKind::Mesh { color, .. } => {
+            EntityKind::Mesh { color, material, .. } => {
                 let Ok(tri) = posed_tris(scene, &e.id, frame) else { continue };
+                let textured = material
+                    .as_ref()
+                    .and_then(|m| m.texture.as_ref().filter(|k| scene.assets.contains_key(*k)).map(|k| (m, k)));
                 let normal_m = world.inverse().transpose();
                 let c = if selected {
                     mix(*color, SELECT, 0.45)
@@ -102,6 +130,28 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                 } else {
                     *color
                 };
+                if let Some((mat, key)) = textured {
+                    let uvs = shotstage_core::uv::tri_uvs(&tri, mat);
+                    let vertices = tri
+                        .indices
+                        .iter()
+                        .zip(uvs)
+                        .map(|(&i, uv)| {
+                            let i = i as usize;
+                            TexVertex {
+                                pos: world.transform_point3(Vec3::from_array(tri.positions[i])).to_array(),
+                                normal: normal_m
+                                    .transform_vector3(Vec3::from_array(tri.normals[i]))
+                                    .normalize_or_zero()
+                                    .to_array(),
+                                uv,
+                                color: c,
+                            }
+                        })
+                        .collect();
+                    g.textured.push(TexBatch { asset: key.clone(), vertices });
+                    continue;
+                }
                 for &i in &tri.indices {
                     let i = i as usize;
                     g.triangles.push(Vertex {
@@ -294,6 +344,7 @@ mod tests {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size: [1.0; 3] } },
                 modifiers: vec![],
                 color: [0.5; 3],
+                material: None,
             },
         })
         .unwrap();

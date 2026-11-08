@@ -690,6 +690,7 @@ fn set_hair(scene: &mut Scene, p: HairParams) -> CmdResult<Value> {
                 source: MeshSource::Primitive { primitive: part.prim.expect("hair is geometry") },
                 modifiers: vec![],
                 color,
+                material: None,
             },
         })?;
         ids.push(id);

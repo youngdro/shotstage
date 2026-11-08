@@ -16,11 +16,11 @@ Units: metres, degrees, frames; +Y up, the ground is y = 0, object fronts face +
 
 ## Contents
 
-- **Session**: [`command.list`](#commandlist) [`history.undo`](#historyundo) [`history.redo`](#historyredo) [`history.info`](#historyinfo)
+- **Session**: [`command.list`](#commandlist) [`history.undo`](#historyundo) [`history.redo`](#historyredo) [`history.info`](#historyinfo) [`history.discard`](#historydiscard)
 - **Scene**: [`scene.inspect`](#sceneinspect) [`scene.summary`](#scenesummary) [`scene.new`](#scenenew) [`scene.load`](#sceneload) [`scene.evaluate`](#sceneevaluate) [`scene.raycast`](#sceneraycast) [`scene.template`](#scenetemplate) [`scene.templates`](#scenetemplates) [`scene.save`](#scenesave) [`scene.open`](#sceneopen)
 - **Building blocks**: [`prefab.create`](#prefabcreate) [`prefab.list`](#prefablist)
 - **Entities**: [`entity.create`](#entitycreate) [`entity.delete`](#entitydelete) [`entity.duplicate`](#entityduplicate) [`entity.rename`](#entityrename) [`entity.get`](#entityget) [`entity.setTransform`](#entitysettransform) [`entity.translate`](#entitytranslate) [`entity.setParent`](#entitysetparent) [`entity.setVisible`](#entitysetvisible) [`entity.setLocked`](#entitysetlocked) [`entity.place`](#entityplace) [`entity.moveTo`](#entitymoveto) [`entity.rotate`](#entityrotate) [`entity.face`](#entityface) [`entity.bounds`](#entitybounds) [`entity.group`](#entitygroup) [`entity.ungroup`](#entityungroup) [`entity.align`](#entityalign) [`entity.distribute`](#entitydistribute) [`entity.attach`](#entityattach) [`entity.copy`](#entitycopy) [`entity.paste`](#entitypaste)
-- **Meshes**: [`mesh.setPrimitive`](#meshsetprimitive) [`mesh.setData`](#meshsetdata) [`mesh.setColor`](#meshsetcolor) [`mesh.addModifier`](#meshaddmodifier) [`mesh.removeModifier`](#meshremovemodifier) [`mesh.applyModifiers`](#meshapplymodifiers) [`mesh.join`](#meshjoin) [`mesh.setOriginToCenter`](#meshsetorigintocenter) [`mesh.stats`](#meshstats) [`mesh.exportObj`](#meshexportobj)
+- **Meshes**: [`mesh.setPrimitive`](#meshsetprimitive) [`mesh.setData`](#meshsetdata) [`mesh.setColor`](#meshsetcolor) [`mesh.addModifier`](#meshaddmodifier) [`mesh.removeModifier`](#meshremovemodifier) [`mesh.applyModifiers`](#meshapplymodifiers) [`mesh.join`](#meshjoin) [`mesh.setOriginToCenter`](#meshsetorigintocenter) [`mesh.stats`](#meshstats) [`mesh.exportObj`](#meshexportobj) [`mesh.editData`](#mesheditdata) [`mesh.makeEditable`](#meshmakeeditable) [`mesh.select`](#meshselect) [`mesh.transformElements`](#meshtransformelements) [`mesh.extrude`](#meshextrude) [`mesh.inset`](#meshinset) [`mesh.bevel`](#meshbevel) [`mesh.loopCut`](#meshloopcut) [`mesh.subdivideFaces`](#meshsubdividefaces) [`mesh.connect`](#meshconnect) [`mesh.deleteElements`](#meshdeleteelements) [`mesh.merge`](#meshmerge) [`mesh.mergeByDistance`](#meshmergebydistance) [`mesh.fill`](#meshfill) [`mesh.flipNormals`](#meshflipnormals) [`mesh.bridge`](#meshbridge) [`mesh.edgeSlide`](#meshedgeslide) [`mesh.bisect`](#meshbisect) [`mesh.knife`](#meshknife) [`mesh.spin`](#meshspin) [`mesh.boolean`](#meshboolean) [`mesh.setMaterial`](#meshsetmaterial) [`mesh.unwrap`](#meshunwrap) [`mesh.uvTransform`](#meshuvtransform) [`mesh.uvData`](#meshuvdata)
 - **Model files**: [`model.import`](#modelimport) [`model.export`](#modelexport)
 - **Pictures**: [`image.import`](#imageimport) [`image.set`](#imageset) [`image.get`](#imageget)
 - **Cameras**: [`camera.setLens`](#camerasetlens) [`camera.lookAt`](#cameralookat) [`camera.setActive`](#camerasetactive) [`camera.describe`](#cameradescribe) [`camera.trajectory`](#cameratrajectory) [`camera.orbitMove`](#cameraorbitmove) [`camera.dollyMove`](#cameradollymove) [`camera.frame`](#cameraframe) [`camera.setReference`](#camerasetreference)
@@ -29,7 +29,7 @@ Units: metres, degrees, frames; +Y up, the ground is y = 0, object fronts face +
 - **Animation**: [`keyframe.set`](#keyframeset) [`keyframe.delete`](#keyframedelete) [`keyframe.list`](#keyframelist) [`motion.apply`](#motionapply) [`motion.list`](#motionlist) [`keyframe.move`](#keyframemove) [`keyframe.retime`](#keyframeretime) [`keyframe.setInterp`](#keyframesetinterp)
 - **Timeline and shots**: [`timeline.set`](#timelineset) [`shot.create`](#shotcreate) [`shot.delete`](#shotdelete) [`shot.cut`](#shotcut) [`shot.set`](#shotset)
 - **Rendering**: [`render.snapshot`](#rendersnapshot) [`render.storyboard`](#renderstoryboard) [`render.sequence`](#rendersequence)
-- **Editor view**: [`editor.select`](#editorselect) [`editor.setFrame`](#editorsetframe) [`editor.setView`](#editorsetview) [`editor.state`](#editorstate)
+- **Editor view**: [`editor.select`](#editorselect) [`editor.setFrame`](#editorsetframe) [`editor.setView`](#editorsetview) [`editor.editMesh`](#editoreditmesh) [`editor.editSelect`](#editoreditselect) [`editor.state`](#editorstate)
 
 ## Session
 
@@ -58,6 +58,13 @@ No params.
 
 How many undo and redo steps are available.  
 _query_ · MCP tool `history_info`
+
+No params.
+
+### history.discard
+
+Undo the last change and forget it (no redo): for previews that are tried and thrown away.  
+_changes the scene_ · MCP tool `history_discard`
 
 No params.
 
@@ -197,7 +204,7 @@ _changes the scene_ · MCP tool `entity_create`
 | `name` | string |  |
 | `parent` | string |  |
 | `position` | array | Metres. |
-| `primitive` | object \| object \| object \| object \| object \| object \| object \| object | For meshes: the parametric primitive. Default: a 1 m cube. |
+| `primitive` | object \| object \| object \| object \| object \| object \| object \| object \| object | For meshes: the parametric primitive. Default: a 1 m cube. |
 | `rotationEuler` | array | Degrees, `[pitchX, yawY, rollZ]`. |
 | `scale` | array |  |
 | `type` **required** | `mesh` \| `camera` \| `empty` \| `light` | What to create. |
@@ -444,7 +451,7 @@ _changes the scene_ · MCP tool `mesh_setPrimitive`
 | Param | Type | |
 | --- | --- | --- |
 | `id` **required** | string |  |
-| `primitive` **required** | object \| object \| object \| object \| object \| object \| object \| object | Parametric primitives. Sizes in metres; the primitive is centred on its origin. |
+| `primitive` **required** | object \| object \| object \| object \| object \| object \| object \| object \| object | Parametric primitives. Sizes in metres; the primitive is centred on its origin. |
 
 ### mesh.setData
 
@@ -533,6 +540,334 @@ _query_ · MCP tool `mesh_exportObj`
 | `evaluated` | boolean | Apply modifiers. Default true. |
 | `id` **required** | string |  |
 | `world` | boolean | Bake the world transform. Default false. |
+
+### mesh.editData
+
+A mesh's editable geometry: vertex positions, faces and the edge list (indices used by the edit tools).  
+_query_ · MCP tool `mesh_editData`
+
+| Param | Type | |
+| --- | --- | --- |
+| `faceInfo` | boolean | Also return each face's centre and normal. Default false. |
+| `id` **required** | string |  |
+
+### mesh.makeEditable
+
+Turn a primitive into editable geometry (edit tools do this on their own).  
+_changes the scene_ · MCP tool `mesh_makeEditable`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` **required** | string |  |
+
+### mesh.select
+
+Work out a selection: edge loop or ring, face loop, linked part, grow, or all. Returns `selection` (changes nothing).  
+_query_ · MCP tool `mesh_select`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edge` | array | The edge for `loop`, `ring` and `faceLoop`. |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `how` **required** | `loop` \| `ring` \| `faceLoop` \| `linked` \| `more` \| `all` |  |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.transformElements
+
+Move, rotate or scale selected vertices / edges / faces (Blender G, R, S in edit mode).  
+_changes the scene_ · MCP tool `mesh_transformElements`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `pivot` | array | Pivot in mesh space. Default: centre of the selected vertices. |
+| `proportional` | object | Proportional editing: unselected vertices this close (metres) to the selection follow it, fading out (Blender's O). |
+| `rotate` | array | Turn by `[x, y, z]` degrees about the pivot. |
+| `scale` | array | Scale about the pivot, per axis. |
+| `translate` | array | Move by this many metres (mesh space). |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.extrude
+
+Extrude selected faces (as a region or each on its own) or edges, optionally moving the new geometry out. Keeps the extruded part selected.  
+_changes the scene_ · MCP tool `mesh_extrude`
+
+| Param | Type | |
+| --- | --- | --- |
+| `distance` | number | How far along the faces' normal (edges: outward along the surface). Default 0, so the new geometry can be moved afterwards, like Blender's E. |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `individual` | boolean | Faces: each face extrudes along its own normal instead of as one region. |
+| `offset` | array | Extra move of the new geometry, metres (mesh space). |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.inset
+
+Inset selected faces: a smaller face inside, joined by a ring of faces (Blender I).  
+_changes the scene_ · MCP tool `mesh_inset`
+
+| Param | Type | |
+| --- | --- | --- |
+| `depth` | number | Raise (or, negative, sink) the inner faces along the normal, metres. |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `individual` | boolean | Inset each face on its own instead of the selection as one region. |
+| `thickness` **required** | number | How far in from the border, metres. |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.bevel
+
+Bevel selected edges (faces: their edges) into a chamfer or a rounded strip (Blender Ctrl+B).  
+_changes the scene_ · MCP tool `mesh_bevel`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `segments` | integer | 1 = flat chamfer (default); more rounds it. |
+| `vertices` | integer[] | Vertex indices. |
+| `width` **required** | number | How far the bevel cuts in from the edge, metres. |
+
+### mesh.loopCut
+
+Cut new edge loops across the quad ring of an edge (Blender Ctrl+R). Selects the new loops.  
+_changes the scene_ · MCP tool `mesh_loopCut`
+
+| Param | Type | |
+| --- | --- | --- |
+| `cuts` | integer | Number of parallel cuts. Default 1. |
+| `edge` **required** | [integer; 2] | Any edge of the quad ring to cut across, as a vertex pair. |
+| `factor` | number | With one cut: where along the ring edges, 0..1 from `edge[0]`'s side. Default 0.5. |
+| `id` **required** | string |  |
+
+### mesh.subdivideFaces
+
+Split selected faces into smaller quads; neighbours stay joined.  
+_changes the scene_ · MCP tool `mesh_subdivideFaces`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.connect
+
+Split faces with a new edge between two selected vertices on each (Blender J).  
+_changes the scene_ · MCP tool `mesh_connect`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.deleteElements
+
+Delete selected vertices, edges or faces (and what depends on them).  
+_changes the scene_ · MCP tool `mesh_deleteElements`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `mode` | `vertices` \| `edges` \| `faces` | What to delete. Default: faces if faces are given, else edges, else vertices. |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.merge
+
+Merge selected vertices into one (Blender M).  
+_changes the scene_ · MCP tool `mesh_merge`
+
+| Param | Type | |
+| --- | --- | --- |
+| `at` | `center` \| `first` \| `last` | Where the merged vertex goes. Default `center`. |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.mergeByDistance
+
+Merge vertices closer than a distance (whole mesh, or the selection): cleans imported or mirrored meshes.  
+_changes the scene_ · MCP tool `mesh_mergeByDistance`
+
+| Param | Type | |
+| --- | --- | --- |
+| `distance` | number | Vertices closer than this merge, metres. Default 0.0001. |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.fill
+
+Make a face from the selection: a closed ring of border edges, or 3+ vertices (Blender F).  
+_changes the scene_ · MCP tool `mesh_fill`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.flipNormals
+
+Turn selected faces (all if none given) inside out.  
+_changes the scene_ · MCP tool `mesh_flipNormals`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.bridge
+
+Join two border edge loops (or two selected faces / regions, which are removed first) with a strip of faces (Blender Bridge Edge Loops). Selects the new faces.  
+_changes the scene_ · MCP tool `mesh_bridge`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.edgeSlide
+
+Slide selected edges along their neighbouring edges (Blender GG): factor -1..1.  
+_changes the scene_ · MCP tool `mesh_edgeSlide`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `factor` **required** | number | -1..1: positive slides toward side A (left of the loop as it runs), negative toward side B; 1 reaches the neighbouring loop. |
+| `id` **required** | string |  |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.bisect
+
+Cut faces along a plane (the selected faces, or all): the knife tool uses this. Optionally remove one side. Selects the new edges.  
+_changes the scene_ · MCP tool `mesh_bisect`
+
+| Param | Type | |
+| --- | --- | --- |
+| `clear` | `none` \| `front` \| `back` | Remove one side afterwards: `front` (where the normal points) or `back`. Default `none`. |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `normal` **required** | [number; 3] | The plane's normal, mesh space. |
+| `point` **required** | [number; 3] | A point on the cutting plane, mesh space. |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.knife
+
+Cut along a path of surface points as seen from an eye (or direction), like Blender's knife: the cut stops at the path's ends and turns at points inside faces. Selects the new edges.  
+_changes the scene_ · MCP tool `mesh_knife`
+
+| Param | Type | |
+| --- | --- | --- |
+| `direction` | array | View direction for an orthographic cut (mesh space). |
+| `eye` | array | Where the cut is seen from (mesh space); the cut runs along the view rays like drawing on screen. Give this or `direction`. |
+| `faces` | array | Only cut these faces (the editor passes the ones you can see). Default: all faces, so the cut goes through to the back. |
+| `id` **required** | string |  |
+| `path` **required** | [number; 3][] | Points on the surface to cut through, in order (mesh space). Each step cuts the faces between its two points; a point inside a face becomes a vertex, so the cut can turn. |
+
+### mesh.spin
+
+Extrude the selected edges or faces round and round an axis (Blender Spin): edges sweep into a surface, faces into a curved solid; 360° joins up.  
+_changes the scene_ · MCP tool `mesh_spin`
+
+| Param | Type | |
+| --- | --- | --- |
+| `angle` | number | Degrees to turn in total. Default 360 (joins up). |
+| `axis` | array | Axis to turn about (mesh space). Default `[0, 1, 0]`. |
+| `center` | array | A point on the axis (mesh space). Default: the mesh origin. |
+| `edges` | [integer; 2][] | Edges as vertex pairs, e.g. `[[0, 1], [1, 5]]`. |
+| `faces` | integer[] | Face indices. |
+| `id` **required** | string |  |
+| `steps` | integer | How many copies along the turn. Default 12. |
+| `vertices` | integer[] | Vertex indices. |
+
+### mesh.boolean
+
+Combine a mesh with another: union, difference (carve `with` out) or intersect. Both should be closed solids. The other mesh is hidden unless hideOther is false.  
+_changes the scene_ · MCP tool `mesh_boolean`
+
+| Param | Type | |
+| --- | --- | --- |
+| `hideOther` | boolean | Hide the other mesh afterwards, like applying Blender's boolean modifier. Default true. |
+| `id` **required** | string | The mesh that changes. |
+| `operation` | `union` \| `difference` \| `intersect` | `union`, `difference` (default: carve `with` out of `id`) or `intersect`. |
+| `with` **required** | string | The other mesh (with its modifiers, where it is placed in the scene). |
+
+### mesh.setMaterial
+
+Paint a picture on a mesh and say how it is laid on: box, planar, cylinder or sphere projection, or the mesh's UV map; repeat, offset, rotation. Give `textureData` (base64 image) or `texture` (an asset key); `clear` removes it.  
+_changes the scene_ · MCP tool `mesh_setMaterial`
+
+| Param | Type | |
+| --- | --- | --- |
+| `axis` | integer | Planar / cylinder axis: 0 = X, 1 = Y, 2 = Z. |
+| `clear` | boolean | Remove the whole material (back to plain colour). |
+| `color` | array | Mesh colour (multiplies the picture). Default when a texture is first set: white, so the picture shows as it is. |
+| `id` **required** | string |  |
+| `mapping` | `box` \| `planar` \| `cylinder` \| `sphere` \| `uv` | `box` (default), `planar`, `cylinder`, `sphere` or `uv` (the mesh's own UV map). |
+| `offset` | array | Shift of the picture, in pictures. |
+| `repeat` | array | Repeats of the picture across `[u, v]`. |
+| `rotation` | number | Turn of the picture, degrees. |
+| `texture` | string | Key of an image asset already in the scene (from `image.import`, `image.get` or an earlier `mesh.setMaterial`). `null` removes the texture. |
+| `textureData` | string | A new picture for the texture: PNG, JPEG or WebP, base64 (a `data:` URL works too). |
+
+### mesh.unwrap
+
+Make a UV map for a mesh (all faces or some): smart (flat pieces packed without overlap) or a baked box / planar / cylinder / sphere projection. The texture then follows the UV map.  
+_changes the scene_ · MCP tool `mesh_unwrap`
+
+| Param | Type | |
+| --- | --- | --- |
+| `angle` | number | Smart: faces bending less than this many degrees stay in one piece. Default 66. |
+| `axis` | integer | Planar / cylinder axis: 0 = X, 1 = Y, 2 = Z. |
+| `faces` | integer[] | Only these faces (the rest keep their UVs). Default: all. |
+| `id` **required** | string |  |
+| `margin` | number | Smart: gap between pieces, as a fraction of the square. Default 0.01. |
+| `method` | `smart` \| `box` \| `planar` \| `cylinder` \| `sphere` | `smart` (default: flat pieces packed without overlap), `box`, `planar`, `cylinder` or `sphere` (bake that projection). |
+
+### mesh.uvTransform
+
+Move, turn or scale the UVs of some faces (all by default), e.g. to fit a label onto the front.  
+_changes the scene_ · MCP tool `mesh_uvTransform`
+
+| Param | Type | |
+| --- | --- | --- |
+| `faces` | integer[] | Faces whose UVs move. Default: all. |
+| `id` **required** | string |  |
+| `rotate` | number | Turn, degrees. |
+| `scale` | array | Scale `[su, sv]` about the faces' UV centre. |
+| `translate` | array | Move by `[du, dv]` (1 = the whole picture). |
+
+### mesh.uvData
+
+A mesh's UV map (per face corner, if it has one), its material, and the final texture coordinates of every face corner.  
+_query_ · MCP tool `mesh_uvData`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` **required** | string |  |
 
 
 ## Model files
@@ -1073,6 +1408,28 @@ _query · needs view_ · MCP tool `editor_setView`
 | --- | --- | --- |
 | `lookThrough` | boolean | Show the view through the shot camera instead of the free orbit view. |
 | `pass` | `clay` \| `depth` \| `normal` |  |
+
+### editor.editMesh
+
+Enter mesh edit mode on a mesh (null leaves it), with a select mode (vertex, edge, face). The edit tools (mesh.extrude, mesh.bevel...) take explicit selections, so this is optional for agents; it shows the person what you are editing.  
+_query · needs view_ · MCP tool `editor_editMesh`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` | string | Mesh to edit, or null to leave edit mode. |
+| `mode` | `vertex` \| `edge` \| `face` | What clicks pick. Default vertex. |
+
+### editor.editSelect
+
+Set the edit-mode selection (vertices, edges, faces); the `selection` a mesh tool returns fits here.  
+_query · needs view_ · MCP tool `editor_editSelect`
+
+| Param | Type | |
+| --- | --- | --- |
+| `edges` | array | Vertex pairs. |
+| `faces` | array |  |
+| `mode` | `vertex` \| `edge` \| `face` |  |
+| `vertices` | array |  |
 
 ### editor.state
 

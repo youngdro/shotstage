@@ -83,6 +83,18 @@ pub fn host_commands() -> Vec<HostCommand> {
             schema: schema_of::<SetViewParams>,
         },
         HostCommand {
+            id: "editor.editMesh",
+            summary: "Enter mesh edit mode on a mesh (null leaves it), with a select mode (vertex, edge, face). The edit tools (mesh.extrude, mesh.bevel...) take explicit selections, so this is optional for agents; it shows the person what you are editing.",
+            needs: &[VIEW],
+            schema: schema_of::<EditMeshParams>,
+        },
+        HostCommand {
+            id: "editor.editSelect",
+            summary: "Set the edit-mode selection (vertices, edges, faces); the `selection` a mesh tool returns fits here.",
+            needs: &[VIEW],
+            schema: schema_of::<EditSelectParams>,
+        },
+        HostCommand {
             id: "editor.state",
             summary: "The editor's selection, playhead frame and viewport options.",
             needs: &[VIEW],
@@ -168,7 +180,63 @@ pub struct SetViewParams {
     pub look_through: Option<bool>,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditMeshParams {
+    /// Mesh to edit, or null to leave edit mode.
+    pub id: Option<String>,
+    /// What clicks pick. Default vertex.
+    pub mode: Option<SelectMode>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditSelectParams {
+    pub vertices: Option<Vec<u32>>,
+    /// Vertex pairs.
+    pub edges: Option<Vec<[u32; 2]>>,
+    pub faces: Option<Vec<u32>>,
+    pub mode: Option<SelectMode>,
+}
+
 // ---------------------------------------------------------------- view state
+
+/// Which elements clicks pick in mesh edit mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectMode {
+    #[default]
+    Vertex,
+    Edge,
+    Face,
+}
+
+/// Mesh edit mode: the mesh being edited and its selection.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EditState {
+    pub id: String,
+    pub mode: SelectMode,
+    pub selection: shotstage_core::meshedit::Elements,
+}
+
+impl EditState {
+    pub fn json(&self) -> Value {
+        json!({ "id": self.id, "mode": self.mode, "selection": self.selection })
+    }
+}
+
+/// Can `id` be edited in edit mode? (a mesh that is not rigged)
+pub fn editable(scene: &Scene, id: &str) -> CmdResult<()> {
+    use shotstage_core::{EntityKind, MeshSource};
+    match scene.get(id).map(|e| &e.kind) {
+        Ok(EntityKind::Mesh { source: MeshSource::Skinned { .. }, .. }) => {
+            Err(CommandError::new("failed", format!("`{id}` is rigged: pose it instead of editing its mesh")))
+        }
+        Ok(EntityKind::Mesh { .. }) => Ok(()),
+        Ok(_) => Err(CommandError::new("failed", format!("`{id}` is not a mesh"))),
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// The editor view: what `editor.*` commands read and change. The browser and desktop editor
 /// keep it next to their UI; the CLI / MCP server keep one per session.
@@ -180,6 +248,8 @@ pub struct ViewState {
     pub frame: Option<f32>,
     pub pass: SnapshotPass,
     pub look_through: bool,
+    /// Mesh edit mode, if on.
+    pub edit: Option<EditState>,
 }
 
 /// Run an `editor.*` command against a view. `None` when `id` is not one.
@@ -207,8 +277,38 @@ pub fn view_command(view: &mut ViewState, scene: &Scene, id: &str, params: Value
             }
             Value::Null
         }),
+        "editor.editMesh" => parse::<EditMeshParams>(params).and_then(|p| {
+            match p.id {
+                None => view.edit = None,
+                Some(id) => {
+                    editable(scene, &id)?;
+                    view.selected = Some(id.clone());
+                    let keep = view.edit.as_ref().filter(|e| e.id == id).map(|e| e.selection.clone());
+                    view.edit =
+                        Some(EditState { id, mode: p.mode.unwrap_or_default(), selection: keep.unwrap_or_default() });
+                }
+            }
+            Ok(view.edit.as_ref().map(EditState::json).unwrap_or(Value::Null))
+        }),
+        "editor.editSelect" => parse::<EditSelectParams>(params).and_then(|p| {
+            let edit = view
+                .edit
+                .as_mut()
+                .ok_or_else(|| CommandError::new("failed", "not in edit mode: call editor.editMesh first"))?;
+            if let Some(m) = p.mode {
+                edit.mode = m;
+            }
+            edit.selection = shotstage_core::meshedit::Elements {
+                vertices: p.vertices.unwrap_or_default(),
+                edges: p.edges.unwrap_or_default(),
+                faces: p.faces.unwrap_or_default(),
+            }
+            .normalized();
+            Ok(edit.json())
+        }),
         "editor.state" => parse::<NoParams>(params).map(|_| {
             json!({
+                "edit": view.edit.as_ref().map(EditState::json),
                 "selected": view.selected,
                 "frame": view.frame.unwrap_or(scene.timeline.start as f32),
                 "pass": view.pass,
