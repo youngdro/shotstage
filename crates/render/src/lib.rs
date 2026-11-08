@@ -8,6 +8,7 @@ pub mod geometry;
 
 use glam::Mat4;
 use shotstage_core::Scene;
+pub use shotstage_core::depthfit::DepthMap;
 use wgpu::util::DeviceExt as _;
 
 use geometry::{ImageVertex, LineVertex, TexVertex, Vertex};
@@ -34,10 +35,9 @@ pub enum Pass {
 pub struct View {
     pub view: Mat4,
     pub proj: Mat4,
-    /// Depth range mapped to white..black in the depth pass. Set `depth_far <= depth_near`
-    /// to fit the range to the visible geometry each frame.
-    pub depth_near: f32,
-    pub depth_far: f32,
+    /// How distance maps to grey in the depth pass. `None` fits it to what is in frame each
+    /// time (subjects get most of the greys; see `shotstage_core::depthfit`).
+    pub depth: Option<DepthMap>,
 }
 
 #[repr(C)]
@@ -47,6 +47,8 @@ struct Uniforms {
     view: [f32; 16],
     /// x = pass, y = depth near, z = depth far, w = 1 when overlays dim with depth
     params: [f32; 4],
+    /// Depth pass curve: x..y = the focus range, z = grey spent before it, w = grey left after
+    depth_curve: [f32; 4],
     /// x = number of scene lights, y = studio ambient, z = 1 when the sky lights the scene,
     /// w = how much the ambient shadow darkens the sky light
     light_params: [f32; 4],
@@ -199,13 +201,31 @@ struct EnvCache {
 const SHADER: &str = r#"
 struct L { pos: vec4<f32>, dir: vec4<f32>, rad: vec4<f32>, shadow: vec4<f32> };
 struct U {
-    view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, light_params: vec4<f32>,
+    view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, depth_curve: vec4<f32>, light_params: vec4<f32>,
     inv_view_proj: mat4x4<f32>, env_params: vec4<f32>, sh: array<vec4<f32>, 9>,
     shadow_params: vec4<f32>, shadow_vp: array<mat4x4<f32>, 4>, shadow_tile: array<vec4<f32>, 4>,
     shadow_bias: array<vec4<f32>, 4>,
     lights: array<L, 8>,
 };
 @group(0) @binding(0) var<uniform> u: U;
+
+// Depth pass grey for a distance: white at near, black at far; the focus range gets most of it
+// (DepthMap::grey on the CPU is the same curve).
+fn depth_grey(d: f32) -> f32 {
+    let n = u.params.y;
+    let f = u.params.z;
+    let a = u.depth_curve.x;
+    let b = u.depth_curve.y;
+    let lo = u.depth_curve.z;
+    let hi = u.depth_curve.w;
+    if (d <= a) {
+        return 1.0 - lo * clamp((d - n) / max(a - n, 1e-5), 0.0, 1.0);
+    }
+    if (d <= b) {
+        return mix(1.0 - lo, hi, clamp((d - a) / max(b - a, 1e-5), 0.0, 1.0));
+    }
+    return hi * (1.0 - clamp((d - b) / max(f - b, 1e-5), 0.0, 1.0));
+}
 @group(0) @binding(1) var shadow_tex: texture_depth_2d;
 @group(0) @binding(2) var shadow_smp: sampler_comparison;
 
@@ -366,8 +386,7 @@ fn lit(c: vec3<f32>, n: vec3<f32>, wp: vec3<f32>, mat: u32, px: vec2<f32>) -> ve
     let n = normalize(i.n);
     let pass_id = u32(u.params.x + 0.5);
     if (pass_id == 1u) {
-        let d = clamp((i.vz - u.params.y) / max(u.params.z - u.params.y, 1e-4), 0.0, 1.0);
-        let g = 1.0 - d;
+        let g = depth_grey(i.vz);
         return vec4<f32>(g, g, g, 1.0);
     }
     if (pass_id == 2u) {
@@ -403,8 +422,7 @@ struct TexOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @
     let n = normalize(i.n);
     let pass_id = u32(u.params.x + 0.5);
     if (pass_id == 1u) {
-        let d = clamp((i.vz - u.params.y) / max(u.params.z - u.params.y, 1e-4), 0.0, 1.0);
-        let g = 1.0 - d;
+        let g = depth_grey(i.vz);
         return vec4<f32>(g, g, g, 1.0);
     }
     if (pass_id == 2u) {
@@ -438,8 +456,7 @@ struct ImgOut { @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f32>, 
     }
     let pass_id = u32(u.params.x + 0.5);
     if (pass_id == 1u) {
-        let d = clamp((i.vz - u.params.y) / max(u.params.z - u.params.y, 1e-4), 0.0, 1.0);
-        return vec4<f32>(vec3<f32>(1.0 - d), 1.0);
+        return vec4<f32>(vec3<f32>(depth_grey(i.vz)), 1.0);
     }
     if (pass_id == 2u) {
         let vn = normalize((u.view * vec4<f32>(normalize(i.n), 0.0)).xyz);
@@ -494,12 +511,12 @@ const SHADOW_SHADER: &str = r#"
 }
 "#;
 
-/// Auto depth range: from the camera (white) to the farthest geometry in front of it (black).
-/// Vertex positions are a cheap stand-in for visible surfaces; a vertex behind the camera can
-/// belong to a visible face, so the near end stays at the camera.
-pub fn depth_range(geo: &geometry::Geometry, view: Mat4) -> (f32, f32) {
-    let far = geo.solid_positions().map(|p| -view.transform_point3(glam::Vec3::from_array(p)).z).fold(0.0f32, f32::max);
-    (0.0, if far > 0.01 { far } else { 10.0 })
+/// Auto depth map for what a camera sees: fitted to the visible surfaces, with the subjects
+/// (not the floor, walls or a table top running out of frame) given most of the greys.
+pub fn depth_fit(scene: &Scene, geo: &geometry::Geometry, view: Mat4, proj: Mat4) -> DepthMap {
+    let roots = shotstage_core::depthfit::root_keys(scene);
+    let key = |id: u32| id.checked_sub(1).and_then(|i| roots.get(i as usize)).copied().unwrap_or(u32::MAX);
+    shotstage_core::depthfit::fit(geo.id_triangles().map(|(id, t)| (key(id), t)), view, proj)
 }
 
 struct Target {
@@ -531,6 +548,8 @@ pub struct Renderer {
     target: Option<Target>,
     /// Bumps when the target texture is recreated (callers re-register it).
     pub target_generation: u64,
+    /// The depth map the last render used (the fitted one when it was automatic).
+    pub last_depth: DepthMap,
 }
 
 impl Renderer {
@@ -884,6 +903,7 @@ impl Renderer {
             bind_group,
             target: None,
             target_generation: 0,
+            last_depth: DepthMap::default(),
         }
     }
 
@@ -1073,15 +1093,17 @@ impl Renderer {
         let used: Vec<&str> =
             geo.images.iter().map(|q| q.asset.as_str()).chain(geo.textured.iter().map(|b| b.asset.as_str())).collect();
         self.sync_textures(device, queue, scene, &used);
-        let (near, far) = if view.depth_far > view.depth_near {
-            (view.depth_near, view.depth_far)
-        } else {
-            depth_range(&geo, view.view)
+        let depth = match (pass, view.depth) {
+            (Pass::Depth, None) => depth_fit(scene, &geo, view.view, view.proj),
+            (_, Some(d)) => d,
+            _ => DepthMap::default(),
         };
+        self.last_depth = depth;
         let mut u = Uniforms {
             view_proj: (view.proj * view.view).to_cols_array(),
             view: view.view.to_cols_array(),
-            params: [pass as u32 as f32, near, far, 0.0],
+            params: [pass as u32 as f32, depth.near, depth.far, 0.0],
+            depth_curve: depth.curve(),
             light_params: [0.0, 0.12, 0.0, 0.0],
             inv_view_proj: (view.proj * view.view).inverse().to_cols_array(),
             env_params: [0.0, 0.0, -1.0, 0.0],

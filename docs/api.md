@@ -1570,7 +1570,7 @@ _query · needs gpu_ · MCP tool `render_snapshot`
 | Param | Type | |
 | --- | --- | --- |
 | `camera` | string | Camera to look through. Default: the camera in use at `frame`. |
-| `depthRange` | array | Depth pass: `[near, far]` metres mapped to white..black. Default: fitted to each frame (give a fixed range for a sequence, so the greys do not flicker). |
+| `depthRange` | array | Depth pass: `[near, far]` metres mapped linearly to white..black, or `[near, focusNear, focusFar, far]` to give the focus range most of the greys. Default: fitted to what is in frame, with the subjects (not the floor, walls or a table top running out of frame) given most of the greys, so small things stay apart. |
 | `frame` | number | Default: the editor's current frame in the editor, else the timeline start. |
 | `height` | integer |  |
 | `pass` | `clay` \| `depth` \| `normal` |  |
@@ -1645,11 +1645,12 @@ _query · needs view_ · MCP tool `editor_setFrame`
 
 ### editor.setView
 
-Viewport options: shading pass (clay, depth, normal) and whether to look through the shot camera.  
+Viewport options: shading pass (clay, depth, normal), whether to look through the shot camera, and the depth pass range (fitted to the subjects in frame unless set).  
 _query · needs view_ · MCP tool `editor_setView`
 
 | Param | Type | |
 | --- | --- | --- |
+| `depthRange` | array | Viewport depth pass: `[near, far]` metres (or `[near, focusNear, focusFar, far]`), or `[]` to fit it to what is in frame again (the default). |
 | `lookThrough` | boolean | Show the view through the shot camera instead of the free orbit view. |
 | `pass` | `clay` \| `depth` \| `normal` |  |
 

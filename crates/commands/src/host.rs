@@ -11,6 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use shotstage_core::Scene;
+use shotstage_core::depthfit::DepthMap;
 
 use crate::builtin::{NoParams, frame_ok};
 use crate::snapshot::{SNAPSHOT_COMMAND, SnapshotParams, SnapshotPass};
@@ -84,7 +85,7 @@ pub fn host_commands() -> Vec<HostCommand> {
         },
         HostCommand {
             id: "editor.setView",
-            summary: "Viewport options: shading pass (clay, depth, normal) and whether to look through the shot camera.",
+            summary: "Viewport options: shading pass (clay, depth, normal), whether to look through the shot camera, and the depth pass range (fitted to the subjects in frame unless set).",
             needs: &[VIEW],
             schema: schema_of::<SetViewParams>,
         },
@@ -196,6 +197,9 @@ pub struct SetViewParams {
     pub pass: Option<SnapshotPass>,
     /// Show the view through the shot camera instead of the free orbit view.
     pub look_through: Option<bool>,
+    /// Viewport depth pass: `[near, far]` metres (or `[near, focusNear, focusFar, far]`), or
+    /// `[]` to fit it to what is in frame again (the default).
+    pub depth_range: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -325,6 +329,8 @@ pub struct ViewState {
     pub edit: Option<EditState>,
     /// The UV editor, if open.
     pub uv: Option<UvState>,
+    /// Viewport depth pass map; `None` fits it to what is in frame.
+    pub depth_range: Option<DepthMap>,
 }
 
 /// Run an `editor.*` command against a view. `None` when `id` is not one.
@@ -343,14 +349,24 @@ pub fn view_command(view: &mut ViewState, scene: &Scene, id: &str, params: Value
             view.frame = Some(frame_ok(p.frame)?);
             Ok(Value::Null)
         }),
-        "editor.setView" => parse::<SetViewParams>(params).map(|p| {
+        "editor.setView" => parse::<SetViewParams>(params).and_then(|p| {
+            let depth = match p.depth_range.as_deref() {
+                None => view.depth_range,
+                Some([]) => None,
+                Some(v) => Some(DepthMap::from_slice(v).ok_or_else(|| {
+                    CommandError::invalid(
+                        "depthRange must be [], [near, far] or [near, focusNear, focusFar, far], increasing, from 0",
+                    )
+                })?),
+            };
+            view.depth_range = depth;
             if let Some(pass) = p.pass {
                 view.pass = pass;
             }
             if let Some(l) = p.look_through {
                 view.look_through = l;
             }
-            Value::Null
+            Ok(Value::Null)
         }),
         "editor.editMesh" => parse::<EditMeshParams>(params).and_then(|p| {
             match p.id {
@@ -429,6 +445,7 @@ pub fn view_command(view: &mut ViewState, scene: &Scene, id: &str, params: Value
                 "frame": view.frame.unwrap_or(scene.timeline.start as f32),
                 "pass": view.pass,
                 "lookThrough": view.look_through,
+                "depthRange": view.depth_range.map(|d| d.to_vec()),
             })
         }),
         _ => return None,
@@ -748,7 +765,7 @@ pub struct SequencePlan {
     pub frames: Vec<SequenceFrame>,
     /// Per-frame camera data (the `frames` of camera.json).
     pub cameras: Vec<Value>,
-    pub depth_range: [f32; 2],
+    pub depth_range: DepthMap,
     pub out: Option<String>,
     pub video: bool,
 }
@@ -764,7 +781,6 @@ pub fn pass_name(p: SnapshotPass) -> &'static str {
 /// Plan a sequence (no GPU). `default_width` differs by host (inline frames are smaller).
 pub fn sequence_plan(scene: &Scene, params: Value, default_width: u32) -> CmdResult<SequencePlan> {
     use shotstage_core::eval::{camera_data_at, camera_id_at, camera_trajectory, world_at};
-    use shotstage_core::spatial::{Aabb, bounds};
     let p: SequenceParams = parse(params)?;
     let width = width_ok(p.width, default_width)?;
     let t = &scene.timeline;
@@ -781,34 +797,26 @@ pub fn sequence_plan(scene: &Scene, params: Value, default_width: u32) -> CmdRes
         scene.camera(c)?;
     }
     let cam_at = |f: u32| p.camera.clone().or_else(|| camera_id_at(scene, f as f32));
-    // one depth range for the whole sequence: camera to the farthest corner of the scene
-    let corners = scene
-        .entities
-        .iter()
-        .filter(|e| e.parent.is_none())
-        .filter_map(|e| bounds(scene, &e.id, a as f32).ok().flatten())
-        .reduce(|x, y| Aabb::union(Some(x), Some(y)).expect("both"));
-    let far = (a..=b)
-        .step_by(4)
-        .filter_map(|f| {
-            let cam = cam_at(f)?;
-            let eye = world_at(scene, &cam, f as f32).ok()?.w_axis.truncate();
-            let bx = corners?;
-            Some(
-                (0..8)
-                    .map(|i| {
-                        let c = glam::Vec3::new(
-                            if i & 1 == 0 { bx.min.x } else { bx.max.x },
-                            if i & 2 == 0 { bx.min.y } else { bx.max.y },
-                            if i & 4 == 0 { bx.min.z } else { bx.max.z },
-                        );
-                        (c - eye).length()
-                    })
-                    .fold(0.0f32, f32::max),
-            )
-        })
-        .fold(0.0f32, f32::max)
-        .max(1.0);
+    // one depth map for the whole sequence (so the greys do not flicker): the auto fit of a
+    // few frames along it, joined
+    let depth_range = if passes.contains(&SnapshotPass::Depth) {
+        let frames: Vec<u32> = (a..=b).step_by(step as usize).collect();
+        let every = frames.len().div_ceil(24).max(1);
+        frames
+            .iter()
+            .step_by(every)
+            .chain(frames.last())
+            .filter_map(|&f| {
+                let cam = cam_at(f)?;
+                let lens = camera_data_at(scene, &cam, f as f32).ok()?;
+                let view = world_at(scene, &cam, f as f32).ok()?.inverse();
+                Some(shotstage_core::depthfit::scene_fit(scene, f as f32, view, lens.projection(lens.aspect)))
+            })
+            .reduce(DepthMap::union)
+            .unwrap_or_default()
+    } else {
+        DepthMap::default()
+    };
     // a video needs one even size for every frame (H.264 is 4:2:0): the first camera's shape
     let video = p.video.unwrap_or(false);
     let (width, video_height) = if video {
@@ -831,7 +839,7 @@ pub fn sequence_plan(scene: &Scene, params: Value, default_width: u32) -> CmdRes
                     s["height"] = json!(h);
                 }
                 if *pass == SnapshotPass::Depth {
-                    s["depthRange"] = json!([0.0, far]);
+                    s["depthRange"] = json!(depth_range.to_vec());
                 }
                 (*pass, s)
             })
@@ -845,12 +853,12 @@ pub fn sequence_plan(scene: &Scene, params: Value, default_width: u32) -> CmdRes
     if frames.len() * passes.len() > 20_000 {
         return Err(CommandError::invalid("more than 20000 pictures; use a shorter range or `step`"));
     }
-    Ok(SequencePlan { fps: t.fps, width, passes, frames, cameras, depth_range: [0.0, far], out: p.out, video })
+    Ok(SequencePlan { fps: t.fps, width, passes, frames, cameras, depth_range, out: p.out, video })
 }
 
 /// `camera.json` of a sequence.
 pub fn sequence_cameras(plan: &SequencePlan) -> Value {
-    json!({ "fps": plan.fps, "depthRange": plan.depth_range, "frames": plan.cameras })
+    json!({ "fps": plan.fps, "depthRange": plan.depth_range.to_vec(), "frames": plan.cameras })
 }
 
 // ---------------------------------------------------------------- finishing (all hosts)
@@ -957,7 +965,7 @@ impl SequenceSink {
         let passes: Vec<_> = plan.passes.iter().map(|p| pass_name(*p)).collect();
         let Some(dir) = plan.out.clone() else {
             return Ok(json!({
-                "fps": plan.fps, "passes": passes, "depthRange": plan.depth_range,
+                "fps": plan.fps, "passes": passes, "depthRange": plan.depth_range.to_vec(),
                 "frames": self.inline, "cameras": sequence_cameras(plan),
             }));
         };
@@ -1000,7 +1008,7 @@ impl SequenceSink {
             }
             Ok(json!({
                 "folder": out.display().to_string(), "frames": plan.frames.len(), "passes": passes,
-                "fps": plan.fps, "depthRange": plan.depth_range, "videos": videos, "warnings": warnings,
+                "fps": plan.fps, "depthRange": plan.depth_range.to_vec(), "videos": videos, "warnings": warnings,
             }))
         }
     }

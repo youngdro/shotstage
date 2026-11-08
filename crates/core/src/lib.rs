@@ -6,6 +6,7 @@
 
 pub mod camera;
 pub mod csg;
+pub mod depthfit;
 pub mod environment;
 pub mod eval;
 pub mod human;

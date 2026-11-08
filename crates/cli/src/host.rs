@@ -49,8 +49,7 @@ impl Gpu {
             SnapshotPass::Depth => Pass::Depth,
             SnapshotPass::Normal => Pass::Normal,
         };
-        let [depth_near, depth_far] = plan.depth_range.unwrap_or([0.0, 0.0]);
-        let view = View { view: plan.view, proj: plan.proj, depth_near, depth_far };
+        let view = View { view: plan.view, proj: plan.proj, depth: plan.depth_range };
         let png = gpu
             .png(scene, plan.frame, view, pass, &plan.camera, (plan.width, plan.height))
             .map_err(|e| CommandError::new("failed", e))?;

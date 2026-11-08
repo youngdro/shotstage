@@ -116,5 +116,5 @@ fn stage(create: &serde_json::Value) -> Option<Scene> {
 fn camera_view(scene: &Scene) -> Option<View> {
     let lens = camera_data_at(scene, "thumb_cam", 0.0).ok()?;
     let world = world_at(scene, "thumb_cam", 0.0).ok()?;
-    Some(View { view: world.inverse(), proj: lens.projection(lens.aspect), depth_near: 0.0, depth_far: 0.0 })
+    Some(View { view: world.inverse(), proj: lens.projection(lens.aspect), depth: None })
 }

@@ -98,7 +98,7 @@ impl Storyboard {
             } else {
                 (((H as f32 * a).round() as u32).clamp(1, W), H)
             };
-            let view = View { view: world.inverse(), proj: lens.projection(a), depth_near: 0.0, depth_far: 0.0 };
+            let view = View { view: world.inverse(), proj: lens.projection(a), depth: None };
             let mut overlay = shotstage_render::clean_overlay(&shot.camera);
             overlay.studio_light = look.studio_light;
             overlay.no_shadows = !look.shadows;

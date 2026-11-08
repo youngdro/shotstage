@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shotstage_core::Scene;
+use shotstage_core::depthfit::DepthMap;
 use shotstage_core::eval::{camera_data_at, world_at};
 
 use crate::builtin::{frame_ok, pick_camera};
@@ -37,9 +38,11 @@ pub struct SnapshotParams {
     /// Pixels, 16..=4096. Default 1024 wide; the other side follows the camera's aspect.
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// Depth pass: `[near, far]` metres mapped to white..black. Default: fitted to each frame
-    /// (give a fixed range for a sequence, so the greys do not flicker).
-    pub depth_range: Option<[f32; 2]>,
+    /// Depth pass: `[near, far]` metres mapped linearly to white..black, or
+    /// `[near, focusNear, focusFar, far]` to give the focus range most of the greys. Default:
+    /// fitted to what is in frame, with the subjects (not the floor, walls or a table top
+    /// running out of frame) given most of the greys, so small things stay apart.
+    pub depth_range: Option<Vec<f32>>,
 }
 
 /// Everything a GPU host needs to draw a snapshot.
@@ -52,8 +55,8 @@ pub struct SnapshotPlan {
     pub pass: SnapshotPass,
     pub view: Mat4,
     pub proj: Mat4,
-    /// Depth pass: metres mapped to white..black; `None` fits each frame.
-    pub depth_range: Option<[f32; 2]>,
+    /// Depth pass: distance to grey; `None` fits each frame.
+    pub depth_range: Option<DepthMap>,
 }
 
 fn side(v: u32, what: &str) -> CmdResult<u32> {
@@ -82,8 +85,11 @@ pub fn plan(scene: &Scene, params: Value, default_frame: Option<f32>) -> CmdResu
         view: world.inverse(),
         proj: lens.projection(width as f32 / height as f32),
         depth_range: match p.depth_range {
-            Some([n, f]) if n.is_finite() && f.is_finite() && f > n && n >= 0.0 => Some([n, f]),
-            Some(_) => return Err(CommandError::invalid("depthRange must be [near, far] with 0 <= near < far")),
+            Some(v) => Some(DepthMap::from_slice(&v).ok_or_else(|| {
+                CommandError::invalid(
+                    "depthRange must be [near, far] or [near, focusNear, focusFar, far], increasing, from 0",
+                )
+            })?),
             None => None,
         },
     })

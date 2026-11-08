@@ -61,6 +61,8 @@ pub struct ImageVertex {
 /// One image card to draw with its asset's texture.
 pub struct ImageQuad {
     pub asset: String,
+    /// Entity index + 1.
+    pub id: u32,
     pub vertices: [ImageVertex; 6],
 }
 
@@ -80,6 +82,8 @@ pub struct TexVertex {
 /// The triangles of one textured mesh.
 pub struct TexBatch {
     pub asset: String,
+    /// Entity index + 1.
+    pub id: u32,
     pub vertices: Vec<TexVertex>,
 }
 
@@ -95,6 +99,24 @@ impl Geometry {
     /// Every shaded triangle corner (plain and textured), for bounds and shadows.
     pub fn solid_positions(&self) -> impl Iterator<Item = [f32; 3]> + '_ {
         self.triangles.iter().map(|v| v.pos).chain(self.textured.iter().flat_map(|b| b.vertices.iter().map(|v| v.pos)))
+    }
+
+    /// Every opaque triangle (plain, textured and pictures) with its entity index + 1.
+    pub fn id_triangles(&self) -> impl Iterator<Item = (u32, [Vec3; 3])> + '_ {
+        let p = |a: [f32; 3]| Vec3::from_array(a);
+        let plain = self
+            .triangles
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(move |t| (t[0].id & 0x0fff_ffff, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]));
+        let tex = self.textured.iter().flat_map(move |b| {
+            b.vertices.as_chunks::<3>().0.iter().map(move |t| (b.id, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]))
+        });
+        let img = self.images.iter().flat_map(move |q| {
+            q.vertices.as_chunks::<3>().0.iter().map(move |t| (q.id, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]))
+        });
+        plain.chain(tex).chain(img)
     }
 }
 
@@ -169,7 +191,7 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                             }
                         })
                         .collect();
-                    g.textured.push(TexBatch { asset: key.clone(), vertices });
+                    g.textured.push(TexBatch { asset: key.clone(), id: index as u32 + 1, vertices });
                     continue;
                 }
                 for &i in &tri.indices {
@@ -204,7 +226,11 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                 };
                 let (a, b, c, d) =
                     (v(-hw, -hh, 0.0, 1.0), v(hw, -hh, 1.0, 1.0), v(hw, hh, 1.0, 0.0), v(-hw, hh, 0.0, 0.0));
-                g.images.push(ImageQuad { asset: img.asset.clone(), vertices: [a, b, c, a, c, d] });
+                g.images.push(ImageQuad {
+                    asset: img.asset.clone(),
+                    id: index as u32 + 1,
+                    vertices: [a, b, c, a, c, d],
+                });
                 if selected && overlay.cameras {
                     for (p, q) in [(a.pos, b.pos), (b.pos, c.pos), (c.pos, d.pos), (d.pos, a.pos)] {
                         line(&mut g.lines, Vec3::from_array(p), Vec3::from_array(q), SELECT);
