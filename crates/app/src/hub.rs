@@ -216,16 +216,18 @@ fn host_command(h: &mut Hub, request: &Value) -> Option<Result<Outcome, CommandE
         )),
         // file paths (desktop): read them in, and write exports out
         #[cfg(not(target_arch = "wasm32"))]
-        "model.import" | "image.import" | "model.export" if params.get("path").is_some() => (|| {
-            let (p, write_to) = host::resolve_paths(cmd, params)?;
-            let mut req = request.clone();
-            req["params"] = p;
-            let mut out = h.session.dispatch_json(req)?;
-            if let Some(path) = write_to {
-                out.result = host::write_export(&path, out.result)?;
-            }
-            Ok(out)
-        })(),
+        "model.import" | "image.import" | "environment.import" | "model.export" if params.get("path").is_some() => {
+            (|| {
+                let (p, write_to) = host::resolve_paths(cmd, params)?;
+                let mut req = request.clone();
+                req["params"] = p;
+                let mut out = h.session.dispatch_json(req)?;
+                if let Some(path) = write_to {
+                    out.result = host::write_export(&path, out.result)?;
+                }
+                Ok(out)
+            })()
+        }
         _ => return None,
     };
     Some(r)

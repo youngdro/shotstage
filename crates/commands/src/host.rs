@@ -952,7 +952,7 @@ pub fn resolve_paths(command: &str, mut params: Value) -> CmdResult<(Value, Opti
             o.insert("data".into(), json!(crate::model::encode(&bytes)));
             Ok((params, None))
         }
-        "image.import" => {
+        "image.import" | "environment.import" => {
             o.remove("path");
             let bytes = read(&path)?;
             if !o.contains_key("name")

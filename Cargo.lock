@@ -3059,7 +3059,9 @@ dependencies = [
 name = "shotstage-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "glam",
+ "image",
  "schemars",
  "serde",
  "serde_json",

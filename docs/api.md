@@ -25,7 +25,7 @@ Units: metres, degrees, frames; +Y up, the ground is y = 0, object fronts face +
 - **Pictures**: [`image.import`](#imageimport) [`image.set`](#imageset) [`image.get`](#imageget)
 - **Cameras**: [`camera.setLens`](#camerasetlens) [`camera.lookAt`](#cameralookat) [`camera.setActive`](#camerasetactive) [`camera.describe`](#cameradescribe) [`camera.trajectory`](#cameratrajectory) [`camera.orbitMove`](#cameraorbitmove) [`camera.dollyMove`](#cameradollymove) [`camera.frame`](#cameraframe) [`camera.setReference`](#camerasetreference)
 - **People**: [`pose.set`](#poseset) [`pose.aim`](#poseaim) [`pose.get`](#poseget) [`pose.list`](#poselist) [`person.setHair`](#personsethair) [`person.setBody`](#personsetbody) [`person.setOutfit`](#personsetoutfit) [`person.setExpression`](#personsetexpression) [`person.expressions`](#personexpressions) [`pose.hand`](#posehand) [`person.get`](#personget) [`person.lookAt`](#personlookat)
-- **Lights**: [`light.set`](#lightset) [`light.preset`](#lightpreset) [`light.list`](#lightlist)
+- **Lights**: [`light.set`](#lightset) [`light.preset`](#lightpreset) [`light.list`](#lightlist) [`environment.set`](#environmentset) [`environment.import`](#environmentimport) [`environment.list`](#environmentlist) [`light.shadows`](#lightshadows) [`light.fromEnvironment`](#lightfromenvironment)
 - **Animation**: [`keyframe.set`](#keyframeset) [`keyframe.delete`](#keyframedelete) [`keyframe.list`](#keyframelist) [`motion.apply`](#motionapply) [`motion.list`](#motionlist) [`keyframe.move`](#keyframemove) [`keyframe.retime`](#keyframeretime) [`keyframe.setInterp`](#keyframesetinterp)
 - **Timeline and shots**: [`timeline.set`](#timelineset) [`shot.create`](#shotcreate) [`shot.delete`](#shotdelete) [`shot.cut`](#shotcut) [`shot.set`](#shotset)
 - **Rendering**: [`render.snapshot`](#rendersnapshot) [`render.storyboard`](#renderstoryboard) [`render.sequence`](#rendersequence)
@@ -1214,11 +1214,12 @@ _changes the scene_ · MCP tool `person_lookAt`
 
 ### light.set
 
-Change a light: kind (sun, point, spot, area), colour, intensity, cone angle, softness, panel size.  
+Change a light: kind (sun, point, spot, area), colour or colour temperature (Kelvin), intensity, cone angle, softness, panel size, whether it casts shadows.  
 _changes the scene_ · MCP tool `light_set`
 
 | Param | Type | |
 | --- | --- | --- |
+| `castShadows` | boolean | Whether it casts shadows (up to four lights do at once, the brightest). |
 | `color` | array | Linear RGB 0..1. |
 | `coneDegrees` | number | Spot: full cone angle in degrees. |
 | `id` **required** | string |  |
@@ -1226,10 +1227,11 @@ _changes the scene_ · MCP tool `light_set`
 | `kind` | `sun` \| `point` \| `spot` \| `area` |  |
 | `size` | array | Area: width and height in metres. |
 | `softness` | number | Spot and area: edge softness 0..1. |
+| `temperature` | number | Set the colour from a colour temperature in Kelvin: 2700 warm bulb, 3200 tungsten, 5600 daylight, 7500 shade. |
 
 ### light.preset
 
-Light a subject in one step: threePoint, rembrandt, productSoftbox, backlight, goldenHour, daylight, or clear (back to the flat studio light). Lights are placed for the active camera.  
+Light a subject in one step. Portrait: threePoint, rembrandt, loop, butterfly, clamshell, split. Product and shop: productSoftbox, highKey, freshCounter. Mood: lowKey, backlight, window, neon, stage. Outdoor: goldenHour, daylight, overcast, night. clear goes back to the flat studio light. Lights are placed for the active camera; presets that come with a sky (outdoor ones, white or black backdrops) set it too.  
 _changes the scene_ · MCP tool `light_preset`
 
 | Param | Type | |
@@ -1237,8 +1239,9 @@ _changes the scene_ · MCP tool `light_preset`
 | `camera` | string | The camera the lighting is arranged for (key light to its left, rim behind the subject). Default: the active camera, else the subject's front. |
 | `frame` | number |  |
 | `intensity` | number | Multiply every light's brightness. Default 1. |
-| `preset` **required** | `threePoint` \| `rembrandt` \| `productSoftbox` \| `backlight` \| `goldenHour` \| `daylight` \| `clear` |  |
+| `preset` **required** | `threePoint` \| `rembrandt` \| `loop` \| `butterfly` \| `clamshell` \| `split` \| `productSoftbox` \| `highKey` \| `lowKey` \| `backlight` \| `window` \| `neon` \| `stage` \| `freshCounter` \| `goldenHour` \| `daylight` \| `overcast` \| `night` \| `clear` |  |
 | `replace` | boolean | Remove the lights a previous preset made first. Default true. |
+| `sky` | boolean | Also set the sky that goes with the preset (daylight, sunset, a white or black backdrop...). Default true. |
 | `subject` | string | What to light. Default: the selection's group is not known here, so the whole scene's bounds are used. |
 
 ### light.list
@@ -1247,6 +1250,66 @@ Lighting presets for light.preset, and the scene's lights.
 _query_ · MCP tool `light_list`
 
 No params.
+
+### environment.set
+
+Set the sky around the scene: studio (default), color (seamless backdrop), day, sunset, overcast, night, softbox, or an imported hdri. The sky lights the scene softly from all round and can show behind it; turn it, tint it (colour or Kelvin) and set its brightness.  
+_changes the scene_ · MCP tool `environment_set`
+
+| Param | Type | |
+| --- | --- | --- |
+| `background` | boolean | Show the sky behind the scene. |
+| `color` | array | Colour sky: the colour; other skies: a tint. Linear RGB 0..1. |
+| `hdri` | string | HDRI asset key (from environment.import); sets the sky to hdri. |
+| `intensity` | number | Brightness of the sky light and background, 0..=10. |
+| `rotation` | number | Turn the sky (and its sun) about the vertical axis, degrees. |
+| `sky` | `studio` \| `color` \| `day` \| `sunset` \| `overcast` \| `night` \| `softbox` \| `hdri` | studio (no sky light, default), color (one colour all round: a paper backdrop), day, sunset, overcast, night, softbox, or hdri (an imported panorama). |
+| `temperature` | number | Tint by colour temperature instead, Kelvin (6500 = neutral). |
+
+### environment.import
+
+Import an HDRI (.hdr) or a 2:1 panorama picture and use it as the sky: it lights the scene and shows behind it. Pair it with light.fromEnvironment for a sun that matches.  
+_changes the scene_ · MCP tool `environment_import`
+
+| Param | Type | |
+| --- | --- | --- |
+| `apply` | boolean | Use it as the sky right away. Default true. |
+| `data` | string | An HDRI (Radiance .hdr) or an ordinary 2:1 panorama (PNG, JPEG, WebP), base64 (a `data:` URL works too). |
+| `intensity` | number |  |
+| `name` | string |  |
+| `path` | string | Or a file on disk to read (CLI and MCP only). |
+| `rotation` | number |  |
+
+### environment.list
+
+The built-in skies and the scene's current sky and shadow settings.  
+_query_ · MCP tool `environment_list`
+
+No params.
+
+### light.shadows
+
+Shadow settings: on/off, how dark (strength), how soft; and which lights cast them (up to four at once, brightest first).  
+_changes the scene_ · MCP tool `light_shadows`
+
+| Param | Type | |
+| --- | --- | --- |
+| `cast` | boolean |  |
+| `enabled` | boolean | Shadows on or off for the whole scene. |
+| `lights` | array | Turn shadow casting on or off for these lights (up to four lights cast at once). |
+| `softness` | number | Edge blur, 0 = crisp .. 1 = very soft. |
+| `strength` | number | How dark shadows are, 0..1. |
+
+### light.fromEnvironment
+
+Add a sun light shining from the sky's brightest spot (the sun of a built-in sky or an HDRI), in its colour, so shadows match the sky.  
+_changes the scene_ · MCP tool `light_fromEnvironment`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` | string |  |
+| `intensity` | number | Brightness of the sun. Default: from how clear the sky's sun is (about 1.2 for a clear day). |
+| `parent` | string | Put it in this group. |
 
 
 ## Animation
