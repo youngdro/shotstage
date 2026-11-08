@@ -501,6 +501,9 @@ fn set_transform(scene: &mut Scene, p: SetTransformParams) -> CmdResult<Value> {
 
 fn keyframe_set(scene: &mut Scene, p: KeyframeParams) -> CmdResult<Value> {
     let frame = frame_ok(p.frame)?;
+    // expressions live on the person's root, whichever part was named
+    let id =
+        if p.property == TrackProperty::Expression { crate::humans::human_root(scene, &p.id)? } else { p.id.clone() };
     let value = match (p.property, p.value) {
         (TrackProperty::Transform, None) => KeyValue::Transform(scene.get(&p.id)?.transform),
         (TrackProperty::FocalLength, None) => KeyValue::Scalar(scene.camera(&p.id)?.focal_length_mm),
@@ -517,9 +520,30 @@ fn keyframe_set(scene: &mut Scene, p: KeyframeParams) -> CmdResult<Value> {
             }
             KeyValue::Scalar(f)
         }
+        (TrackProperty::Expression, None) => {
+            // re-key what the face shows here (dominant expression of the current mix)
+            let m = scene
+                .timeline
+                .track(&id, TrackProperty::Expression)
+                .and_then(|t| t.sample(frame))
+                .and_then(|v| if let KeyValue::Expression(m) = v { Some(m) } else { None })
+                .ok_or_else(|| {
+                    CommandError::invalid("no expression keys yet: use person.setExpression with keyframeAt")
+                })?;
+            let (i, w) = if m.a_amount >= m.b_amount { (m.a, m.a_amount) } else { (m.b, m.b_amount) };
+            KeyValue::Expression(shotstage_core::ExpressionMix::single(i, w.max(m.a_amount + m.b_amount).min(1.5)))
+        }
+        (TrackProperty::Expression, Some(KeyValue::Expression(m))) => {
+            let n = shotstage_core::human::EXPRESSIONS.len() as u8;
+            let ok = |w: f32| w.is_finite() && (0.0..=1.5).contains(&w);
+            if m.a >= n || m.b >= n || !ok(m.a_amount) || !ok(m.b_amount) {
+                return Err(CommandError::invalid("expression index or amount out of range"));
+            }
+            KeyValue::Expression(m)
+        }
         _ => return Err(CommandError::invalid("value kind does not match the property")),
     };
-    let track = scene.timeline.track_mut_or_insert(&p.id, p.property);
+    let track = scene.timeline.track_mut_or_insert(&id, p.property);
     track.set_key(Key { frame, value, interp: p.interp.unwrap_or_default() });
     Ok(json!({ "keys": track.keys.len() }))
 }
@@ -850,6 +874,7 @@ pub fn registry() -> Vec<Command> {
     .into_iter()
     .chain(crate::placement::commands())
     .chain(crate::rig::commands())
+    .chain(crate::humans::commands())
     .chain(crate::lights::commands())
     .chain(crate::model::commands())
     .chain(crate::images::commands())

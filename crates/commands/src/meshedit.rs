@@ -36,7 +36,7 @@ pub fn edit_mesh(scene: &Scene, id: &str) -> CmdResult<Mesh> {
         EntityKind::Mesh { source, .. } => match source {
             MeshSource::Primitive { primitive } => Ok(primitive.build()?),
             MeshSource::Data { mesh } => Ok(mesh.clone()),
-            MeshSource::Skinned { .. } => Err(CommandError::new(
+            MeshSource::Skinned { .. } | MeshSource::Human { .. } => Err(CommandError::new(
                 "failed",
                 format!("`{id}` is a rigged (skinned) mesh: pose it instead, or apply its pose first"),
             )),

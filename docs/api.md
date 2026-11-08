@@ -24,7 +24,7 @@ Units: metres, degrees, frames; +Y up, the ground is y = 0, object fronts face +
 - **Model files**: [`model.import`](#modelimport) [`model.export`](#modelexport)
 - **Pictures**: [`image.import`](#imageimport) [`image.set`](#imageset) [`image.get`](#imageget)
 - **Cameras**: [`camera.setLens`](#camerasetlens) [`camera.lookAt`](#cameralookat) [`camera.setActive`](#camerasetactive) [`camera.describe`](#cameradescribe) [`camera.trajectory`](#cameratrajectory) [`camera.orbitMove`](#cameraorbitmove) [`camera.dollyMove`](#cameradollymove) [`camera.frame`](#cameraframe) [`camera.setReference`](#camerasetreference)
-- **People**: [`pose.set`](#poseset) [`pose.aim`](#poseaim) [`pose.get`](#poseget) [`pose.list`](#poselist) [`person.setHair`](#personsethair) [`person.lookAt`](#personlookat)
+- **People**: [`pose.set`](#poseset) [`pose.aim`](#poseaim) [`pose.get`](#poseget) [`pose.list`](#poselist) [`person.setHair`](#personsethair) [`person.setBody`](#personsetbody) [`person.setOutfit`](#personsetoutfit) [`person.setExpression`](#personsetexpression) [`person.expressions`](#personexpressions) [`pose.hand`](#posehand) [`person.get`](#personget) [`person.lookAt`](#personlookat)
 - **Lights**: [`light.set`](#lightset) [`light.preset`](#lightpreset) [`light.list`](#lightlist)
 - **Animation**: [`keyframe.set`](#keyframeset) [`keyframe.delete`](#keyframedelete) [`keyframe.list`](#keyframelist) [`motion.apply`](#motionapply) [`motion.list`](#motionlist) [`keyframe.move`](#keyframemove) [`keyframe.retime`](#keyframeretime) [`keyframe.setInterp`](#keyframesetinterp)
 - **Timeline and shots**: [`timeline.set`](#timelineset) [`shot.create`](#shotcreate) [`shot.delete`](#shotdelete) [`shot.cut`](#shotcut) [`shot.set`](#shotset)
@@ -130,7 +130,7 @@ _changes the scene_ · MCP tool `scene_template`
 
 | Param | Type | |
 | --- | --- | --- |
-| `name` **required** | string | groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, cafe or studio. |
+| `name` **required** | string | groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout, cafe or studio. |
 | `replace` | boolean | Clear the scene first. Default true. |
 
 ### scene.templates
@@ -170,7 +170,7 @@ _changes the scene_ · MCP tool `prefab_create`
 | --- | --- | --- |
 | `drop` | boolean | Then drop it onto whatever is below `position` (a table, the floor). Default true. |
 | `id` | string | Id of the group (parts get `<id>_<part>`). Default: generated from the kind. |
-| `kind` **required** | `man` \| `woman` \| `table` \| `chair` \| `sofa` \| `bed` \| `stairs` \| `wall` \| `doorway` \| `car` \| `tree` \| `desk` \| `monitor` \| `laptop` \| `officeChair` \| `bench` \| `streetLamp` \| `bicycle` \| `trafficCone` \| `fence` \| `plant` \| `lamp` \| `crate` \| `produceStand` \| `appleCrate` \| `orangeCrate` \| `greensCrate` \| `watermelonBin` \| `gondolaShelf` \| `openChiller` \| `islandFreezer` \| `deliCounter` \| `fishDisplay` \| `breadRack` \| `checkout` \| `cart` \| `basket` \| `scale` \| `priceSign` \| `pallet` \| `phone` \| `shoppingBag` \| `handbag` \| `bottle` \| `jar` \| `can` \| `carton` \| `tube` \| `pouch` \| `cup` \| `giftBox` \| `pumpBottle` \| `podium` \| `steppedPodium` \| `cubeRiser` \| `pedestal` \| `cakeStand` \| `tray` \| `acrylicStand` \| `archBackdrop` \| `infinityCove` \| `paperRoll` \| `productTable` \| `softbox` \| `reflector` \| `leafBranch` \| `flower` \| `citrusSlice` \| `pebbles` \| `iceCubes` \| `drape` \| `ribbon` \| `splash` \| `decorSpheres` \| `person` |  |
+| `kind` **required** | `man` \| `woman` \| `humanMan` \| `humanWoman` \| `humanBoy` \| `humanGirl` \| `humanOldMan` \| `humanOldWoman` \| `humanAthlete` \| `humanShopper` \| `humanStaff` \| `humanCashier` \| `humanDeli` \| `humanCasual` \| `table` \| `chair` \| `sofa` \| `bed` \| `stairs` \| `wall` \| `doorway` \| `car` \| `tree` \| `desk` \| `monitor` \| `laptop` \| `officeChair` \| `bench` \| `streetLamp` \| `bicycle` \| `trafficCone` \| `fence` \| `plant` \| `lamp` \| `crate` \| `produceStand` \| `appleCrate` \| `orangeCrate` \| `greensCrate` \| `watermelonBin` \| `gondolaShelf` \| `openChiller` \| `islandFreezer` \| `deliCounter` \| `fishDisplay` \| `breadRack` \| `checkout` \| `cart` \| `basket` \| `scale` \| `priceSign` \| `pallet` \| `phone` \| `shoppingBag` \| `handbag` \| `bottle` \| `jar` \| `can` \| `carton` \| `tube` \| `pouch` \| `cup` \| `giftBox` \| `pumpBottle` \| `podium` \| `steppedPodium` \| `cubeRiser` \| `pedestal` \| `cakeStand` \| `tray` \| `acrylicStand` \| `archBackdrop` \| `infinityCove` \| `paperRoll` \| `productTable` \| `softbox` \| `reflector` \| `leafBranch` \| `flower` \| `citrusSlice` \| `pebbles` \| `iceCubes` \| `drape` \| `ribbon` \| `splash` \| `decorSpheres` \| `person` |  |
 | `name` | string |  |
 | `position` | array | Where the bottom centre goes, metres. Default `[0, 0, 0]`. |
 | `rotationY` | number | Turn about the vertical axis, degrees. The front of every prefab is +Z. |
@@ -1078,6 +1078,7 @@ _changes the scene_ · MCP tool `pose_set`
 | --- | --- | --- |
 | `drop` | boolean | Re-rest the person on the surface below afterwards. Default true. |
 | `frame` | number | Frame to evaluate at. Default: the timeline start. |
+| `hands` | string | Hand shape for realistic people (see `pose.list`), e.g. `fist`, `grip`, `point`. Default with a named pose: the pose's own hand shape. |
 | `id` **required** | string | The person (its root, a joint or a body part). |
 | `joints` | object | Joint rotations in degrees `[x, y, z]` (local, see `pose.list` for the conventions), applied after `pose`, e.g. `{"elbow_r": [-90, 0, 0]}`. |
 | `keyframeAt` | number | Write keyframes at this frame (animated joints are always keyed). |
@@ -1122,6 +1123,79 @@ _changes the scene_ · MCP tool `person_setHair`
 | `color` | array | Linear RGB 0..1. Default: the current hair colour (dark brown). |
 | `id` **required** | string | The person (root, joint or part). |
 | `style` **required** | `short` \| `long` \| `bob` \| `ponytail` \| `bun` \| `none` |  |
+
+### person.setBody
+
+Change a realistic person's body: gender (0 female … 1 male), age in years (11 … 90), weight, muscle and height (-1 … 1). Joints follow; the feet stay on the ground.  
+_changes the scene_ · MCP tool `person_setBody`
+
+| Param | Type | |
+| --- | --- | --- |
+| `age` | number | Years, 11 … 90. |
+| `gender` | number | 0 = female … 1 = male. |
+| `height` | number | -1 short … 0 average … 1 tall. |
+| `id` **required** | string | The person (root, joint or part). |
+| `muscle` | number | -1 slight … 0 average … 1 muscular. |
+| `weight` | number | -1 thin … 0 average … 1 heavy. |
+
+### person.setOutfit
+
+Change a realistic person's clothes and hair length (top + sleeve length, trousers / shorts + leg length, shoes, hair) and part colours.  
+_changes the scene_ · MCP tool `person_setOutfit`
+
+| Param | Type | |
+| --- | --- | --- |
+| `apron` | boolean | Wear a bib apron. |
+| `bottom` | boolean | Wear trousers / shorts. |
+| `colors` | object | Part colours, linear RGB 0..1. |
+| `hair` | number | Hair length: 0 none, 0.3 cropped, 0.5 short, 0.75 chin, 1 shoulder, 1.4 long. |
+| `id` **required** | string | The person (root, joint or part). |
+| `legs` | number | 0 briefs, 0.6 shorts, 1 knee, 2 full-length trousers. |
+| `shoes` | boolean |  |
+| `sleeves` | number | 0 sleeveless, 0.35 short sleeves, 1 elbow, 2 long sleeves. |
+| `top` | boolean | Wear a top. |
+
+### person.setExpression
+
+Give a realistic person a facial expression (smile, laugh, surprised, angry, sad, talking… see person.expressions), optionally with raw expression units. With keyframeAt the expression is keyed on the timeline and the face cross-fades between keys.  
+_changes the scene_ · MCP tool `person_setExpression`
+
+| Param | Type | |
+| --- | --- | --- |
+| `amount` | number | How strong, 0 … 1.5 (default 1). |
+| `expression` | string | A named expression (see `person.expressions`). |
+| `id` **required** | string | The person (root, joint or part). |
+| `keyframeAt` | number | Keyframe the named expression at this frame: between keys the face cross-fades from one expression to the next. Once a person has expression keys, their face follows them. |
+| `units` | object | Raw expression units with weights, added on top of `expression` (not with `keyframeAt`). |
+
+### person.expressions
+
+Named facial expressions and the raw expression units person.setExpression accepts.  
+_query_ · MCP tool `person_expressions`
+
+No params.
+
+### pose.hand
+
+Shape a realistic person's hand(s): relaxed, open, spread, fist, grip, pinch, point, thumbsUp, peace, ok, claw.  
+_changes the scene_ · MCP tool `pose_hand`
+
+| Param | Type | |
+| --- | --- | --- |
+| `frame` | number |  |
+| `hand` | `both` \| `left` \| `right` | Which hand (default both). |
+| `id` **required** | string | The person (root, joint or part). |
+| `keyframeAt` | number |  |
+| `shape` **required** | string | Hand shape (see `pose.list`): relaxed, open, spread, fist, grip, pinch, point, thumbsUp, peace, ok, claw. |
+
+### person.get
+
+A person's kind (mannequin or realistic), and for realistic people the body, outfit, expression and height.  
+_query_ · MCP tool `person_get`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` **required** | string | The person (root, joint or part). |
 
 ### person.lookAt
 
@@ -1187,8 +1261,8 @@ _changes the scene_ · MCP tool `keyframe_set`
 | `frame` **required** | number |  |
 | `id` **required** | string |  |
 | `interp` | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` | `ease` (default), `linear` or `step`: how to move from this key to the next. |
-| `property` **required** | `transform` \| `focalLength` | `transform` (any entity) or `focalLength` (cameras). |
-| `value` | object \| object | Value to key. Default: the entity's current value. |
+| `property` **required** | `transform` \| `focalLength` \| `expression` | `transform` (any entity) or `focalLength` (cameras). |
+| `value` | object \| object \| object | Value to key. Default: the entity's current value. |
 
 ### keyframe.delete
 
@@ -1199,7 +1273,7 @@ _changes the scene_ · MCP tool `keyframe_delete`
 | --- | --- | --- |
 | `frame` **required** | number |  |
 | `id` **required** | string |  |
-| `property` **required** | `transform` \| `focalLength` |  |
+| `property` **required** | `transform` \| `focalLength` \| `expression` |  |
 
 ### keyframe.list
 
@@ -1242,7 +1316,7 @@ _changes the scene_ · MCP tool `keyframe_move`
 | --- | --- | --- |
 | `from` **required** | number | Frame of the key to move. |
 | `id` **required** | string |  |
-| `property` **required** | `transform` \| `focalLength` |  |
+| `property` **required** | `transform` \| `focalLength` \| `expression` |  |
 | `to` **required** | number | Frame to move it to (replaces a key already there). |
 
 ### keyframe.retime
@@ -1269,7 +1343,7 @@ _changes the scene_ · MCP tool `keyframe_setInterp`
 | `frame` **required** | number |  |
 | `id` **required** | string |  |
 | `interp` **required** | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` | step, linear, ease, easeIn, easeOut or overshoot: how to move from this key to the next. |
-| `property` **required** | `transform` \| `focalLength` |  |
+| `property` **required** | `transform` \| `focalLength` \| `expression` |  |
 
 
 ## Timeline and shots
