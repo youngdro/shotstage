@@ -7,6 +7,7 @@
 mod files;
 pub mod hub;
 pub mod i18n;
+mod mp4;
 mod storyboard;
 mod thumbs;
 mod ui;

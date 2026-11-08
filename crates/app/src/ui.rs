@@ -848,6 +848,8 @@ pub struct EditorApp {
     safe_areas: bool,
     /// Result of a background "save frame".
     saved: crate::files::Outbox,
+    /// The video being exported, if any.
+    video: crate::files::VideoProgress,
     /// Key every edit at the current frame.
     auto_key: bool,
     key_drag: Option<KeyDrag>,
@@ -940,6 +942,7 @@ impl EditorApp {
             show_console: false,
             image_mode: None,
             saved: Default::default(),
+            video: Default::default(),
             safe_areas: false,
             thumbs: None,
             reference_for: None,
@@ -1992,6 +1995,7 @@ impl eframe::App for EditorApp {
             }
         }
         crate::files::take_dropped(ui.ctx(), &self.incoming);
+        self.video_progress(ui.ctx());
         self.autosave(ui.ctx());
         let saved = self.saved.borrow_mut().take();
         match saved {
@@ -4372,7 +4376,7 @@ impl EditorApp {
             ui.weak(crate::lf!("{} shots", "{} 个镜头", shots.len()));
             ui.menu_button(tr("Export…"), |ui| self.sheet_menu(ui))
                 .response
-                .on_hover_text(tr("Save the shots for the crew: a shot sheet (PDF or picture) or one HTML page"));
+                .on_hover_text(tr("Save a video of the animation, or the shots for the crew: a shot sheet (PDF or picture) or one HTML page"));
         });
         egui::ScrollArea::horizontal().id_salt("storyboard").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -4462,14 +4466,32 @@ impl EditorApp {
         ui.add_space(2.0);
     }
 
-    /// The shot sheet exports (and the HTML storyboard), for the Export menus.
+    /// The video exports, the shot sheets and the HTML storyboard, for the Export menus.
     fn sheet_menu(&mut self, ui: &mut egui::Ui) {
         let scene = self.scene();
-        ui.weak(tr("Shots, for the crew"));
         if scene.timeline.shots.is_empty() && scene.active_camera.is_none() {
-            ui.weak(tr("Add a camera or a shot first"));
+            ui.weak(tr("Videos and shot sheets: add a camera or a shot first"));
             return;
         }
+        ui.weak(tr("Video of the whole timeline, through the shot cameras"));
+        let busy = self.video.borrow().is_some();
+        for (label, tip, pass, width) in [
+            ("Video 720p (MP4)", "The animation as a reference video, cut between the shots", "clay", 1280),
+            ("Video 1080p (MP4)", "The animation as a reference video, cut between the shots", "clay", 1920),
+            (
+                "Depth video (MP4)",
+                "Near is white, far is black, one range for the whole video: the depth control of video models",
+                "depth",
+                1280,
+            ),
+        ] {
+            if ui.add_enabled(!busy, egui::Button::new(tr(label))).on_hover_text(tr(tip)).clicked() {
+                self.export_video(pass, width);
+                ui.close();
+            }
+        }
+        ui.separator();
+        ui.weak(tr("Shots, for the crew"));
         for (label, tip, format, layout) in [
             (
                 "Shot sheet (PDF)",
@@ -4494,6 +4516,47 @@ impl EditorApp {
             self.export_board();
             ui.close();
         }
+    }
+
+    /// Render the timeline through the shot cameras as an MP4 (`pass`: clay or depth).
+    fn export_video(&mut self, pass: &str, width: u32) {
+        let t = self.scene().timeline.clone();
+        let name = format!("shotstage_{pass}_{}p.mp4", width * 9 / 16);
+        self.toast(tr("Rendering the video…"));
+        crate::files::save_video(
+            &self.hub,
+            json!({ "passes": [pass], "width": width, "start": t.start, "end": t.end }),
+            name,
+            &self.video,
+            &self.saved,
+        );
+    }
+
+    /// Progress of a video export, with a button to stop it.
+    fn video_progress(&mut self, ctx: &egui::Context) {
+        let Some(job) = self.video.borrow().clone() else { return };
+        egui::Window::new(tr("Exporting video"))
+            .id(egui::Id::unique("video_export"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -96.0])
+            .show(ctx, |ui| {
+                let f = if job.total > 0 { job.done as f32 / job.total as f32 } else { 0.0 };
+                ui.add(egui::ProgressBar::new(f).desired_width(260.0).text(crate::lf!(
+                    "Frame {} of {}",
+                    "第 {} / {} 帧",
+                    job.done,
+                    job.total
+                )));
+                if job.cancel {
+                    ui.weak(tr("Stopping…"));
+                } else if ui.button(tr("Cancel")).clicked()
+                    && let Some(j) = self.video.borrow_mut().as_mut()
+                {
+                    j.cancel = true;
+                }
+            });
+        ctx.request_repaint();
     }
 
     /// Render and save the shot sheet, labels in the interface language.

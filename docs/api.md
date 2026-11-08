@@ -1608,7 +1608,7 @@ _query · needs gpu_ · MCP tool `render_shotSheet`
 
 ### render.sequence
 
-Render every frame of a range through the shot cameras (clay / depth / normal; depth uses one range for the whole sequence so it does not flicker) plus per-frame camera data, as control sequences for video models. With `out` writes numbered PNGs, camera.json and, with `video`, MP4s (ffmpeg).  
+Render every frame of a range through the shot cameras (clay / depth / normal; depth uses one range for the whole sequence so it does not flicker) plus per-frame camera data, as control sequences for video models. With `out` writes numbered PNGs, camera.json and, with `video`, MP4s (ffmpeg); in the browser `video` returns MP4s (base64) instead of the frames.  
 _query · needs gpu_ · MCP tool `render_sequence`
 
 | Param | Type | |
@@ -1619,7 +1619,7 @@ _query · needs gpu_ · MCP tool `render_sequence`
 | `passes` | array | Passes. Default `["clay"]`. |
 | `start` | integer | First frame. Default: the timeline start. |
 | `step` | integer | Render every n-th frame. Default 1. |
-| `video` | boolean | Also encode `<pass>.mp4` with ffmpeg (CLI / MCP, when ffmpeg is installed). |
+| `video` | boolean | Also make a video of each pass: `<pass>.mp4` in `out` with ffmpeg (CLI / MCP, when ffmpeg is installed); in the browser an MP4 per pass comes back as base64 in `videos` (WebCodecs), instead of the frames. Every frame then has the first camera's shape, in even pixels. |
 | `width` | integer | Picture width (16..=4096). Default 1280 (640 in the browser, where frames come back inline). |
 
 

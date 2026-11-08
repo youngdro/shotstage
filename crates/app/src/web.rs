@@ -307,6 +307,27 @@ async fn render_many(hub: &SharedHub, command: &str, params: Value) -> Result<Va
         return shotstage_commands::sheet::finish_sheet(&plan, &pngs).map_err(err_js);
     }
     let plan = host::sequence_plan(&scene, params, 640).map_err(err_js)?;
+    if plan.out.is_some() {
+        return Err(err_js(host::needs_files(command, "out")));
+    }
+    if plan.video {
+        // one MP4 per pass, encoded here (WebCodecs), instead of the frames
+        let mut videos = vec![];
+        for (i, pass) in plan.passes.iter().enumerate() {
+            let mp4 = crate::files::encode_video(hub, &plan, i, None)
+                .await
+                .map_err(|e| err_js(CommandError::new("failed", e)))?;
+            videos.push(json!({
+                "pass": host::pass_name(*pass), "mimeType": "video/mp4",
+                "data": shotstage_commands::model::encode(&mp4), "bytes": mp4.len(),
+            }));
+        }
+        let snap = &plan.frames[0].snapshots[0].1;
+        return Ok(json!({
+            "fps": plan.fps, "frames": plan.frames.len(), "width": snap["width"], "height": snap["height"],
+            "depthRange": plan.depth_range, "videos": videos, "cameras": host::sequence_cameras(&plan),
+        }));
+    }
     let mut sink = host::SequenceSink::new(plan).map_err(err_js)?;
     for (i, pass, snap) in sink.jobs() {
         let png = render_png(hub, snap).await?;

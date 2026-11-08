@@ -54,7 +54,7 @@ pub fn host_commands() -> Vec<HostCommand> {
         },
         HostCommand {
             id: SEQUENCE_COMMAND,
-            summary: "Render every frame of a range through the shot cameras (clay / depth / normal; depth uses one range for the whole sequence so it does not flicker) plus per-frame camera data, as control sequences for video models. With `out` writes numbered PNGs, camera.json and, with `video`, MP4s (ffmpeg).",
+            summary: "Render every frame of a range through the shot cameras (clay / depth / normal; depth uses one range for the whole sequence so it does not flicker) plus per-frame camera data, as control sequences for video models. With `out` writes numbered PNGs, camera.json and, with `video`, MP4s (ffmpeg); in the browser `video` returns MP4s (base64) instead of the frames.",
             needs: &[GPU],
             schema: schema_of::<SequenceParams>,
         },
@@ -725,7 +725,9 @@ pub struct SequenceParams {
     pub camera: Option<String>,
     /// Folder for `<pass>/00000.png`, camera.json and the videos (CLI / MCP; required there).
     pub out: Option<String>,
-    /// Also encode `<pass>.mp4` with ffmpeg (CLI / MCP, when ffmpeg is installed).
+    /// Also make a video of each pass: `<pass>.mp4` in `out` with ffmpeg (CLI / MCP, when ffmpeg
+    /// is installed); in the browser an MP4 per pass comes back as base64 in `videos` (WebCodecs),
+    /// instead of the frames. Every frame then has the first camera's shape, in even pixels.
     pub video: Option<bool>,
 }
 
@@ -807,6 +809,16 @@ pub fn sequence_plan(scene: &Scene, params: Value, default_width: u32) -> CmdRes
         })
         .fold(0.0f32, f32::max)
         .max(1.0);
+    // a video needs one even size for every frame (H.264 is 4:2:0): the first camera's shape
+    let video = p.video.unwrap_or(false);
+    let (width, video_height) = if video {
+        let cam = cam_at(a).ok_or_else(|| CommandError::new("failed", "no camera: add one (or a shot) first"))?;
+        let aspect = camera_data_at(scene, &cam, a as f32)?.aspect;
+        let w = (width & !1).max(16);
+        (w, Some((((w as f32 / aspect) / 2.0).round() as u32 * 2).clamp(16, 4096)))
+    } else {
+        (width, None)
+    };
     let mut frames = vec![];
     let mut cameras = vec![];
     for f in (a..=b).step_by(step as usize) {
@@ -815,6 +827,9 @@ pub fn sequence_plan(scene: &Scene, params: Value, default_width: u32) -> CmdRes
             .iter()
             .map(|pass| {
                 let mut s = json!({ "camera": cam, "frame": f, "pass": pass, "width": width });
+                if let Some(h) = video_height {
+                    s["height"] = json!(h);
+                }
                 if *pass == SnapshotPass::Depth {
                     s["depthRange"] = json!([0.0, far]);
                 }
@@ -830,16 +845,7 @@ pub fn sequence_plan(scene: &Scene, params: Value, default_width: u32) -> CmdRes
     if frames.len() * passes.len() > 20_000 {
         return Err(CommandError::invalid("more than 20000 pictures; use a shorter range or `step`"));
     }
-    Ok(SequencePlan {
-        fps: t.fps,
-        width,
-        passes,
-        frames,
-        cameras,
-        depth_range: [0.0, far],
-        out: p.out,
-        video: p.video.unwrap_or(false),
-    })
+    Ok(SequencePlan { fps: t.fps, width, passes, frames, cameras, depth_range: [0.0, far], out: p.out, video })
 }
 
 /// `camera.json` of a sequence.
