@@ -209,6 +209,9 @@ struct U {
 @group(0) @binding(1) var shadow_tex: texture_depth_2d;
 @group(0) @binding(2) var shadow_smp: sampler_comparison;
 
+// Angle the shadow blur disc is turned by at this pixel.
+var<private> spin: f32 = 0.0;
+
 // How much of a shadow slot's light reaches a point: 1 = lit, 0 = in shadow. Edges are
 // blurred over a disc of `extra` + the scene's softness texels.
 fn shadow_vis(wp: vec3<f32>, n: vec3<f32>, slot: i32, extra: f32, ndl: f32) -> f32 {
@@ -238,9 +241,10 @@ fn shadow_vis(wp: vec3<f32>, n: vec3<f32>, slot: i32, extra: f32, ndl: f32) -> f
         vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893), vec2<f32>(0.507, 0.064),
         vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598),
     );
+    let rot = mat2x2<f32>(cos(spin), sin(spin), -sin(spin), cos(spin));
     var sum = 0.0;
     for (var k = 0; k < 12; k = k + 1) {
-        sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, clamp(uv + disc[k] * r, lo, hi), depth);
+        sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, clamp(uv + rot * disc[k] * r, lo, hi), depth);
     }
     return mix(1.0, sum / 12.0, u.shadow_params.y);
 }
@@ -307,7 +311,9 @@ fn eye_pos() -> vec3<f32> {
     return -(transpose(r) * u.view[3].xyz);
 }
 
-fn lit(c: vec3<f32>, n: vec3<f32>, wp: vec3<f32>, mat: u32) -> vec4<f32> {
+fn lit(c: vec3<f32>, n: vec3<f32>, wp: vec3<f32>, mat: u32, px: vec2<f32>) -> vec4<f32> {
+    // turn the blur disc per pixel, so soft edges dither instead of showing copies
+    spin = 6.2831853 * fract(52.9829189 * fract(dot(floor(px), vec2<f32>(0.06711056, 0.00583715))));
     // the shadow of the studio key, or of the sky's sun when no light casts one
     let vis = shadow_vis(wp, n, i32(u.env_params.z), 0.0, 0.5);
     let count = u32(u.light_params.x + 0.5);
@@ -368,7 +374,7 @@ fn lit(c: vec3<f32>, n: vec3<f32>, wp: vec3<f32>, mat: u32) -> vec4<f32> {
         let vn = normalize((u.view * vec4<f32>(n, 0.0)).xyz);
         return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
     }
-    return lit(i.c, n, i.wp, i.mat);
+    return lit(i.c, n, i.wp, i.mat, i.clip.xy);
 }
 
 @group(1) @binding(0) var tex_tex: texture_2d<f32>;
@@ -405,7 +411,7 @@ struct TexOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @
         let vn = normalize((u.view * vec4<f32>(n, 0.0)).xyz);
         return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
     }
-    return lit(t.rgb * i.c, n, i.wp, 0u);
+    return lit(t.rgb * i.c, n, i.wp, 0u, i.clip.xy);
 }
 
 @group(1) @binding(0) var img_tex: texture_2d<f32>;

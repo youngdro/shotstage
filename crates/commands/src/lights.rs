@@ -301,15 +301,15 @@ fn light_preset(scene: &mut Scene, p: PresetParams) -> CmdResult<Value> {
             vec![("spot", 10.0, 65.0, s)]
         }
         LightPreset::FreshCounter => {
-            sky = Some((Sky::Color, [0.95, 0.95, 0.92], 1.0, false));
+            sky = Some((Sky::Color, [0.95, 0.95, 0.92], 0.45, false));
             let panel = |i: f32| {
                 let mut l = tinted(area(i, 1.0), shotstage_core::light::kelvin_to_rgb(4500.0));
                 l.size = [(size * 1.4).clamp(0.6, 4.0), 0.4];
                 l
             };
             vec![
-                ("top_front", 0.0, 65.0, panel(1.1)),
-                ("top_back", 180.0, 70.0, fill(panel(0.6))),
+                ("top_front", 0.0, 65.0, panel(0.8)),
+                ("top_back", 180.0, 70.0, fill(panel(0.45))),
                 ("front", 0.0, 5.0, fill(tinted(area(0.3, soft), cool))),
             ]
         }
@@ -326,8 +326,8 @@ fn light_preset(scene: &mut Scene, p: PresetParams) -> CmdResult<Value> {
             vec![]
         }
         LightPreset::Night => {
-            sky = Some((Sky::Night, [1.0; 3], 1.0, true));
-            vec![("moon", -60.0, 35.0, sun(0.35, [0.7, 0.8, 1.0]))]
+            sky = Some((Sky::Night, [1.0; 3], 2.0, true));
+            vec![("moon", -60.0, 35.0, sun(0.7, [0.7, 0.8, 1.0]))]
         }
         LightPreset::Clear => unreachable!(),
     };
