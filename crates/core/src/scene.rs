@@ -143,6 +143,9 @@ pub struct Scene {
     /// Reference pictures laid over a camera's view to match a shot, by camera id.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub references: std::collections::BTreeMap<String, CameraReference>,
+    /// Sky light, background and shadow settings.
+    #[serde(default, skip_serializing_if = "crate::environment::Environment::is_default")]
+    pub environment: crate::environment::Environment,
 }
 
 /// A picture shown over a camera's view (a storyboard frame, a reference photo).
@@ -163,6 +166,7 @@ impl Default for Scene {
             active_camera: None,
             assets: Default::default(),
             references: Default::default(),
+            environment: Default::default(),
         }
     }
 }

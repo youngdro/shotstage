@@ -32,7 +32,10 @@ props and backdrops, furniture), entity_place (rest on / next to / drop), entity
 entity_attach (props in hand). model_import / image_import take file paths.
 3. People: pose_set (pose_list), pose_aim, person_lookAt; realistic people also take \
 person_setBody / person_setOutfit / person_setExpression when available.
-4. Light: light_preset (threePoint, productSoftbox, goldenHour...).
+4. Light: light_preset (threePoint, loop, clamshell, productSoftbox, highKey, freshCounter, lowKey, \
+neon, goldenHour, daylight, overcast...; outdoor and backdrop presets set the sky too). \
+environment_set picks a sky (day, sunset, overcast, night, softbox, a colour backdrop) or \
+environment_import takes an HDRI; light_fromEnvironment adds a matching sun; light_shadows tunes shadows.
 5. Camera: camera_frame {subject, size: closeUp|medium|full|wide..., angle, side} places the \
 camera for you; check it with render_snapshot (you get the image) and camera_describe.
 6. Motion: motion_apply {preset, target, subject} (motion_list: push-ins, orbits, crane, \

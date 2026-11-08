@@ -124,13 +124,15 @@
 
 ## 灯光
 
-灯光是可选的：场景里没有灯时，用的是均匀的白模光；一旦放了灯，Clay 画面和截图就由这些灯照亮。最亮的那盏太阳光 / 聚光 / 面光会投下柔和的阴影（没有灯时由白模主光投影），物体和地面的接触关系一目了然；视口工具栏的 **Shadows** 可以关掉。视口工具栏的 **Studio light** 可以随时切回白模光对比。
+灯光是可选的：场景里没有灯也没有天空时，用的是均匀的白模光；一旦放了灯或选了天空，Clay 画面和截图就由它们照亮。视口工具栏的 **Studio light** 可以随时切回白模光对比。
 
-- 左侧 **Lights** 分组：太阳光、点光、聚光、面光（柔光箱 / 窗户）可以拖进场景，会悬在落点上方并对准它；右侧可以调颜色（暖 / 中性 / 冷）、强度、聚光角度、柔和度和面光尺寸。
-- 一键布光：三点布光、伦勃朗光、产品柔光、逆光、黄金时刻、日光，以及"No lights"（清除所有灯）。会围绕当前选中的物体、按当前镜头的方向布置。
+- 左侧 **Lights** 分组：太阳光、点光、聚光、面光（柔光箱 / 窗户）可以拖进场景，会悬在落点上方并对准它；右侧可以调颜色或色温（2700K 暖光 … 7500K 阴天）、强度、聚光角度、柔和度、面光尺寸，以及这盏灯是否投影。
+- **阴影**：最亮的四盏投影灯同时投下阴影（太阳光、聚光、面光、点光都行；面光的影子更软）。**Sky ▾** 里可以整体开关阴影、调深浅和柔和度；视口 **View ▾ › Shadows** 只影响视口显示。没有灯时由白模主光或天空里的太阳投下柔和的影子。
+- **天空 / 环境光（Sky ▾）**：内置 Day（晴天）、Sunset（日落）、Overcast（阴天）、Night（夜晚）、Softbox（影棚柔光箱）和 Color（单色无缝背景纸，比如白底、黑底、绿幕）；也可以 **Import HDRI…** 导入 `.hdr` 文件或 2:1 全景图（直接把 `.hdr` 拖进视口也行）。天空会从四面八方柔和地照亮场景，可以显示在背景里，可调染色、亮度和旋转（旋转会带着天空里的太阳一起转）。**Add matching sun** 会在天空最亮的地方加一盏同色太阳光，让影子和天空对得上。
+- **一键布光（18 种）**：人像有三点布光、Loop、伦勃朗、蝴蝶光、Clamshell 美妆光、侧光（Split）；产品和门店有产品柔光、高调白底（High key）、生鲜柜台（Counter）；氛围有低调（Low key）、逆光、窗光、霓虹、舞台追光；户外有黄金时刻、日光、阴天、夜晚；以及 "No lights"（清除所有灯和天空）。会围绕当前选中的物体、按当前镜头的方向布置；户外和背景类预设会顺带设好对应的天空，并把天空里的太阳转到和太阳光同一个方向。
 - 产品拍摄里的 **Softbox** 预制件本身就是一盏面光。
 - 选中太阳光 / 聚光 / 面光时，视口里会显示它照向的那个点，直接拖动就能改变照射方向。
-- 命令：`entity.create`（`type: "light"`）、`light.set`、`light.preset`、`light.list`；灯沿自身 -Z 方向照射，可以用 `camera.lookAt` 对准目标。
+- 命令：`entity.create`（`type: "light"`）、`light.set`、`light.preset`、`light.list`、`light.shadows`、`light.fromEnvironment`、`environment.set`、`environment.import`、`environment.list`；灯沿自身 -Z 方向照射，可以用 `camera.lookAt` 对准目标。
 
 ## 动画与运镜
 
@@ -269,7 +271,8 @@ claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json -
 | 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `pose.hand` `person.setHair` `person.setBody` `person.setOutfit` `person.setExpression` `person.expressions` `person.get` |
 | 模型 | `model.import` `model.export`（都可以用 `path`） |
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
-| 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
+| 灯光 | `light.set` `light.preset` `light.list` `light.shadows` `light.fromEnvironment`（创建用 `entity.create` 的 `type: "light"`） |
+| 天空 / 环境光 | `environment.set` `environment.import`（HDRI）`environment.list` |
 | 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG） `render.storyboard`（分镜） `render.sequence`（逐帧序列 + 相机数据，可出 MP4） |
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.cut` `shot.set` `shot.delete` |

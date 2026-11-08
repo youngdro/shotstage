@@ -11,14 +11,15 @@ use egui::Pos2;
 pub type Inbox = Rc<RefCell<Vec<(String, Vec<u8>, Option<Pos2>)>>>;
 
 /// File extensions the editor can import.
-pub const IMPORTABLE: &[&str] = &["glb", "gltf", "obj", "stl", "fbx", "blend", "png", "jpg", "jpeg", "webp", "json"];
+pub const IMPORTABLE: &[&str] =
+    &["glb", "gltf", "obj", "stl", "fbx", "blend", "png", "jpg", "jpeg", "webp", "hdr", "json"];
 
 /// Ask for files to import.
 pub fn pick(inbox: &Inbox, ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = ctx;
-        if let Some(paths) = rfd::FileDialog::new().add_filter("Models and images", IMPORTABLE).pick_files() {
+        if let Some(paths) = rfd::FileDialog::new().add_filter("Models, images and HDRIs", IMPORTABLE).pick_files() {
             for p in paths {
                 if let Ok(bytes) = std::fs::read(&p) {
                     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("model").to_string();
@@ -32,7 +33,7 @@ pub fn pick(inbox: &Inbox, ctx: &egui::Context) {
         let (inbox, ctx) = (inbox.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(files) =
-                rfd::AsyncFileDialog::new().add_filter("Models and images", IMPORTABLE).pick_files().await
+                rfd::AsyncFileDialog::new().add_filter("Models, images and HDRIs", IMPORTABLE).pick_files().await
             {
                 for f in files {
                     let bytes = f.read().await;

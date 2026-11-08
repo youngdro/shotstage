@@ -47,17 +47,33 @@ struct Uniforms {
     view: [f32; 16],
     /// x = pass, y = depth near, z = depth far, w = 1 when overlays dim with depth
     params: [f32; 4],
-    /// x = number of scene lights (0 = studio light), y = ambient
+    /// x = number of scene lights, y = studio ambient, z = 1 when the sky lights the scene,
+    /// w = how much the ambient shadow darkens the sky light
     light_params: [f32; 4],
-    /// World to the shadow map of the one shadow-casting light.
-    shadow_vp: [f32; 16],
-    /// x = shadows on, y = depth bias, z = index of the shadow light (-1 = studio key), w = texel
+    /// Clip to world, for the background's view rays.
+    inv_view_proj: [f32; 16],
+    /// x = 1 when the sky is drawn behind the scene, y = sky rotation (radians), z = shadow
+    /// slot that darkens the ambient / studio light (-1 none)
+    env_params: [f32; 4],
+    /// Sky irradiance, 9 spherical-harmonic coefficients (rgb).
+    sh: [[f32; 4]; 9],
+    /// x = shadows on, y = strength, z = blur radius in atlas texels, w = atlas texel size
     shadow_params: [f32; 4],
+    /// World to shadow clip, per shadow slot.
+    shadow_vp: [[f32; 16]; MAX_SHADOWS],
+    /// Where each slot sits in the atlas: xy = offset, z = scale, w = depth bias.
+    shadow_tile: [[f32; 4]; MAX_SHADOWS],
+    /// x = how far to push a point off its surface before the lookup (metres)
+    shadow_bias: [[f32; 4]; MAX_SHADOWS],
     lights: [GpuLight; MAX_LIGHTS],
 }
 
-/// Shadow map size in texels.
+/// Shadow atlas size in texels: one light gets all of it, more share it as a 2×2 grid. (2048
+/// is the largest texture WebGL2 guarantees.)
 const SHADOW_SIZE: u32 = 2048;
+
+/// Most lights that cast shadows at once (the brightest win).
+pub const MAX_SHADOWS: usize = 4;
 
 /// Most lights the clay pass shades with (the brightest are kept).
 pub const MAX_LIGHTS: usize = 8;
@@ -71,22 +87,33 @@ struct GpuLight {
     dir: [f32; 4],
     /// rgb = colour × intensity, w = cos of the inner cone half angle
     rad: [f32; 4],
+    /// x = shadow slot (-1 none), y = extra blur in texels (big lights cast softer shadows)
+    shadow: [f32; 4],
 }
 
-/// The light that casts shadows and its view of the scene: the brightest sun, spot or area
-/// light, else the studio key. Returns (world -> shadow clip, light index or -1, depth bias).
-fn shadow_setup(geo: &geometry::Geometry, lights: &[GpuLight]) -> Option<(Mat4, f32, f32)> {
+/// The shadow maps to draw this frame.
+#[derive(Default)]
+struct ShadowPlan {
+    /// World -> shadow clip, and the size of one full-atlas texel at the subject (metres).
+    slots: Vec<(Mat4, f32)>,
+    /// Slot whose shadow darkens the ambient light (studio key or the sky's sun), and how much.
+    ambient: Option<(usize, f32)>,
+}
+
+/// Choose the shadow casters: the brightest lights that cast shadows (up to four); with none,
+/// the studio key or the sky's brightest direction darkens the ambient light instead.
+fn shadow_plan(
+    geo: &geometry::Geometry,
+    lights: &mut [GpuLight],
+    casts: &[bool],
+    ambient_dir: Option<(glam::Vec3, f32)>,
+) -> ShadowPlan {
     use glam::Vec3;
+    let mut plan = ShadowPlan::default();
     let mut it = geo.solid_positions().map(Vec3::from_array);
-    let first = it.next()?;
+    let Some(first) = it.next() else { return plan };
     let (lo, hi) = it.fold((first, first), |(a, b), p| (a.min(p), b.max(p)));
     let (center, radius) = ((lo + hi) / 2.0, ((hi - lo).length() / 2.0).max(0.5));
-    // brightest light that has a direction worth shadowing (point lights are skipped)
-    let pick = lights
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.pos[3] != 1.0)
-        .max_by(|a, b| (a.1.rad[0] + a.1.rad[1] + a.1.rad[2]).total_cmp(&(b.1.rad[0] + b.1.rad[1] + b.1.rad[2])));
     let up_for = |d: Vec3| if d.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
     let ortho = |dir: Vec3| {
         let eye = center - dir * (radius * 2.0 + 1.0);
@@ -94,31 +121,52 @@ fn shadow_setup(geo: &geometry::Geometry, lights: &[GpuLight]) -> Option<(Mat4, 
         let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.01, radius * 4.0 + 2.0);
         proj * view
     };
-    match pick {
-        None if !lights.is_empty() => None,
-        None => Some((ortho(-Vec3::new(0.45, 0.8, 0.4).normalize()), -1.0, 0.0015)),
-        Some((i, l)) => {
-            let dir = Vec3::new(l.dir[0], l.dir[1], l.dir[2]).normalize_or_zero();
-            if l.pos[3] == 0.0 {
-                return Some((ortho(dir), i as f32, 0.0015));
-            }
-            // spot and area lights: a perspective view from the light
-            let pos = Vec3::new(l.pos[0], l.pos[1], l.pos[2]);
-            let half = l.dir[3].clamp(-1.0, 1.0).acos();
-            let fov = (half * 2.0 * 1.1).clamp(0.3, 2.8);
-            let far = (pos - center).length() + radius + 1.0;
-            let view = Mat4::look_at_rh(pos, pos + dir, up_for(dir));
-            Some((Mat4::perspective_rh(fov, 1.0, 0.05, far) * view, i as f32, 0.0005))
+    for (l, cast) in lights.iter_mut().zip(casts) {
+        l.shadow[0] = -1.0;
+        if !cast || plan.slots.len() >= MAX_SHADOWS || l.rad[0] + l.rad[1] + l.rad[2] <= 0.0 {
+            continue;
         }
+        let dir = Vec3::new(l.dir[0], l.dir[1], l.dir[2]).normalize_or(Vec3::NEG_Y);
+        let pos = Vec3::new(l.pos[0], l.pos[1], l.pos[2]);
+        let texel = |width: f32| width / SHADOW_SIZE as f32;
+        let vp = match l.pos[3] as u32 {
+            0 => (ortho(dir), texel(radius * 2.0)),
+            kind => {
+                // look at the middle of the scene, just wide enough to see all of it; a spot
+                // whose beam is narrower than that looks along its beam instead
+                let to = (center - pos).normalize_or(Vec3::NEG_Y);
+                let d = (center - pos).length().max(1e-3);
+                let reach = if d > radius { (radius / d).asin() * 1.1 } else { 1.3 };
+                let beam = l.dir[3].clamp(-1.0, 1.0).acos();
+                let (look, half) = if kind == 2 && beam < reach { (dir, beam) } else { (to, reach.max(0.2)) };
+                let fov = (half * 2.0).clamp(0.2, 2.6);
+                let dist = (pos - center).length();
+                let far = dist + radius + 1.0;
+                let near = ((dist - radius) * 0.8).clamp(0.05, far * 0.5);
+                let view = Mat4::look_at_rh(pos, pos + look, up_for(look));
+                (Mat4::perspective_rh(fov, 1.0, near, far) * view, texel(2.0 * dist.max(0.5) * (fov / 2.0).tan()))
+            }
+        };
+        l.shadow[0] = plan.slots.len() as f32;
+        plan.slots.push(vp);
     }
+    if plan.slots.is_empty()
+        && let Some((dir, amount)) = ambient_dir
+    {
+        plan.ambient = Some((0, amount));
+        plan.slots.push((ortho(dir), radius * 2.0 / SHADOW_SIZE as f32));
+    }
+    plan
 }
 
-fn gpu_lights(scene: &Scene, frame: f32) -> (usize, [GpuLight; MAX_LIGHTS]) {
+/// The scene's lights, brightest first, with whether each casts shadows.
+fn gpu_lights(scene: &Scene, frame: f32) -> (usize, [GpuLight; MAX_LIGHTS], [bool; MAX_LIGHTS]) {
     use shotstage_core::LightKind;
     let mut ls = shotstage_core::eval::lights_at(scene, frame);
     ls.sort_by(|a, b| b.radiance.iter().sum::<f32>().total_cmp(&a.radiance.iter().sum::<f32>()));
     let mut out = [GpuLight::default(); MAX_LIGHTS];
-    for (o, l) in out.iter_mut().zip(&ls) {
+    let mut casts = [false; MAX_LIGHTS];
+    for ((o, c), l) in out.iter_mut().zip(casts.iter_mut()).zip(&ls) {
         let kind = match l.kind {
             LightKind::Sun => 0.0,
             LightKind::Point => 1.0,
@@ -128,37 +176,89 @@ fn gpu_lights(scene: &Scene, frame: f32) -> (usize, [GpuLight; MAX_LIGHTS]) {
         let [px, py, pz] = l.position;
         let [dx, dy, dz] = l.direction;
         let [r, g, b] = l.radiance;
-        *o = GpuLight { pos: [px, py, pz, kind], dir: [dx, dy, dz, l.cos_outer], rad: [r, g, b, l.cos_inner] };
+        *o = GpuLight {
+            pos: [px, py, pz, kind],
+            dir: [dx, dy, dz, l.cos_outer],
+            rad: [r, g, b, l.cos_inner],
+            shadow: [-1.0, (l.size * 4.0).min(12.0), 0.0, 0.0],
+        };
+        *c = l.cast_shadows;
     }
-    (ls.len().min(MAX_LIGHTS), out)
+    (ls.len().min(MAX_LIGHTS), out, casts)
+}
+
+/// The sky as the GPU sees it: the background texture, and its lighting at the last rotation.
+struct EnvCache {
+    key: String,
+    /// Small copy for the lighting maths.
+    small: shotstage_core::environment::EnvMap,
+    background: wgpu::BindGroup,
+    lighting: Option<((f32, f32), shotstage_core::environment::EnvLighting)>,
 }
 
 const SHADER: &str = r#"
-struct L { pos: vec4<f32>, dir: vec4<f32>, rad: vec4<f32> };
-struct U { view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, light_params: vec4<f32>, shadow_vp: mat4x4<f32>, shadow_params: vec4<f32>, lights: array<L, 8> };
+struct L { pos: vec4<f32>, dir: vec4<f32>, rad: vec4<f32>, shadow: vec4<f32> };
+struct U {
+    view_proj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, light_params: vec4<f32>,
+    inv_view_proj: mat4x4<f32>, env_params: vec4<f32>, sh: array<vec4<f32>, 9>,
+    shadow_params: vec4<f32>, shadow_vp: array<mat4x4<f32>, 4>, shadow_tile: array<vec4<f32>, 4>,
+    shadow_bias: array<vec4<f32>, 4>,
+    lights: array<L, 8>,
+};
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var shadow_tex: texture_depth_2d;
 @group(0) @binding(2) var shadow_smp: sampler_comparison;
 
-// How much of the shadow light reaches a point: 1 = lit, 0 = in shadow (3x3 filtered edges).
-fn shadow_vis(wp: vec3<f32>) -> f32 {
-    let lp = u.shadow_vp * vec4<f32>(wp, 1.0);
-    let ndc = lp.xyz / max(lp.w, 1e-5);
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    let depth = ndc.z - u.shadow_params.y;
-    var sum = 0.0;
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            let o = vec2<f32>(f32(x), f32(y)) * u.shadow_params.w * 1.5;
-            sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, uv + o, depth);
-        }
+// How much of a shadow slot's light reaches a point: 1 = lit, 0 = in shadow. Edges are
+// blurred over a disc of `extra` + the scene's softness texels.
+fn shadow_vis(wp: vec3<f32>, n: vec3<f32>, slot: i32, extra: f32, ndl: f32) -> f32 {
+    if (slot < 0 || u.shadow_params.x < 0.5) {
+        return 1.0;
     }
-    let inside = uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 && ndc.z < 1.0 && lp.w > 0.0;
-    return select(1.0, sum / 9.0, inside && u.shadow_params.x > 0.5);
+    let tile = u.shadow_tile[slot];
+    // look up a little off the surface (a few shadow-map texels, more where the light grazes
+    // it) so it does not shadow itself
+    let push = u.shadow_bias[slot].x * (1.0 + extra * 0.25) * (1.0 + 4.0 * (1.0 - clamp(ndl, 0.0, 1.0)));
+    let lp = u.shadow_vp[slot] * vec4<f32>(wp + n * push, 1.0);
+    let ndc = lp.xyz / max(lp.w, 1e-5);
+    let local = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let inside = local.x > 0.0 && local.x < 1.0 && local.y > 0.0 && local.y < 1.0 && ndc.z < 1.0 && lp.w > 0.0;
+    if (!inside) {
+        return 1.0;
+    }
+    let texel = u.shadow_params.w;
+    let uv = tile.xy + local * tile.z;
+    let lo = tile.xy + vec2<f32>(texel);
+    let hi = tile.xy + vec2<f32>(tile.z - texel);
+    let r = (u.shadow_params.z + extra) * texel;
+    let depth = ndc.z - tile.w;
+    var disc = array<vec2<f32>, 12>(
+        vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457),
+        vec2<f32>(-0.203, 0.621), vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480),
+        vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893), vec2<f32>(0.507, 0.064),
+        vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598),
+    );
+    var sum = 0.0;
+    for (var k = 0; k < 12; k = k + 1) {
+        sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, clamp(uv + disc[k] * r, lo, hi), depth);
+    }
+    return mix(1.0, sum / 12.0, u.shadow_params.y);
 }
 
-@vertex fn vs_shadow(v: MeshIn) -> @builtin(position) vec4<f32> {
-    return u.shadow_vp * vec4<f32>(v.pos, 1.0);
+// Light from the sky (spherical harmonics), or the plain studio ambient.
+fn ambient(n: vec3<f32>) -> vec3<f32> {
+    if (u.light_params.z < 0.5) {
+        return vec3<f32>(u.light_params.y * (0.75 + 0.25 * n.y));
+    }
+    let x = n.x;
+    let y = n.y;
+    let z = n.z;
+    var e = u.sh[0].rgb * 0.282095;
+    e = e + u.sh[1].rgb * (0.488603 * y) + u.sh[2].rgb * (0.488603 * z) + u.sh[3].rgb * (0.488603 * x);
+    e = e + u.sh[4].rgb * (1.092548 * x * y) + u.sh[5].rgb * (1.092548 * y * z);
+    e = e + u.sh[6].rgb * (0.315392 * (3.0 * z * z - 1.0)) + u.sh[7].rgb * (1.092548 * x * z);
+    e = e + u.sh[8].rgb * (0.546274 * (x * x - y * y));
+    return max(e, vec3<f32>(0.0));
 }
 
 struct MeshIn { @location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) color: vec3<f32>, @location(3) id: u32 };
@@ -208,13 +308,14 @@ fn eye_pos() -> vec3<f32> {
 }
 
 fn lit(c: vec3<f32>, n: vec3<f32>, wp: vec3<f32>, mat: u32) -> vec4<f32> {
-    let vis = shadow_vis(wp);
+    // the shadow of the studio key, or of the sky's sun when no light casts one
+    let vis = shadow_vis(wp, n, i32(u.env_params.z), 0.0, 0.5);
     let count = u32(u.light_params.x + 0.5);
     let v = normalize(eye_pos() - wp);
     var spec = vec3<f32>(0.0);
-    if (count > 0u) {
-        // scene lights: soft sky ambient plus each light's Lambert term (no shadows)
-        var col = c * (u.light_params.y * (0.75 + 0.25 * n.y));
+    if (count > 0u || u.light_params.z > 0.5) {
+        // sky (or soft studio) ambient plus each light's term, shadowed where it casts
+        var col = c * ambient(n) * mix(1.0, vis, u.light_params.w);
         for (var k = 0u; k < count; k = k + 1u) {
             let l = u.lights[k];
             let kind = u32(l.pos.w + 0.5);
@@ -234,8 +335,8 @@ fn lit(c: vec3<f32>, n: vec3<f32>, wp: vec3<f32>, mat: u32) -> vec4<f32> {
             if (kind == 3u && mat != 1u) {
                 ndl = vec3<f32>(max((dot(n, ldir) + 0.35) / 1.35, 0.0));
             }
-            if (f32(k) == u.shadow_params.z) {
-                att = att * vis;
+            if (att > 0.0) {
+                att = att * shadow_vis(wp, n, i32(l.shadow.x), l.shadow.y, dot(n, ldir));
             }
             col = col + c * l.rad.rgb * ndl * att;
             col = col + l.rad.rgb * specular(n, ldir, v, mat) * att;
@@ -355,6 +456,36 @@ struct LineOut { @builtin(position) clip: vec4<f32>, @location(0) c: vec3<f32> }
 @fragment fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
     return vec4<f32>(i.c, 1.0);
 }
+
+// The sky behind everything: a full-screen triangle looking up the panorama along view rays.
+struct BgOut { @builtin(position) clip: vec4<f32>, @location(0) ndc: vec2<f32> };
+
+@vertex fn vs_bg(@builtin(vertex_index) i: u32) -> BgOut {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - vec2<f32>(1.0);
+    var o: BgOut;
+    o.clip = vec4<f32>(p, 1.0, 1.0);
+    o.ndc = p;
+    return o;
+}
+
+@fragment fn fs_bg(i: BgOut) -> @location(0) vec4<f32> {
+    let a = u.inv_view_proj * vec4<f32>(i.ndc, 0.0, 1.0);
+    let b = u.inv_view_proj * vec4<f32>(i.ndc, 1.0, 1.0);
+    let d = normalize(b.xyz / b.w - a.xyz / a.w);
+    // into panorama space (the sky is turned by env_params.y about +Y)
+    let r = -u.env_params.y;
+    let e = vec3<f32>(d.x * cos(r) + d.z * sin(r), d.y, -d.x * sin(r) + d.z * cos(r));
+    let uv = vec2<f32>(atan2(e.x, -e.z) / 6.2831853 + 0.5, acos(clamp(e.y, -1.0, 1.0)) / 3.1415927);
+    return vec4<f32>(textureSampleLevel(img_tex, img_smp, uv, 0.0).rgb, 1.0);
+}
+"#;
+
+/// Depth-only pass for one shadow slot.
+const SHADOW_SHADER: &str = r#"
+@group(0) @binding(0) var<uniform> m: mat4x4<f32>;
+@vertex fn vs_shadow(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return m * vec4<f32>(pos, 1.0);
+}
 "#;
 
 /// Auto depth range: from the camera (white) to the farthest geometry in front of it (black).
@@ -375,8 +506,11 @@ struct Target {
 pub struct Renderer {
     mesh_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
-    shadow_bind_group: wgpu::BindGroup,
+    /// One small uniform (the light's matrix) per shadow slot.
+    shadow_slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     shadow_view: wgpu::TextureView,
+    bg_pipeline: wgpu::RenderPipeline,
+    env: Option<EnvCache>,
     line_pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
     /// Textured meshes: lit like plain meshes, coloured by their texture.
@@ -437,10 +571,10 @@ impl Renderer {
                 },
             ],
         });
-        // the shadow pass binds only the uniforms (the shadow map is its target)
+        // the shadow pass binds only the light's matrix (the shadow map is its target)
         let shadow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shotstage shadow"),
-            entries: &[uniform_entry],
+            entries: &[wgpu::BindGroupLayoutEntry { visibility: wgpu::ShaderStages::VERTEX, ..uniform_entry }],
         });
         let shadow_map = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shotstage shadow map"),
@@ -469,10 +603,25 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
             ],
         });
-        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let shadow_slots = (0..MAX_SHADOWS)
+            .map(|_| {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("shotstage shadow slot"),
+                    size: 64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shotstage shadow"),
+                    layout: &shadow_bgl,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+                });
+                (buf, bg)
+            })
+            .collect();
+        let shadow_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shotstage shadow"),
-            layout: &shadow_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
+            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
         });
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shotstage shadow"),
@@ -483,13 +632,13 @@ impl Renderer {
             label: Some("vs_shadow"),
             layout: Some(&shadow_layout),
             vertex: wgpu::VertexState {
-                module: &module,
+                module: &shadow_module,
                 entry_point: Some("vs_shadow"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 })],
             },
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
@@ -680,11 +829,44 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vs_bg"),
+            layout: Some(&image_pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_bg"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_bg"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             mesh_pipeline,
             shadow_pipeline,
-            shadow_bind_group,
+            shadow_slots,
             shadow_view,
+            bg_pipeline,
+            env: None,
             line_pipeline,
             image_pipeline,
             tex_pipeline,
@@ -758,6 +940,68 @@ impl Renderer {
         self.textures.retain(|k, _| scene.assets.contains_key(k));
     }
 
+    /// Make the sky's panorama and background texture current; returns its lighting.
+    fn sync_env(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+    ) -> Option<shotstage_core::environment::EnvLighting> {
+        use shotstage_core::environment as env;
+        let e = &scene.environment;
+        if !e.lights_scene() {
+            return None;
+        }
+        // an HDRI is known by its pixels too, so replacing the asset re-reads it
+        let ident = e.hdri.as_ref().and_then(|k| scene.assets.get(k)).map_or(0, |a| a.data.as_ptr() as usize);
+        let key = format!("{}|{ident}", e.source_key());
+        if self.env.as_ref().is_none_or(|c| c.key != key) {
+            let width = if e.sky == shotstage_core::Sky::Hdri { 2048 } else { 1024 };
+            let Some(map) = env::resolve(e, &scene.assets, width) else {
+                self.env = None;
+                return None;
+            };
+            let rgba = env::background_rgba(&map);
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("shotstage sky"),
+                size: wgpu::Extent3d { width: map.width, height: map.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * map.width), rows_per_image: None },
+                wgpu::Extent3d { width: map.width, height: map.height, depth_or_array_layers: 1 },
+            );
+            let view = tex.create_view(&Default::default());
+            let background = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shotstage sky"),
+                layout: &self.image_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                ],
+            });
+            self.env = Some(EnvCache { key, small: env::lighting_map(e, &map), background, lighting: None });
+        }
+        let cache = self.env.as_mut()?;
+        let want = (e.rotation, e.intensity);
+        if cache.lighting.is_none_or(|(k, _)| k != want) {
+            cache.lighting = Some((want, env::lighting(&cache.small, e.rotation, e.intensity)));
+        }
+        cache.lighting.map(|(_, l)| l)
+    }
+
     fn ensure_target(&mut self, device: &wgpu::Device, size: (u32, u32)) {
         let size = (size.0.clamp(1, 8192), size.1.clamp(1, 8192));
         if self.target.as_ref().is_some_and(|t| t.size == size) {
@@ -823,33 +1067,78 @@ impl Renderer {
         let used: Vec<&str> =
             geo.images.iter().map(|q| q.asset.as_str()).chain(geo.textured.iter().map(|b| b.asset.as_str())).collect();
         self.sync_textures(device, queue, scene, &used);
-        let Some(target) = &self.target else { return };
         let (near, far) = if view.depth_far > view.depth_near {
             (view.depth_near, view.depth_far)
         } else {
             depth_range(&geo, view.view)
         };
-        let u = Uniforms {
+        let mut u = Uniforms {
             view_proj: (view.proj * view.view).to_cols_array(),
             view: view.view.to_cols_array(),
             params: [pass as u32 as f32, near, far, 0.0],
-            light_params: [0.0, 0.0, 0.0, 0.0],
-            shadow_vp: Mat4::IDENTITY.to_cols_array(),
+            light_params: [0.0, 0.12, 0.0, 0.0],
+            inv_view_proj: (view.proj * view.view).inverse().to_cols_array(),
+            env_params: [0.0, 0.0, -1.0, 0.0],
+            sh: [[0.0; 4]; 9],
             shadow_params: [0.0; 4],
+            shadow_vp: [Mat4::IDENTITY.to_cols_array(); MAX_SHADOWS],
+            shadow_tile: [[0.0; 4]; MAX_SHADOWS],
+            shadow_bias: [[0.0; 4]; MAX_SHADOWS],
             lights: [GpuLight::default(); MAX_LIGHTS],
         };
-        let mut u = u;
-        let mut lights_used = vec![];
+        let settings = scene.environment.shadows;
+        // the studio light toggle shows plain clay: no scene lights, no sky
+        let sky = if overlay.studio_light || pass != Pass::Clay { None } else { self.sync_env(device, queue, scene) };
+        let mut casts = [false; MAX_LIGHTS];
+        let mut count = 0;
         if !overlay.studio_light {
-            let (n, lights) = gpu_lights(scene, frame);
-            u.light_params = [n as f32, 0.12, 0.0, 0.0];
-            u.lights = lights;
-            lights_used = lights[..n].to_vec();
+            let (n, lights, c) = gpu_lights(scene, frame);
+            (count, u.lights, casts) = (n, lights, c);
+            u.light_params[0] = n as f32;
         }
-        let shadow = if pass == Pass::Clay && !overlay.no_shadows { shadow_setup(&geo, &lights_used) } else { None };
-        if let Some((vp, index, bias)) = shadow {
-            u.shadow_vp = vp.to_cols_array();
-            u.shadow_params = [1.0, bias, index, 1.0 / SHADOW_SIZE as f32];
+        if let Some(l) = &sky {
+            u.light_params[2] = 1.0;
+            for (o, c) in u.sh.iter_mut().zip(l.sh) {
+                *o = [c[0], c[1], c[2], 0.0];
+            }
+            u.env_params[0] = if scene.environment.background { 1.0 } else { 0.0 };
+            u.env_params[1] = scene.environment.rotation.to_radians();
+        }
+        // with no lights at all, the studio key (or the sky's sun) shades the ambient light
+        let ambient_dir = match &sky {
+            _ if count > 0 && casts[..count].iter().any(|c| *c) => None,
+            Some(l) if l.directionality > 0.08 => {
+                Some((-glam::Vec3::from_array(l.key_dir), (l.directionality * 1.2).min(0.85)))
+            }
+            Some(_) => None,
+            None if count == 0 => Some((-glam::Vec3::new(0.45, 0.8, 0.4).normalize(), 0.7)),
+            None => None,
+        };
+        let plan = if pass == Pass::Clay && !overlay.no_shadows && settings.enabled {
+            shadow_plan(&geo, &mut u.lights[..count], &casts[..count], ambient_dir)
+        } else {
+            for l in &mut u.lights {
+                l.shadow[0] = -1.0;
+            }
+            ShadowPlan::default()
+        };
+        let tiles = if plan.slots.len() > 1 { 2 } else { 1 };
+        let scale = 1.0 / tiles as f32;
+        for (i, (vp, texel_m)) in plan.slots.iter().enumerate() {
+            u.shadow_vp[i] = vp.to_cols_array();
+            let (tx, ty) = ((i % tiles) as f32 * scale, (i / tiles) as f32 * scale);
+            // a shared atlas has coarser texels, so push further off the surface
+            let off = texel_m * tiles as f32 * (1.5 + settings.softness * 3.0);
+            u.shadow_tile[i] = [tx, ty, scale, 0.0];
+            u.shadow_bias[i] = [off, 0.0, 0.0, 0.0];
+            queue.write_buffer(&self.shadow_slots[i].0, 0, bytemuck::bytes_of(&vp.to_cols_array()));
+        }
+        if !plan.slots.is_empty() {
+            u.shadow_params = [1.0, settings.strength, 0.6 + settings.softness * 7.0, 1.0 / SHADOW_SIZE as f32];
+        }
+        if let Some((slot, amount)) = plan.ambient {
+            u.env_params[2] = slot as f32;
+            u.light_params[3] = amount;
         }
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
         let tri_buf = (!geo.triangles.is_empty()).then(|| {
@@ -897,8 +1186,9 @@ impl Renderer {
             Pass::Depth => wgpu::Color::BLACK,
             Pass::Normal => wgpu::Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 },
         };
+        let Some(target) = &self.target else { return };
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("shotstage") });
-        if let (Some(_), Some(b)) = (shadow, &shadow_buf) {
+        if let (false, Some(b)) = (plan.slots.is_empty(), &shadow_buf) {
             let mut sp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shotstage shadow"),
                 color_attachments: &[],
@@ -912,9 +1202,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             sp.set_pipeline(&self.shadow_pipeline);
-            sp.set_bind_group(0, &self.shadow_bind_group, &[]);
             sp.set_vertex_buffer(0, b.slice(..));
-            sp.draw(0..shadow_tris.len() as u32, 0..1);
+            let side = SHADOW_SIZE as f32 / tiles as f32;
+            for i in 0..plan.slots.len() {
+                sp.set_viewport((i % tiles) as f32 * side, (i / tiles) as f32 * side, side, side, 0.0, 1.0);
+                sp.set_bind_group(0, &self.shadow_slots[i].1, &[]);
+                sp.draw(0..shadow_tris.len() as u32, 0..1);
+            }
         }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -935,6 +1229,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             rp.set_bind_group(0, &self.bind_group, &[]);
+            if u.env_params[0] > 0.5
+                && let Some(env) = &self.env
+            {
+                rp.set_pipeline(&self.bg_pipeline);
+                rp.set_bind_group(1, &env.background, &[]);
+                rp.draw(0..3, 0..1);
+            }
             if let Some(b) = &tri_buf {
                 rp.set_pipeline(&self.mesh_pipeline);
                 rp.set_vertex_buffer(0, b.slice(..));
