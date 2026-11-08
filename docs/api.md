@@ -1602,6 +1602,7 @@ _query · needs gpu_ · MCP tool `render_shotSheet`
 | `lang` | `en` \| `zh` | Language of the labels and film terms: "en" (default) or "zh". |
 | `layout` | `table` \| `grid` | "table" (one row per shot, default) or "grid" (storyboard panels). |
 | `out` | string | File to write (CLI / MCP; a folder gets shot-sheet.pdf / .png). Without it the file comes back as base64 `data`. MCP defaults to `<scene file>.shot-sheet.pdf`. |
+| `preview` | boolean | Also return the first page as a small PNG (`preview`, base64, 1200 px wide) to look at. |
 | `shots` | array | Only these shots (0-based indices). Default every shot; with no shots, the whole timeline through the active camera. |
 | `title` | string | Title at the top. Default "Shot sheet" / "分镜表". |
 

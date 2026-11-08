@@ -90,6 +90,8 @@ pub struct ShotSheetParams {
     /// File to write (CLI / MCP; a folder gets shot-sheet.pdf / .png). Without it the file
     /// comes back as base64 `data`. MCP defaults to `<scene file>.shot-sheet.pdf`.
     pub out: Option<String>,
+    /// Also return the first page as a small PNG (`preview`, base64, 1200 px wide) to look at.
+    pub preview: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -477,6 +479,7 @@ pub struct SheetPlan {
     pub lang: SheetLang,
     pub title: String,
     pub out: Option<String>,
+    pub preview: bool,
     pub fps: f32,
 }
 
@@ -515,7 +518,18 @@ pub fn sheet_plan(scene: &Scene, params: Value) -> CmdResult<SheetPlan> {
         .map(|r| json!({ "camera": r.camera, "frame": (r.start + r.end) / 2, "pass": "clay", "width": width }))
         .collect();
     let title = p.title.unwrap_or_else(|| if zh(lang) { "分镜表" } else { "Shot sheet" }.into());
-    Ok(SheetPlan { rows, pictures, format, layout, columns, lang, title, out: p.out, fps: scene.timeline.fps })
+    Ok(SheetPlan {
+        rows,
+        pictures,
+        format,
+        layout,
+        columns,
+        lang,
+        title,
+        out: p.out,
+        preview: p.preview.unwrap_or(false),
+        fps: scene.timeline.fps,
+    })
 }
 
 // ---------------------------------------------------------------- drawing
@@ -1094,6 +1108,9 @@ pub fn finish_sheet(plan: &SheetPlan, pngs: &[Vec<u8>]) -> CmdResult<Value> {
         "format": plan.format, "layout": plan.layout, "mimeType": plan.mime(), "fileName": plan.file_name(),
         "pages": sheet.pages.len(), "bytes": bytes.len(), "shots": plan.rows,
     });
+    if plan.preview {
+        v["preview"] = json!(crate::model::encode(&preview_png(&sheet, 0, 1200)?));
+    }
     match &plan.out {
         #[cfg(not(target_arch = "wasm32"))]
         Some(out) => {

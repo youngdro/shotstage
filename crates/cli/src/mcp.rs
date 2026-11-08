@@ -197,8 +197,10 @@ fn shot_sheet(host: &mut Host, mut args: Value) -> Result<Value, CommandError> {
         };
         args["out"] = json!(f.display().to_string());
     }
+    args["preview"] = json!(true);
     let (plan, pngs) = host.shot_sheet(args)?;
     let mut doc = sheet::finish_sheet(&plan, &pngs)?;
+    let preview = doc.as_object_mut().and_then(|o| o.remove("preview")).unwrap_or_default();
     // the rows' translated text repeats the rest; keep the reply short
     if let Some(shots) = doc["shots"].as_array_mut() {
         for s in shots {
@@ -207,11 +209,10 @@ fn shot_sheet(host: &mut Host, mut args: Value) -> Result<Value, CommandError> {
             }
         }
     }
-    let preview = sheet::preview_png(&sheet::compose(&plan, &pngs), 0, 1200)?;
     Ok(json!({ "content": [
         {"type": "text", "text": serde_json::to_string(&doc).unwrap_or_default()},
         {"type": "text", "text": "page 1:"},
-        {"type": "image", "data": shotstage_render::base64(&preview), "mimeType": "image/png"},
+        {"type": "image", "data": preview, "mimeType": "image/png"},
     ], "isError": false }))
 }
 

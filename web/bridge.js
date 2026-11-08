@@ -11,7 +11,7 @@
 // revision, changed}} or {id, ok: false, error: {code, message}}.
 
 /** Commands that resolve asynchronously in the browser (they render on the GPU). */
-const ASYNC = new Set(["render.snapshot", "render.storyboard", "render.sequence"]);
+const ASYNC = new Set(["render.snapshot", "render.storyboard", "render.shotSheet", "render.sequence"]);
 
 async function run(editor, request) {
   if (request.batch || request.merge || !ASYNC.has(request.command)) {

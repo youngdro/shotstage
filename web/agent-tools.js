@@ -14,7 +14,7 @@ models. Every change you make appears live in their editor and lands in its undo
 Tools: command_list (every command with its parameter JSON Schema; filter by prefix such as \
 "camera."), command_run {command, params} for any one command, command_batch for several as one \
 undo step, render_snapshot to see the shot (you get the image back), render_storyboard for every \
-shot's frames, editor_status to check that the page is connected. Command ids below are run with \
+shot's frames, render_shotSheet for the crew's shot sheet, editor_status to check that the page is connected. Command ids below are run with \
 command_run, e.g. {command: "scene.template", params: {...}}.
 
 Workflow that works well:
@@ -30,7 +30,9 @@ neon, goldenHour, daylight, overcast...); environment.set picks a sky; light.sha
 camera for you; check it with render_snapshot and camera.describe.
 6. Motion: motion.apply {preset, target, subject} (motion.list: push-ins, orbits, crane, \
 handheld, product spins, character actions); shot.create / shot.cut lay out the edit.
-7. Deliver: render_storyboard (first / middle / last frame of each shot).
+7. Deliver: render_storyboard (first / middle / last frame of each shot); render_shotSheet saves \
+the shot sheet (PDF: picture, shot size, lens, camera move, duration, notes from shot.set) to the \
+person's downloads, lang "zh" for Chinese labels.
 
 Read the scene with scene.summary, entity.bounds and editor.state. Every change is one undo step \
 (history.undo). Errors say what is wrong and leave the scene unchanged. Commands that read or \
@@ -88,6 +90,12 @@ export const TOOLS = [
   {
     name: "render_storyboard",
     description: "Render the storyboard: first / middle / last frame of each shot, returned as pictures with the shot list (same params as the `render.storyboard` command, without `out`).",
+    inputSchema: { type: "object", properties: {}, additionalProperties: true },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "render_shotSheet",
+    description: "Make the shot sheet for the crew (every shot's picture, number, shot size and angle, focal length, camera move, duration and notes) and save it to the person's downloads; you get page 1 back as a picture and the analysed shots. Same params as the `render.shotSheet` command (format pdf|png, layout table|grid, lang en|zh, shots, title), without `out`.",
     inputSchema: { type: "object", properties: {}, additionalProperties: true },
     annotations: { readOnlyHint: true },
   },
