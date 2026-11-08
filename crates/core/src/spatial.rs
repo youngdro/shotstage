@@ -519,9 +519,17 @@ pub fn frame_subject(
         hi
     };
     let mut eye = aim + dir * dist;
-    // Stay above the ground for low angles: lift the lens, keep the distance, re-aim.
-    if eye.y < 0.05 {
-        eye.y = 0.05;
+    // Stay above what the subject stands on (the ground, a table, a board) for low angles: lift
+    // the lens, keep the distance, re-aim. Below the table top the lens would see its underside.
+    let ignore = [subject.to_string()];
+    let opts = RayOptions { ignore: &ignore, ..Default::default() };
+    let floor = raycast(scene, frame, Vec3::new(center.x, b.min.y + 0.01, center.z), Vec3::NEG_Y, &opts)
+        .map(|h| h.point[1])
+        .filter(|y| b.min.y - y < 0.05)
+        .unwrap_or(0.0)
+        .max(0.0);
+    if eye.y < floor + 0.05 {
+        eye.y = floor + 0.05;
     }
     if !eye.is_finite() {
         return Err(CoreError::Invalid("could not frame the subject".into()));
@@ -619,5 +627,19 @@ mod tests {
         assert!(high.eye.y > 1.0 && high.eye.x > 0.0, "{:?}", high.eye);
         let low = frame_subject(&s, "actor", 0.0, &lens, ShotSize::Wide, ShotAngle::WormsEye, 0.0).unwrap();
         assert!(low.eye.y >= 0.04);
+    }
+
+    #[test]
+    fn low_angles_stay_above_the_table_the_subject_is_on() {
+        let mut s = Scene::default();
+        s.insert(cube("table", [1.2, 0.75, 0.8], [0.0, 0.375, 0.0])).unwrap();
+        s.insert(cube("jar", [0.08, 0.1, 0.08], [0.0, 0.8, 0.0])).unwrap();
+        let lens = CameraData::default();
+        let low = frame_subject(&s, "jar", 0.0, &lens, ShotSize::Full, ShotAngle::Low, 0.0).unwrap();
+        assert!(low.eye.y >= 0.79, "the lens is under the table top: {:?}", low.eye);
+        // something floating over the table is not standing on it
+        s.get_mut("jar").unwrap().transform.translation = [0.0, 1.6, 0.0];
+        let low = frame_subject(&s, "jar", 0.0, &lens, ShotSize::Full, ShotAngle::Low, 0.0).unwrap();
+        assert!(low.eye.y < 1.6, "{:?}", low.eye);
     }
 }

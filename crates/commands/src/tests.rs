@@ -314,8 +314,11 @@ fn product_shots_frame_small_subjects() {
         let r =
             run(&mut s, "camera.frame", json!({"subject": "hero", "size": size, "angle": "low", "focalLengthMm": 100}));
         assert_eq!(r["describe"]["shotSize"], word, "{r}");
-        assert_eq!(r["describe"]["angle"], "low angle", "{r}");
+        // as low as the table lets it: never under the table top, where it would see the table
+        assert!(r["position"][1].as_f64().unwrap() >= 0.79, "{r}");
+        assert!(["low angle", "eye level"].contains(&r["describe"]["angle"].as_str().unwrap()), "{r}");
     }
+
     // a low, wide subject is sized by its width: a wide shot shows all of it
     run(&mut s, "prefab.create", json!({"kind": "steppedPodium", "id": "pod", "position": [-3, 0, 0]}));
     for (size, word) in [("wide", "wide shot"), ("full", "full shot"), ("medium", "medium shot")] {

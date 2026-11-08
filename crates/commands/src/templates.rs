@@ -44,6 +44,11 @@ pub const TEMPLATES: &[(&str, &str, &str)] = &[
         "Checkout",
         "A checkout counter: the cashier scans and chats while a shopper pays by phone; a medium two-shot then a close-up on the payment",
     ),
+    (
+        "freshCloseUp",
+        "Fresh close-up",
+        "Salmon on a cutting board with lemon, tomatoes, broccoli and a knife under a big soft light; straight down, then a low push-in on the salmon",
+    ),
     ("cafe", "Cafe", "Tables and chairs, two people talking, a counter with a clerk; a gentle arc around them"),
     ("studio", "Empty studio", "Just an infinity cove, a camera and three-point light, ready for your own blocks"),
 ];
@@ -51,8 +56,8 @@ pub const TEMPLATES: &[(&str, &str, &str)] = &[
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TemplateParams {
-    /// groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout, cafe or
-    /// studio.
+    /// groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout,
+    /// freshCloseUp, cafe or studio.
     name: String,
     /// Clear the scene first. Default true.
     replace: Option<bool>,
@@ -176,6 +181,33 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
             frame("cam_top", "table", "full", "front", "birdsEye", 50.0),
             motion("topDown", "cam_top", Some("table"), 0, 4.0),
             shot("cam_top", "flat lay", 0, 119),
+        ],
+        "freshCloseUp" => vec![
+            floor,
+            p("productTable", "table", [0.0, 0.0, 0.0], 0.0),
+            p("cuttingBoard", "board", [0.0, 1.2, 0.0], 0.0),
+            p("salmonFillet", "salmon", [-0.02, 1.2, 0.0], 12.0),
+            p("lemon", "lemon", [0.13, 1.2, -0.08], 30.0),
+            p("chefKnife", "knife", [0.05, 1.2, 0.1], -8.0),
+            p("vineTomatoes", "tomatoes", [-0.33, 1.2, -0.17], 20.0),
+            p("broccoli", "broccoli", [0.32, 1.2, -0.2], 0.0),
+            p("plate", "plate", [-0.33, 1.2, 0.17], 0.0),
+            p("leafBranch", "herbs", [0.3, 1.2, 0.18], -50.0),
+            p("softbox", "softbox", [1.5, 0.0, 0.6], -110.0),
+            p("reflector", "reflector", [-1.2, 0.0, 0.7], 120.0),
+            ("light.set", json!({"id": "softbox_light", "intensity": 0.9})),
+            timeline(167),
+            cam("cam_top", "Top"),
+            frame("cam_top", "board", "full", "front", "birdsEye", 50.0),
+            motion("topDown", "cam_top", Some("board"), 0, 3.5),
+            shot("cam_top", "from above", 0, 83),
+            cam("cam_hero", "Hero"),
+            frame("cam_hero", "salmon", "wide", "frontRight", "high", 100.0),
+            (
+                "motion.apply",
+                json!({"preset": "pushIn", "target": "cam_hero", "subject": "salmon", "start": 84, "duration": 3.5, "intensity": 0.6}),
+            ),
+            shot("cam_hero", "hero push-in", 84, 167),
         ],
         "interview" => vec![
             floor,

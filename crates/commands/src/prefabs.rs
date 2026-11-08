@@ -99,6 +99,24 @@ pub enum PrefabKind {
     Ribbon,
     Splash,
     DecorSpheres,
+    Apple,
+    Pear,
+    Orange,
+    Lemon,
+    Bananas,
+    Strawberry,
+    Grapes,
+    VineTomatoes,
+    Avocado,
+    Carrots,
+    Broccoli,
+    EggCarton,
+    MeatTray,
+    SalmonFillet,
+    WholeFish,
+    CuttingBoard,
+    ChefKnife,
+    Plate,
 }
 
 /// Palette group a prefab belongs to.
@@ -108,6 +126,8 @@ pub enum Category {
     Furniture,
     Retail,
     Product,
+    /// Single fruit, vegetables, meat and fish at real size, for close-ups and hero shots.
+    Fresh,
 }
 
 impl Category {
@@ -117,6 +137,7 @@ impl Category {
             Category::Furniture => "furniture",
             Category::Retail => "retail",
             Category::Product => "product",
+            Category::Fresh => "fresh",
         }
     }
 }
@@ -352,6 +373,24 @@ pub const PREFABS: &[PrefabInfo] = &[
     info!(Ribbon, "ribbon", "ribbon", "Ribbon", Product, "Ribbon loop 30 cm"),
     info!(Splash, "splash", "splash", "Splash", Product, "Water splash stand-in (crown and droplets), 25 cm"),
     info!(DecorSpheres, "decorSpheres", "spheres", "Spheres", Product, "Three decor spheres of different sizes"),
+    info!(Apple, "apple", "apple", "Apple", Fresh, "Red apple 8 cm with stem and leaf"),
+    info!(Pear, "pear", "pear", "Pear", Fresh, "Pear 10 cm"),
+    info!(Orange, "orange", "orange", "Orange", Fresh, "Orange 8 cm"),
+    info!(Lemon, "lemon", "lemon", "Lemon", Fresh, "Lemon 8.5 cm, lying along Z"),
+    info!(Bananas, "bananas", "bananas", "Bananas", Fresh, "Bunch of three bananas, 22 cm"),
+    info!(Strawberry, "strawberry", "strawberry", "Strawberry", Fresh, "Strawberry 3.5 cm"),
+    info!(Grapes, "grapes", "grapes", "Grapes", Fresh, "Bunch of grapes 13 cm, standing on its tip"),
+    info!(VineTomatoes, "vineTomatoes", "tomatoes", "Tomatoes", Fresh, "Three tomatoes on the vine, 20 cm"),
+    info!(Avocado, "avocado", "avocado", "Avocado", Fresh, "Avocado 10 cm"),
+    info!(Carrots, "carrots", "carrots", "Carrots", Fresh, "Three carrots with tops, 30 cm"),
+    info!(Broccoli, "broccoli", "broccoli", "Broccoli", Fresh, "Head of broccoli 15 cm"),
+    info!(EggCarton, "eggCarton", "eggs", "Eggs", Fresh, "Open carton of six eggs, 21 cm"),
+    info!(MeatTray, "meatTray", "meat_tray", "Meat tray", Fresh, "Steak on a supermarket tray 22 × 15 cm"),
+    info!(SalmonFillet, "salmonFillet", "salmon", "Salmon", Fresh, "Salmon fillet 22 cm"),
+    info!(WholeFish, "wholeFish", "fish", "Whole fish", Fresh, "Whole fish 40 cm lying on its side, head at +X"),
+    info!(CuttingBoard, "cuttingBoard", "board", "Board", Fresh, "Wooden cutting board 40 × 28 cm"),
+    info!(ChefKnife, "chefKnife", "knife", "Chef's knife", Fresh, "Chef's knife 32 cm, lying flat, tip at +X"),
+    info!(Plate, "plate", "plate", "Plate", Fresh, "Dinner plate 26 cm"),
 ];
 
 pub fn info(kind: PrefabKind) -> &'static PrefabInfo {
@@ -428,6 +467,16 @@ const GOLD: [f32; 3] = [0.85, 0.7, 0.35];
 const PASTEL: [f32; 3] = [0.93, 0.86, 0.8];
 const FABRIC_LIGHT: [f32; 3] = [0.9, 0.86, 0.8];
 const WATER: [f32; 3] = [0.75, 0.88, 0.95];
+const STALK: [f32; 3] = [0.4, 0.3, 0.18];
+const LEMON: [f32; 3] = [0.97, 0.85, 0.2];
+const BANANA: [f32; 3] = [0.96, 0.82, 0.26];
+const GRAPE: [f32; 3] = [0.45, 0.18, 0.35];
+const CARTON: [f32; 3] = [0.76, 0.73, 0.66];
+
+/// A shape turned around Y from `[radius, y]` points, bottom to top.
+fn lathe(profile: &[[f32; 2]]) -> Primitive {
+    Primitive::Lathe { profile: profile.to_vec(), segments: 28 }
+}
 
 /// `nx × nz` fruits of radius `r` (as one mesh with two Array modifiers) centred at `center`
 /// (y = the fruit centres), `gap` metres apart.
@@ -1172,6 +1221,244 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
             ),
             part("small", Primitive::Sphere { radius: 0.03, segments: 16, rings: 8 }, [0.07, 0.03, 0.1], GOLD),
         ],
+
+        // ------------------------------------------------------------ fresh produce (hero size)
+        Apple => vec![
+            part(
+                "apple",
+                lathe(&[
+                    [0.0, 0.004],
+                    [0.015, 0.0],
+                    [0.03, 0.006],
+                    [0.038, 0.02],
+                    [0.041, 0.038],
+                    [0.039, 0.055],
+                    [0.032, 0.068],
+                    [0.016, 0.073],
+                    [0.006, 0.067],
+                    [0.0, 0.065],
+                ]),
+                [0.0; 3],
+                APPLE,
+            ),
+            Part { rot: [0.0, 0.0, -12.0], ..part("stem", cyl(0.002, 0.02), [0.002, 0.075, 0.0], STALK) },
+            Part {
+                rot: [0.0, 30.0, 18.0],
+                scale: [0.032, 0.003, 0.014],
+                ..part("leaf", ball(10), [0.016, 0.081, -0.008], GREEN)
+            },
+        ],
+        Pear => vec![
+            part(
+                "pear",
+                lathe(&[
+                    [0.0, 0.003],
+                    [0.02, 0.0],
+                    [0.034, 0.012],
+                    [0.037, 0.03],
+                    [0.033, 0.048],
+                    [0.024, 0.065],
+                    [0.019, 0.08],
+                    [0.013, 0.095],
+                    [0.005, 0.102],
+                    [0.0, 0.102],
+                ]),
+                [0.0; 3],
+                [0.78, 0.78, 0.3],
+            ),
+            Part { rot: [0.0, 0.0, 15.0], ..part("stem", cyl(0.0022, 0.025), [-0.003, 0.112, 0.0], STALK) },
+        ],
+        Orange => vec![
+            Part { scale: [0.08, 0.076, 0.08], ..part("orange", ball(24), [0.0, 0.038, 0.0], ORANGE) },
+            Part { scale: [0.008, 0.003, 0.008], ..part("stem", ball(8), [0.0, 0.076, 0.0], GREEN) },
+        ],
+        Lemon => vec![
+            Part { scale: [0.058, 0.056, 0.078], ..part("lemon", ball(24), [0.0, 0.028, 0.0], LEMON) },
+            Part {
+                scale: [0.016, 0.016, 0.02],
+                modifiers: vec![array(2, [0.0, 0.0, -0.08 / 0.02])],
+                ..part("tips", ball(10), [0.0, 0.028, 0.04], LEMON)
+            },
+        ],
+        Bananas => {
+            // three bananas side by side, each a curve of three capsules
+            let seg = |n: &'static str, roll: f32, pos: [f32; 3], len: f32| Part {
+                rot: [0.0, 0.0, roll],
+                modifiers: vec![array(3, [0.0, 0.0, 0.037])],
+                ..part(n, Primitive::Capsule { radius: 0.018, height: len, segments: 12 }, pos, BANANA)
+            };
+            vec![
+                seg("middle", 90.0, [0.0, 0.018, -0.037], 0.11),
+                seg("end_l", 60.0, [-0.078, 0.036, -0.037], 0.085),
+                seg("end_r", -60.0, [0.078, 0.036, -0.037], 0.085),
+                Part {
+                    rot: [0.0, 0.0, 60.0],
+                    scale: [1.0, 1.0, 3.0],
+                    ..part("stalk", cyl(0.008, 0.04), [-0.115, 0.062, 0.0], STALK)
+                },
+            ]
+        }
+        Strawberry => vec![
+            part(
+                "berry",
+                lathe(&[
+                    [0.0, 0.0],
+                    [0.006, 0.003],
+                    [0.013, 0.011],
+                    [0.018, 0.022],
+                    [0.017, 0.03],
+                    [0.01, 0.035],
+                    [0.0, 0.035],
+                ]),
+                [0.0; 3],
+                [0.85, 0.1, 0.12],
+            ),
+            Part { scale: [0.034, 0.004, 0.034], ..part("calyx", ball(10), [0.0, 0.036, 0.0], GREEN) },
+            part("stem", cyl(0.0015, 0.012), [0.0, 0.042, 0.0], GREEN),
+        ],
+        Grapes => {
+            let r = 0.0095;
+            let mut v: Vec<Part> =
+                [("row_1", 5u32), ("row_2", 4), ("row_3", 4), ("row_4", 3), ("row_5", 2), ("row_6", 1)]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (n, count))| {
+                        let s = r * 2.0;
+                        let y = r + (5 - i) as f32 * 0.018;
+                        Part {
+                            modifiers: vec![array(count, [s, 0.0, 0.0]), array(2, [0.0, 0.0, -s * 0.85])],
+                            ..part(
+                                n,
+                                Primitive::Sphere { radius: r, segments: 12, rings: 8 },
+                                [-((count - 1) as f32) * s / 2.0 + (i % 2) as f32 * 0.003, y, s * 0.42],
+                                GRAPE,
+                            )
+                        }
+                    })
+                    .collect();
+            v.push(part("stem", cyl(0.0025, 0.03), [0.0, 0.123, 0.0], STALK));
+            v
+        }
+        VineTomatoes => vec![
+            Part {
+                scale: [0.058, 0.05, 0.058],
+                modifiers: vec![array(3, [0.068 / 0.058, 0.0, 0.0])],
+                ..part("tomatoes", ball(20), [-0.068, 0.025, 0.0], [0.86, 0.18, 0.12])
+            },
+            Part {
+                scale: [0.03, 0.005, 0.03],
+                modifiers: vec![array(3, [0.068 / 0.03, 0.0, 0.0])],
+                ..part("calyxes", ball(8), [-0.068, 0.051, 0.0], GREEN)
+            },
+            Part { rot: [0.0, 0.0, 90.0], ..part("vine", cyl(0.003, 0.2), [0.0, 0.062, 0.0], GREEN) },
+        ],
+        Avocado => vec![part(
+            "avocado",
+            lathe(&[
+                [0.0, 0.002],
+                [0.02, 0.0],
+                [0.033, 0.012],
+                [0.036, 0.03],
+                [0.032, 0.05],
+                [0.024, 0.07],
+                [0.016, 0.085],
+                [0.006, 0.095],
+                [0.0, 0.096],
+            ]),
+            [0.0; 3],
+            [0.2, 0.3, 0.12],
+        )],
+        Carrots => vec![
+            Part {
+                rot: [0.0, 0.0, 90.0],
+                modifiers: vec![array(3, [0.0, 0.0, 0.036])],
+                ..part(
+                    "carrots",
+                    Primitive::Cone { radius: 0.016, height: 0.18, segments: 16 },
+                    [-0.02, 0.016, -0.036],
+                    [0.93, 0.48, 0.12],
+                )
+            },
+            Part {
+                rot: [0.0, 0.0, 6.0],
+                scale: [0.12, 0.012, 0.03],
+                modifiers: vec![array(3, [0.0, 0.0, 0.036 / 0.03])],
+                ..part("tops", ball(10), [0.13, 0.02, -0.036], GREEN)
+            },
+        ],
+        Broccoli => vec![
+            Part { rot: [0.0, 0.0, 8.0], ..part("stem", cyl(0.016, 0.08), [0.0, 0.04, 0.0], LIGHT_GREEN) },
+            Part { scale: [0.12, 0.085, 0.12], ..part("head", ball(16), [0.0, 0.1, 0.0], [0.18, 0.4, 0.15]) },
+            Part {
+                scale: [0.055, 0.045, 0.055],
+                modifiers: vec![array(3, [0.6, 0.0, 0.0])],
+                ..part("florets", ball(12), [-0.035, 0.135, 0.02], [0.2, 0.45, 0.17])
+            },
+        ],
+        EggCarton => vec![
+            part("tray", cube(0.21, 0.03, 0.11), [0.0, 0.015, 0.0], CARTON),
+            // the open lid stands up behind, leaning back a little
+            Part { rot: [-100.0, 0.0, 0.0], ..part("lid", cube(0.21, 0.004, 0.11), [0.0, 0.084, -0.065], CARTON) },
+            Part {
+                modifiers: vec![array(3, [0.068, 0.0, 0.0]), array(2, [0.0, 0.0, 0.052])],
+                ..part(
+                    "eggs",
+                    lathe(&[
+                        [0.0, 0.0],
+                        [0.012, 0.002],
+                        [0.02, 0.012],
+                        [0.022, 0.025],
+                        [0.019, 0.042],
+                        [0.01, 0.054],
+                        [0.0, 0.056],
+                    ]),
+                    [-0.068, 0.018, -0.026],
+                    [0.93, 0.84, 0.7],
+                )
+            },
+        ],
+        MeatTray => vec![
+            part("tray", cube(0.22, 0.02, 0.15), [0.0, 0.01, 0.0], DARK),
+            Part { scale: [0.18, 0.026, 0.115], ..part("fat", ball(20), [0.0, 0.03, 0.0], [0.94, 0.88, 0.82]) },
+            Part { scale: [0.17, 0.03, 0.105], ..part("steak", ball(20), [0.004, 0.032, -0.002], MEAT) },
+            part("label", cube(0.06, 0.002, 0.04), [0.07, 0.021, 0.05], WHITE),
+        ],
+        SalmonFillet => vec![
+            Part { scale: [0.22, 0.03, 0.085], ..part("fillet", ball(20), [0.0, 0.015, 0.0], [0.96, 0.52, 0.36]) },
+            Part { scale: [0.2, 0.012, 0.075], ..part("skin", ball(16), [0.0, 0.006, 0.0], [0.55, 0.57, 0.6]) },
+        ],
+        WholeFish => vec![
+            Part { scale: [0.32, 0.04, 0.09], ..part("body", ball(20), [0.03, 0.02, 0.0], FISH) },
+            Part {
+                rot: [0.0, 0.0, -90.0],
+                scale: [0.25, 1.0, 1.0],
+                ..part("tail", Primitive::Cone { radius: 0.045, height: 0.07, segments: 12 }, [-0.155, 0.02, 0.0], FISH)
+            },
+            Part { scale: [0.012, 0.01, 0.012], ..part("eye", ball(8), [0.14, 0.038, 0.012], DARK) },
+            Part { scale: [0.09, 0.006, 0.03], ..part("fin", ball(8), [0.02, 0.041, 0.0], [0.5, 0.55, 0.6]) },
+        ],
+        CuttingBoard => vec![
+            part("board", cube(0.4, 0.02, 0.28), [0.0, 0.01, 0.0], WOOD),
+            part("handle", cyl(0.02, 0.021), [0.17, 0.0105, 0.0], [0.5, 0.36, 0.24]),
+        ],
+        ChefKnife => vec![
+            part("blade", cube(0.2, 0.002, 0.045), [0.06, 0.001, 0.0], STEEL),
+            part("handle", cube(0.12, 0.02, 0.026), [-0.1, 0.01, -0.008], DARK),
+        ],
+        Plate => vec![part(
+            "plate",
+            lathe(&[
+                [0.0, 0.0],
+                [0.085, 0.0],
+                [0.095, 0.012],
+                [0.13, 0.02],
+                [0.128, 0.023],
+                [0.094, 0.016],
+                [0.0, 0.013],
+            ]),
+            [0.0; 3],
+            WHITE,
+        )],
     }
 }
 
