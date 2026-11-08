@@ -17,6 +17,8 @@ use crate::hub::{self, SharedHub};
 mod editmode;
 #[path = "material.rs"]
 mod material;
+#[path = "uveditor.rs"]
+mod uveditor;
 
 /// Something in the block palette.
 #[derive(Clone)]
@@ -463,6 +465,10 @@ fn friendly(command: &str) -> String {
         "shot.set" => "Edit shot".into(),
         "shot.delete" => "Delete shot".into(),
         "light.set" => "Light".into(),
+        "light.shadows" => "Shadows".into(),
+        "light.fromEnvironment" => "Sun from sky".into(),
+        "environment.set" => "Sky".into(),
+        "environment.import" => "Import HDRI".into(),
         "scene.load" => "Open scene".into(),
         "scene.new" => "New scene".into(),
         "batch" => "Several changes".into(),
@@ -563,16 +569,32 @@ fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
                     "3-point",
                     "Key, fill and rim around the selection (or the whole scene)",
                 ),
+                Block::LightPreset("loop", "Loop", "Everyday portrait: key a little to the side, soft fill"),
                 Block::LightPreset("rembrandt", "Rembrandt", "One high side key light, moody"),
+                Block::LightPreset("butterfly", "Butterfly", "Key high in front, soft fill from below"),
+                Block::LightPreset("clamshell", "Clamshell", "Soft light above and below the face: beauty"),
+                Block::LightPreset("split", "Split", "Hard side light: half lit, half shadow"),
                 Block::LightPreset(
                     "productSoftbox",
                     "Product",
                     "Two side softboxes and one overhead: even product light",
                 ),
+                Block::LightPreset("highKey", "High key", "Bright and even on a white backdrop: catalogue"),
+                Block::LightPreset("freshCounter", "Counter", "Shop counter: overhead panels, cool front fill"),
+                Block::LightPreset("lowKey", "Low key", "One narrow light in the dark: dramatic"),
                 Block::LightPreset("backlight", "Backlight", "Rim light from behind"),
-                Block::LightPreset("goldenHour", "Golden hr", "Warm low sun from the side"),
-                Block::LightPreset("daylight", "Daylight", "High neutral sun"),
-                Block::LightPreset("clear", "No lights", "Remove all lights: back to the flat studio light"),
+                Block::LightPreset("window", "Window", "Big soft window light from the side"),
+                Block::LightPreset("neon", "Neon", "Magenta and cyan side lights at night"),
+                Block::LightPreset("stage", "Stage", "One hard spotlight from above in the dark"),
+                Block::LightPreset("goldenHour", "Golden hr", "Warm low sun with a sunset sky"),
+                Block::LightPreset("daylight", "Daylight", "High sun with a blue sky"),
+                Block::LightPreset("overcast", "Overcast", "Soft cloudy sky light, no sun"),
+                Block::LightPreset("night", "Night", "Moonlight under a night sky"),
+                Block::LightPreset(
+                    "clear",
+                    "No lights",
+                    "Remove all lights and the sky: back to the flat studio light",
+                ),
             ],
         ),
         ("Shapes", false, shapes),
@@ -845,6 +867,8 @@ pub struct EditorApp {
     reference_for: Option<String>,
     /// The mesh whose texture the next picked picture becomes.
     texture_for: Option<String>,
+    /// The next picture picked becomes the sky (a panorama).
+    sky_next: bool,
     /// egui textures of reference pictures: asset key -> (identity of the pixels, texture).
     ref_textures: std::collections::HashMap<String, (usize, egui::TextureHandle)>,
     /// Palette thumbnails (rendered in the background).
@@ -877,6 +901,8 @@ pub struct EditorApp {
     incoming: crate::files::Inbox,
     /// Mesh edit mode: the edited mesh's geometry, the running tool, view options.
     edit_cache: Option<editmode::EditCache>,
+    /// The UV editor panel's view, cache and gesture.
+    uv: uveditor::UvEditor,
     edit_modal: Option<editmode::Modal>,
     edit_xray: bool,
     edit_amounts: editmode::EditAmounts,
@@ -949,6 +975,7 @@ impl EditorApp {
             thumbs: None,
             reference_for: None,
             texture_for: None,
+            sky_next: false,
             also: vec![],
             shadows: true,
             autosaved: (u64::MAX, 0.0),
@@ -976,6 +1003,7 @@ impl EditorApp {
             toast: None,
             incoming: Default::default(),
             edit_cache: None,
+            uv: Default::default(),
             edit_modal: None,
             edit_xray: false,
             edit_amounts: Default::default(),
@@ -1202,6 +1230,19 @@ impl EditorApp {
                     )),
                     Err(e) => self
                         .toast(crate::lf!("{name} is not a shotstage scene: {e}", "{name} 不是 shotstage 场景：{e}")),
+                }
+                continue;
+            }
+            // an HDRI is always a sky; a picture becomes one when asked for
+            if ext == "hdr" || (self.sky_next && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")) {
+                self.sky_next = false;
+                let req = json!({"command": "environment.import", "params": {"data": encode(&bytes), "name": stem}});
+                match hub::dispatch(&self.hub, req) {
+                    Ok(o) => {
+                        let warn = o.result["warning"].as_str().map(|w| format!(" ({w})")).unwrap_or_default();
+                        self.toast(format!("{name} is now the sky{warn}. Add a matching sun under Sky ▾."));
+                    }
+                    Err(e) => self.toast(format!("Could not use {name} as the sky: {}", e.message)),
                 }
                 continue;
             }
@@ -2044,6 +2085,17 @@ impl eframe::App for EditorApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.properties(ui));
             },
         );
+        if self.hub.borrow().uv.is_some() {
+            egui::Panel::right("uv_editor")
+                .resizable(true)
+                .default_size(440.0)
+                .min_size(280.0)
+                .max_size(1400.0)
+                .show(ui, |ui| self.uv_panel(ui));
+        } else {
+            self.uv.hovered = false;
+            self.uv.gesture = Default::default();
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, frame));
         {
             let mut h = self.hub.borrow_mut();
@@ -2064,6 +2116,9 @@ impl EditorApp {
             ui.ctx().request_repaint();
         }
         if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        if (self.uv.hovered || matches!(self.uv.gesture, uveditor::UvGesture::Modal(_))) && self.uv_shortcuts(ui) {
             return;
         }
         if self.edit_shortcuts(ui) {
@@ -2605,6 +2660,8 @@ impl EditorApp {
             ui.label(tr("• Click an object to select it; drag it to slide it over surfaces."));
             ui.label(tr("• Click a person, then a body part, to pose it."));
             ui.label(tr("• Drag empty space (or two fingers on a trackpad) to orbit; pinch or wheel to zoom."));
+            ui.add_space(8.0);
+            section(ui, &tr("Sky & shadows"), true, |ui| self.world_panel(ui));
             return;
         };
         let scene = self.scene();
@@ -3150,9 +3207,28 @@ impl EditorApp {
                     }
                 });
                 ui.end_row();
+                ui.label(tr("Temperature"));
+                ui.horizontal(|ui| {
+                    for (k, label, tip) in [
+                        (2700.0, "2700K", "Warm bulb"),
+                        (3200.0, "3200K", "Tungsten film light"),
+                        (4500.0, "4500K", "Shop fluorescent"),
+                        (5600.0, "5600K", "Daylight, flash"),
+                        (7500.0, "7500K", "Shade, overcast"),
+                    ] {
+                        if ui.small_button(tr(label)).on_hover_text(tr(tip)).clicked() {
+                            n.color = shotstage_core::light::kelvin_to_rgb(k);
+                        }
+                    }
+                });
+                ui.end_row();
                 ui.label(tr("Intensity"));
                 let r = ui.add(egui::Slider::new(&mut n.intensity, 0.0..=20.0).logarithmic(true).max_decimals(2));
                 started |= r.drag_started();
+                ui.end_row();
+                ui.label(tr("Shadows"));
+                ui.checkbox(&mut n.cast_shadows, tr("Casts shadows"))
+                    .on_hover_text(tr("Up to four lights cast shadows at once (the brightest)"));
                 ui.end_row();
                 if n.kind == LightKind::Spot {
                     ui.label(tr("Beam angle"));
@@ -3184,7 +3260,8 @@ impl EditorApp {
                     &format!("light:{id}"),
                     "light.set",
                     json!({"id": id, "kind": n.kind, "color": n.color, "intensity": n.intensity,
-                        "coneDegrees": n.cone_degrees, "softness": n.softness, "size": n.size}),
+                        "coneDegrees": n.cone_degrees, "softness": n.softness, "size": n.size,
+                        "castShadows": n.cast_shadows}),
                 );
             }
             ui.horizontal_wrapped(|ui| {
@@ -3197,8 +3274,143 @@ impl EditorApp {
                     self.run("camera.lookAt", json!({"id": id, "target": [0, 0.8, 0]}));
                 }
             });
-            ui.weak(tr("A light shines along its -Z. Scenes with lights are lit by them; toggle Studio light in the view toolbar to compare."));
+            ui.weak(tr("A light shines along its -Z. Scenes with lights are lit by them; toggle Studio light in the view toolbar to compare. The sky and shadow settings are under Sky ▾."));
         });
+    }
+
+    /// The sky around the scene and the shadow settings (environment.set, light.shadows).
+    fn world_panel(&mut self, ui: &mut egui::Ui) {
+        use shotstage_core::Sky;
+        use shotstage_core::environment::SKIES;
+        let scene = self.scene();
+        let e = scene.environment.clone();
+        let mut n = e.clone();
+        let mut started = false;
+        egui::Grid::new("world_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label(tr("Sky"));
+            let name = |sky: Sky| {
+                SKIES.iter().find(|(s, ..)| *s == sky).map_or(String::new(), |(_, key, _)| match sky {
+                    Sky::Hdri => "HDRI".to_string(),
+                    _ => {
+                        let mut c = key.chars();
+                        c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+                    }
+                })
+            };
+            egui::ComboBox::from_id_salt("sky_kind").selected_text(tr(name(n.sky))).width(150.0).show_ui(ui, |ui| {
+                for (sky, _, desc) in SKIES {
+                    if *sky == Sky::Hdri && n.hdri.is_none() {
+                        continue;
+                    }
+                    ui.selectable_value(&mut n.sky, *sky, tr(name(*sky))).on_hover_text(tr(*desc));
+                }
+            });
+            ui.end_row();
+            ui.label(tr(""));
+            ui.horizontal(|ui| {
+                if ui
+                    .button(tr("Import HDRI…"))
+                    .on_hover_text(tr(
+                        "An .hdr file or a 2:1 panorama picture (you can also drop an .hdr onto the view)",
+                    ))
+                    .clicked()
+                {
+                    self.sky_next = true;
+                    crate::files::pick(&self.incoming, ui.ctx());
+                }
+                if e.lights_scene()
+                    && ui
+                        .button(tr("Add matching sun"))
+                        .on_hover_text(tr(
+                            "A sun light from the sky's brightest spot, so shadows match (light.fromEnvironment)",
+                        ))
+                        .clicked()
+                {
+                    match self.run("light.fromEnvironment", json!({})) {
+                        Some(r) => {
+                            let id = r["id"].as_str().map(str::to_string);
+                            self.select(id);
+                        }
+                        None => self.toast(tr("This sky has no clear sun")),
+                    }
+                }
+            });
+            ui.end_row();
+            if n.sky != Sky::Studio {
+                ui.label(if n.sky == Sky::Color { "Colour" } else { "Tint" });
+                ui.horizontal(|ui| {
+                    started |= ui.color_edit_button_rgb(&mut n.color).clicked();
+                    let presets: &[(&str, [f32; 3])] = if n.sky == Sky::Color {
+                        &[
+                            ("White", [1.0; 3]),
+                            ("Grey", [0.35, 0.35, 0.36]),
+                            ("Black", [0.0; 3]),
+                            ("Green", [0.05, 0.6, 0.15]),
+                        ]
+                    } else {
+                        &[("None", [1.0; 3]), ("Warm", [1.0, 0.85, 0.7]), ("Cool", [0.8, 0.88, 1.0])]
+                    };
+                    for (label, c) in presets {
+                        if ui.small_button(tr(*label)).clicked() {
+                            n.color = *c;
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label(tr("Sky light"));
+                started |= ui
+                    .add(egui::Slider::new(&mut n.intensity, 0.0..=3.0).max_decimals(2))
+                    .on_hover_text(tr("How brightly the sky lights the scene (the background keeps its look)"))
+                    .drag_started();
+                ui.end_row();
+                if n.sky != Sky::Color {
+                    ui.label(tr("Turn"));
+                    started |= ui
+                        .add(egui::Slider::new(&mut n.rotation, 0.0..=360.0).suffix("°"))
+                        .on_hover_text(tr("Turn the sky and its sun about the vertical axis"))
+                        .drag_started();
+                    ui.end_row();
+                }
+                ui.label(tr("Background"));
+                ui.checkbox(&mut n.background, tr("Show the sky behind the scene"));
+                ui.end_row();
+            }
+            ui.label(tr("Shadows"));
+            ui.checkbox(&mut n.shadows.enabled, tr("On"));
+            ui.end_row();
+            if n.shadows.enabled {
+                ui.label(tr("Darkness"));
+                started |= ui.add(egui::Slider::new(&mut n.shadows.strength, 0.0..=1.0)).drag_started();
+                ui.end_row();
+                ui.label(tr("Softness"));
+                started |= ui.add(egui::Slider::new(&mut n.shadows.softness, 0.0..=1.0)).drag_started();
+                ui.end_row();
+            }
+        });
+        if started {
+            self.gesture += 1;
+        }
+        if n.shadows != e.shadows {
+            let s = n.shadows;
+            self.run_merged(
+                "shadows",
+                "light.shadows",
+                json!({"enabled": s.enabled, "strength": s.strength, "softness": s.softness}),
+            );
+        }
+        if n.sky != e.sky
+            || n.color != e.color
+            || n.intensity != e.intensity
+            || n.rotation != e.rotation
+            || n.background != e.background
+        {
+            self.run_merged(
+                "sky",
+                "environment.set",
+                json!({"sky": n.sky, "color": n.color, "intensity": n.intensity, "rotation": n.rotation, "background": n.background}),
+            );
+        }
+        ui.weak(tr("The sky lights everything softly from all round and adds to your lights; with no lights it lights the scene alone. Lighting presets set a matching sky."));
     }
 
     /// What a light should aim at: the subject last framed, else nothing.
@@ -5547,9 +5759,15 @@ impl EditorApp {
                         {
                             self.camera_from_view();
                         }
+                        ui.menu_button(tr("Sky ▾"), |ui| {
+                            ui.set_min_width(330.0);
+                            self.world_panel(ui);
+                        })
+                        .response
+                        .on_hover_text(tr("Sky (built-in skies or an HDRI), sky light and shadows"));
                         ui.menu_button(tr("View ▾"), |ui| {
                             ui.checkbox(&mut self.shadows, tr("Shadows"))
-                                .on_hover_text(tr("Shadows from the key light (snapshots always have them)"));
+                                .on_hover_text(tr("Show shadows in the viewport (snapshots follow the scene's shadow settings)"));
                             ui.checkbox(&mut self.studio_light, tr("Studio light")).on_hover_text(tr("Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)"),
                             );
                             ui.checkbox(&mut self.safe_areas, tr("Safe areas in camera view"))

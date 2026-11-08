@@ -35,9 +35,11 @@ pub struct Hub {
     pub(crate) pending_snapshots: u32,
     /// Mesh edit mode: the mesh being edited and its selected vertices / edges / faces.
     pub edit: Option<EditState>,
+    /// The UV editor window: the mesh shown and its selected face corners.
+    pub uv: Option<UvState>,
 }
 
-pub use shotstage_commands::host::{EditState, SelectMode, editable};
+pub use shotstage_commands::host::{EditState, SelectMode, UvSelectMode, UvState, editable};
 
 pub(crate) fn render_pass(p: SnapshotPass) -> Pass {
     match p {
@@ -114,9 +116,11 @@ fn editor_command(hub: &mut Hub, request: &Value) -> Option<Result<Outcome, Comm
         },
         look_through: hub.look_through,
         edit: hub.edit.clone(),
+        uv: hub.uv.clone(),
     };
     let r = view_command(&mut view, hub.session.scene(), cmd, params)?;
     hub.edit = view.edit;
+    hub.uv = view.uv;
     hub.selected = view.selected;
     hub.frame = view.frame.unwrap_or(hub.frame);
     hub.pass = render_pass(view.pass);
@@ -216,16 +220,18 @@ fn host_command(h: &mut Hub, request: &Value) -> Option<Result<Outcome, CommandE
         )),
         // file paths (desktop): read them in, and write exports out
         #[cfg(not(target_arch = "wasm32"))]
-        "model.import" | "image.import" | "model.export" if params.get("path").is_some() => (|| {
-            let (p, write_to) = host::resolve_paths(cmd, params)?;
-            let mut req = request.clone();
-            req["params"] = p;
-            let mut out = h.session.dispatch_json(req)?;
-            if let Some(path) = write_to {
-                out.result = host::write_export(&path, out.result)?;
-            }
-            Ok(out)
-        })(),
+        "model.import" | "image.import" | "environment.import" | "model.export" if params.get("path").is_some() => {
+            (|| {
+                let (p, write_to) = host::resolve_paths(cmd, params)?;
+                let mut req = request.clone();
+                req["params"] = p;
+                let mut out = h.session.dispatch_json(req)?;
+                if let Some(path) = write_to {
+                    out.result = host::write_export(&path, out.result)?;
+                }
+                Ok(out)
+            })()
+        }
         _ => return None,
     };
     Some(r)

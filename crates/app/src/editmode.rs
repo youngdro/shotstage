@@ -1511,6 +1511,16 @@ impl EditorApp {
             if ui.button(tr("Done")).on_hover_text(tr("Tab")).clicked() {
                 self.leave_edit();
             }
+            let open = self.uv_is_open(id);
+            if ui
+                .selectable_label(open, tr("UV editor"))
+                .on_hover_text(tr(
+                    "Show the UV map beside the view: drag UV vertices, edges, faces and islands over the picture",
+                ))
+                .clicked()
+            {
+                self.uv_toggle(id);
+            }
         });
         ui.horizontal_wrapped(|ui| {
             ui.label(tr("Select"));

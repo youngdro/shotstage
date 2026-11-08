@@ -1,10 +1,12 @@
 //! shotstage core: the pure-data scene document.
 //!
-//! Nothing in this crate touches the GPU, the browser or the filesystem, so the same scene
+//! Nothing in this crate touches the GPU, the browser or the filesystem (it only decodes
+//! panoramas from bytes), so the same scene
 //! logic runs in the web editor (wasm), the CLI and the headless MCP server.
 
 pub mod camera;
 pub mod csg;
+pub mod environment;
 pub mod eval;
 pub mod human;
 pub mod image;
@@ -16,8 +18,10 @@ pub mod scene;
 pub mod spatial;
 pub mod timeline;
 pub mod uv;
+pub mod uvedit;
 
 pub use camera::{CameraData, Intrinsics};
+pub use environment::{Environment, ShadowSettings, Sky};
 pub use eval::{EvaluatedEntity, EvaluatedScene, evaluate};
 pub use image::{Asset, ImageData};
 pub use light::{LightData, LightKind};

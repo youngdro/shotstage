@@ -20,16 +20,16 @@ Units: metres, degrees, frames; +Y up, the ground is y = 0, object fronts face +
 - **Scene**: [`scene.inspect`](#sceneinspect) [`scene.summary`](#scenesummary) [`scene.new`](#scenenew) [`scene.load`](#sceneload) [`scene.evaluate`](#sceneevaluate) [`scene.raycast`](#sceneraycast) [`scene.template`](#scenetemplate) [`scene.templates`](#scenetemplates) [`scene.save`](#scenesave) [`scene.open`](#sceneopen)
 - **Building blocks**: [`prefab.create`](#prefabcreate) [`prefab.list`](#prefablist)
 - **Entities**: [`entity.create`](#entitycreate) [`entity.delete`](#entitydelete) [`entity.duplicate`](#entityduplicate) [`entity.rename`](#entityrename) [`entity.get`](#entityget) [`entity.setTransform`](#entitysettransform) [`entity.translate`](#entitytranslate) [`entity.setParent`](#entitysetparent) [`entity.setVisible`](#entitysetvisible) [`entity.setLocked`](#entitysetlocked) [`entity.place`](#entityplace) [`entity.moveTo`](#entitymoveto) [`entity.rotate`](#entityrotate) [`entity.face`](#entityface) [`entity.bounds`](#entitybounds) [`entity.group`](#entitygroup) [`entity.ungroup`](#entityungroup) [`entity.align`](#entityalign) [`entity.distribute`](#entitydistribute) [`entity.attach`](#entityattach) [`entity.copy`](#entitycopy) [`entity.paste`](#entitypaste)
-- **Meshes**: [`mesh.setPrimitive`](#meshsetprimitive) [`mesh.setData`](#meshsetdata) [`mesh.setColor`](#meshsetcolor) [`mesh.addModifier`](#meshaddmodifier) [`mesh.removeModifier`](#meshremovemodifier) [`mesh.applyModifiers`](#meshapplymodifiers) [`mesh.join`](#meshjoin) [`mesh.setOriginToCenter`](#meshsetorigintocenter) [`mesh.stats`](#meshstats) [`mesh.exportObj`](#meshexportobj) [`mesh.editData`](#mesheditdata) [`mesh.makeEditable`](#meshmakeeditable) [`mesh.select`](#meshselect) [`mesh.transformElements`](#meshtransformelements) [`mesh.extrude`](#meshextrude) [`mesh.inset`](#meshinset) [`mesh.bevel`](#meshbevel) [`mesh.loopCut`](#meshloopcut) [`mesh.subdivideFaces`](#meshsubdividefaces) [`mesh.connect`](#meshconnect) [`mesh.deleteElements`](#meshdeleteelements) [`mesh.merge`](#meshmerge) [`mesh.mergeByDistance`](#meshmergebydistance) [`mesh.fill`](#meshfill) [`mesh.flipNormals`](#meshflipnormals) [`mesh.bridge`](#meshbridge) [`mesh.edgeSlide`](#meshedgeslide) [`mesh.bisect`](#meshbisect) [`mesh.knife`](#meshknife) [`mesh.spin`](#meshspin) [`mesh.boolean`](#meshboolean) [`mesh.setMaterial`](#meshsetmaterial) [`mesh.unwrap`](#meshunwrap) [`mesh.uvTransform`](#meshuvtransform) [`mesh.uvData`](#meshuvdata)
+- **Meshes**: [`mesh.setPrimitive`](#meshsetprimitive) [`mesh.setData`](#meshsetdata) [`mesh.setColor`](#meshsetcolor) [`mesh.addModifier`](#meshaddmodifier) [`mesh.removeModifier`](#meshremovemodifier) [`mesh.applyModifiers`](#meshapplymodifiers) [`mesh.join`](#meshjoin) [`mesh.setOriginToCenter`](#meshsetorigintocenter) [`mesh.stats`](#meshstats) [`mesh.exportObj`](#meshexportobj) [`mesh.editData`](#mesheditdata) [`mesh.makeEditable`](#meshmakeeditable) [`mesh.select`](#meshselect) [`mesh.transformElements`](#meshtransformelements) [`mesh.extrude`](#meshextrude) [`mesh.inset`](#meshinset) [`mesh.bevel`](#meshbevel) [`mesh.loopCut`](#meshloopcut) [`mesh.subdivideFaces`](#meshsubdividefaces) [`mesh.connect`](#meshconnect) [`mesh.deleteElements`](#meshdeleteelements) [`mesh.merge`](#meshmerge) [`mesh.mergeByDistance`](#meshmergebydistance) [`mesh.fill`](#meshfill) [`mesh.flipNormals`](#meshflipnormals) [`mesh.bridge`](#meshbridge) [`mesh.edgeSlide`](#meshedgeslide) [`mesh.bisect`](#meshbisect) [`mesh.knife`](#meshknife) [`mesh.spin`](#meshspin) [`mesh.boolean`](#meshboolean) [`mesh.setMaterial`](#meshsetmaterial) [`mesh.unwrap`](#meshunwrap) [`mesh.uvTransform`](#meshuvtransform) [`mesh.uvSet`](#meshuvset) [`mesh.uvAlign`](#meshuvalign) [`mesh.uvWeld`](#meshuvweld) [`mesh.uvPack`](#meshuvpack) [`mesh.uvSelect`](#meshuvselect) [`mesh.uvIslands`](#meshuvislands) [`mesh.uvData`](#meshuvdata)
 - **Model files**: [`model.import`](#modelimport) [`model.export`](#modelexport)
 - **Pictures**: [`image.import`](#imageimport) [`image.set`](#imageset) [`image.get`](#imageget)
 - **Cameras**: [`camera.setLens`](#camerasetlens) [`camera.lookAt`](#cameralookat) [`camera.setActive`](#camerasetactive) [`camera.describe`](#cameradescribe) [`camera.trajectory`](#cameratrajectory) [`camera.orbitMove`](#cameraorbitmove) [`camera.dollyMove`](#cameradollymove) [`camera.frame`](#cameraframe) [`camera.setReference`](#camerasetreference)
 - **People**: [`pose.set`](#poseset) [`pose.aim`](#poseaim) [`pose.get`](#poseget) [`pose.list`](#poselist) [`person.setHair`](#personsethair) [`person.setBody`](#personsetbody) [`person.setOutfit`](#personsetoutfit) [`person.setExpression`](#personsetexpression) [`person.expressions`](#personexpressions) [`pose.hand`](#posehand) [`person.get`](#personget) [`person.lookAt`](#personlookat)
-- **Lights**: [`light.set`](#lightset) [`light.preset`](#lightpreset) [`light.list`](#lightlist)
+- **Lights**: [`light.set`](#lightset) [`light.preset`](#lightpreset) [`light.list`](#lightlist) [`environment.set`](#environmentset) [`environment.import`](#environmentimport) [`environment.list`](#environmentlist) [`light.shadows`](#lightshadows) [`light.fromEnvironment`](#lightfromenvironment)
 - **Animation**: [`keyframe.set`](#keyframeset) [`keyframe.delete`](#keyframedelete) [`keyframe.list`](#keyframelist) [`motion.apply`](#motionapply) [`motion.list`](#motionlist) [`keyframe.move`](#keyframemove) [`keyframe.retime`](#keyframeretime) [`keyframe.setInterp`](#keyframesetinterp)
 - **Timeline and shots**: [`timeline.set`](#timelineset) [`shot.create`](#shotcreate) [`shot.delete`](#shotdelete) [`shot.cut`](#shotcut) [`shot.set`](#shotset)
 - **Rendering**: [`render.snapshot`](#rendersnapshot) [`render.storyboard`](#renderstoryboard) [`render.sequence`](#rendersequence)
-- **Editor view**: [`editor.select`](#editorselect) [`editor.setFrame`](#editorsetframe) [`editor.setView`](#editorsetview) [`editor.editMesh`](#editoreditmesh) [`editor.editSelect`](#editoreditselect) [`editor.state`](#editorstate)
+- **Editor view**: [`editor.select`](#editorselect) [`editor.setFrame`](#editorsetframe) [`editor.setView`](#editorsetview) [`editor.editMesh`](#editoreditmesh) [`editor.editSelect`](#editoreditselect) [`editor.uvEditor`](#editoruveditor) [`editor.uvSelect`](#editoruvselect) [`editor.state`](#editorstate)
 
 ## Session
 
@@ -849,16 +849,95 @@ _changes the scene_ · MCP tool `mesh_unwrap`
 
 ### mesh.uvTransform
 
-Move, turn or scale the UVs of some faces (all by default), e.g. to fit a label onto the front.  
+Move, turn or scale part of the UV map: faces, face corners (`[face, index]`), optionally sticky (shared corners follow) or whole islands; all by default. E.g. fit a label onto the front.  
 _changes the scene_ · MCP tool `mesh_uvTransform`
 
 | Param | Type | |
 | --- | --- | --- |
-| `faces` | integer[] | Faces whose UVs move. Default: all. |
+| `corners` | [integer; 2][] | Face corners `[face, index in the face]` (what the UV editor selects). |
+| `faces` | integer[] | Faces: all their corners. With no `corners` either: the whole mesh. |
 | `id` **required** | string |  |
-| `rotate` | number | Turn, degrees. |
-| `scale` | array | Scale `[su, sv]` about the faces' UV centre. |
-| `translate` | array | Move by `[du, dv]` (1 = the whole picture). |
+| `islands` | boolean | Grow to whole islands (the flat pieces the corners are in). Default false. |
+| `pivot` | array | Point to turn and scale about. Default: the mean of the corners. |
+| `rotate` | number | Turn, degrees, counter-clockwise as seen in the UV editor (the picture on the surface turns the other way). |
+| `scale` | array | Scale `[su, sv]` (negative mirrors). |
+| `sticky` | boolean | Also take every corner at the same spot of the same vertex (Blender's sticky selection), so neighbouring faces stay joined. Default false. |
+| `translate` | array | Move by `[du, dv]` (1 = the whole picture; v runs down the picture). |
+
+### mesh.uvSet
+
+Put face corners of the UV map at exact coordinates (what dragging in the UV editor does).  
+_changes the scene_ · MCP tool `mesh_uvSet`
+
+| Param | Type | |
+| --- | --- | --- |
+| `corners` **required** | [integer; 2][] | Face corners `[face, index in the face]`. |
+| `id` **required** | string |  |
+| `uvs` **required** | [number; 2][] | New coordinate `[u, v]` of each corner, in the same order. |
+
+### mesh.uvAlign
+
+Line UV corners up in a column (same u) or a row (same v): at their left / top, middle or right / bottom.  
+_changes the scene_ · MCP tool `mesh_uvAlign`
+
+| Param | Type | |
+| --- | --- | --- |
+| `axis` **required** | `u` \| `v` | `u`: line them up in a column (same u); `v`: in a row (same v). |
+| `corners` | [integer; 2][] | Face corners `[face, index in the face]` (what the UV editor selects). |
+| `faces` | integer[] | Faces: all their corners. With no `corners` either: the whole mesh. |
+| `id` **required** | string |  |
+| `islands` | boolean | Grow to whole islands (the flat pieces the corners are in). Default false. |
+| `sticky` | boolean | Also take every corner at the same spot of the same vertex (Blender's sticky selection), so neighbouring faces stay joined. Default false. |
+| `to` | `min` \| `center` \| `max` | `min` (left / top), `center` (default) or `max` (right / bottom). |
+
+### mesh.uvWeld
+
+Bring UV corners together: all to one point, or `stitch` each vertex's corners to their middle to join pieces cut apart along a seam.  
+_changes the scene_ · MCP tool `mesh_uvWeld`
+
+| Param | Type | |
+| --- | --- | --- |
+| `corners` | [integer; 2][] | Face corners `[face, index in the face]` (what the UV editor selects). |
+| `faces` | integer[] | Faces: all their corners. With no `corners` either: the whole mesh. |
+| `id` **required** | string |  |
+| `islands` | boolean | Grow to whole islands (the flat pieces the corners are in). Default false. |
+| `mode` | `center` \| `stitch` | `center` (default): all the corners to one point. `stitch`: the corners of each mesh vertex to their own middle, joining pieces that were cut apart along a seam. |
+| `sticky` | boolean | Also take every corner at the same spot of the same vertex (Blender's sticky selection), so neighbouring faces stay joined. Default false. |
+
+### mesh.uvPack
+
+Lay the UV islands (all, or those of some faces) out again inside the picture square without overlap, keeping their relative sizes.  
+_changes the scene_ · MCP tool `mesh_uvPack`
+
+| Param | Type | |
+| --- | --- | --- |
+| `faces` | integer[] | Pack only the islands these faces are in. Default: all. |
+| `id` **required** | string |  |
+| `margin` | number | Gap between islands, as a fraction of the square. Default 0.01. |
+| `rotate` | boolean | Turn tall islands to lie flat (packs tighter). Default true. |
+
+### mesh.uvSelect
+
+Resolve a UV selection without changing anything: faces / corners / a box in UV space, grown sticky or to whole islands. Returns the corners, the faces fully inside and the islands touched.  
+_query_ · MCP tool `mesh_uvSelect`
+
+| Param | Type | |
+| --- | --- | --- |
+| `corners` | [integer; 2][] | Face corners `[face, index in the face]` (what the UV editor selects). |
+| `faces` | integer[] | Faces: all their corners. With no `corners` either: the whole mesh. |
+| `id` **required** | string |  |
+| `islands` | boolean | Grow to whole islands (the flat pieces the corners are in). Default false. |
+| `rect` | array | Instead: every corner whose coordinate lies in this box `[[u0, v0], [u1, v1]]`. |
+| `sticky` | boolean | Also take every corner at the same spot of the same vertex (Blender's sticky selection), so neighbouring faces stay joined. Default false. |
+
+### mesh.uvIslands
+
+The UV map's islands (flat pieces): their faces, bounding box and area in UV space.  
+_query_ · MCP tool `mesh_uvIslands`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` **required** | string |  |
 
 ### mesh.uvData
 
@@ -1214,11 +1293,12 @@ _changes the scene_ · MCP tool `person_lookAt`
 
 ### light.set
 
-Change a light: kind (sun, point, spot, area), colour, intensity, cone angle, softness, panel size.  
+Change a light: kind (sun, point, spot, area), colour or colour temperature (Kelvin), intensity, cone angle, softness, panel size, whether it casts shadows.  
 _changes the scene_ · MCP tool `light_set`
 
 | Param | Type | |
 | --- | --- | --- |
+| `castShadows` | boolean | Whether it casts shadows (up to four lights do at once, the brightest). |
 | `color` | array | Linear RGB 0..1. |
 | `coneDegrees` | number | Spot: full cone angle in degrees. |
 | `id` **required** | string |  |
@@ -1226,10 +1306,11 @@ _changes the scene_ · MCP tool `light_set`
 | `kind` | `sun` \| `point` \| `spot` \| `area` |  |
 | `size` | array | Area: width and height in metres. |
 | `softness` | number | Spot and area: edge softness 0..1. |
+| `temperature` | number | Set the colour from a colour temperature in Kelvin: 2700 warm bulb, 3200 tungsten, 5600 daylight, 7500 shade. |
 
 ### light.preset
 
-Light a subject in one step: threePoint, rembrandt, productSoftbox, backlight, goldenHour, daylight, or clear (back to the flat studio light). Lights are placed for the active camera.  
+Light a subject in one step. Portrait: threePoint, rembrandt, loop, butterfly, clamshell, split. Product and shop: productSoftbox, highKey, freshCounter. Mood: lowKey, backlight, window, neon, stage. Outdoor: goldenHour, daylight, overcast, night. clear goes back to the flat studio light. Lights are placed for the active camera; presets that come with a sky (outdoor ones, white or black backdrops) set it too.  
 _changes the scene_ · MCP tool `light_preset`
 
 | Param | Type | |
@@ -1237,8 +1318,9 @@ _changes the scene_ · MCP tool `light_preset`
 | `camera` | string | The camera the lighting is arranged for (key light to its left, rim behind the subject). Default: the active camera, else the subject's front. |
 | `frame` | number |  |
 | `intensity` | number | Multiply every light's brightness. Default 1. |
-| `preset` **required** | `threePoint` \| `rembrandt` \| `productSoftbox` \| `backlight` \| `goldenHour` \| `daylight` \| `clear` |  |
+| `preset` **required** | `threePoint` \| `rembrandt` \| `loop` \| `butterfly` \| `clamshell` \| `split` \| `productSoftbox` \| `highKey` \| `lowKey` \| `backlight` \| `window` \| `neon` \| `stage` \| `freshCounter` \| `goldenHour` \| `daylight` \| `overcast` \| `night` \| `clear` |  |
 | `replace` | boolean | Remove the lights a previous preset made first. Default true. |
+| `sky` | boolean | Also set the sky that goes with the preset (daylight, sunset, a white or black backdrop...). Default true. |
 | `subject` | string | What to light. Default: the selection's group is not known here, so the whole scene's bounds are used. |
 
 ### light.list
@@ -1247,6 +1329,66 @@ Lighting presets for light.preset, and the scene's lights.
 _query_ · MCP tool `light_list`
 
 No params.
+
+### environment.set
+
+Set the sky around the scene: studio (default), color (seamless backdrop), day, sunset, overcast, night, softbox, or an imported hdri. The sky lights the scene softly from all round and can show behind it; turn it, tint it (colour or Kelvin) and set its brightness.  
+_changes the scene_ · MCP tool `environment_set`
+
+| Param | Type | |
+| --- | --- | --- |
+| `background` | boolean | Show the sky behind the scene. |
+| `color` | array | Colour sky: the colour; other skies: a tint. Linear RGB 0..1. |
+| `hdri` | string | HDRI asset key (from environment.import); sets the sky to hdri. |
+| `intensity` | number | Brightness of the sky light and background, 0..=10. |
+| `rotation` | number | Turn the sky (and its sun) about the vertical axis, degrees. |
+| `sky` | `studio` \| `color` \| `day` \| `sunset` \| `overcast` \| `night` \| `softbox` \| `hdri` | studio (no sky light, default), color (one colour all round: a paper backdrop), day, sunset, overcast, night, softbox, or hdri (an imported panorama). |
+| `temperature` | number | Tint by colour temperature instead, Kelvin (6500 = neutral). |
+
+### environment.import
+
+Import an HDRI (.hdr) or a 2:1 panorama picture and use it as the sky: it lights the scene and shows behind it. Pair it with light.fromEnvironment for a sun that matches.  
+_changes the scene_ · MCP tool `environment_import`
+
+| Param | Type | |
+| --- | --- | --- |
+| `apply` | boolean | Use it as the sky right away. Default true. |
+| `data` | string | An HDRI (Radiance .hdr) or an ordinary 2:1 panorama (PNG, JPEG, WebP), base64 (a `data:` URL works too). |
+| `intensity` | number |  |
+| `name` | string |  |
+| `path` | string | Or a file on disk to read (CLI and MCP only). |
+| `rotation` | number |  |
+
+### environment.list
+
+The built-in skies and the scene's current sky and shadow settings.  
+_query_ · MCP tool `environment_list`
+
+No params.
+
+### light.shadows
+
+Shadow settings: on/off, how dark (strength), how soft; and which lights cast them (up to four at once, brightest first).  
+_changes the scene_ · MCP tool `light_shadows`
+
+| Param | Type | |
+| --- | --- | --- |
+| `cast` | boolean |  |
+| `enabled` | boolean | Shadows on or off for the whole scene. |
+| `lights` | array | Turn shadow casting on or off for these lights (up to four lights cast at once). |
+| `softness` | number | Edge blur, 0 = crisp .. 1 = very soft. |
+| `strength` | number | How dark shadows are, 0..1. |
+
+### light.fromEnvironment
+
+Add a sun light shining from the sky's brightest spot (the sun of a built-in sky or an HDRI), in its colour, so shadows match the sky.  
+_changes the scene_ · MCP tool `light_fromEnvironment`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` | string |  |
+| `intensity` | number | Brightness of the sun. Default: from how clear the sky's sun is (about 1.2 for a clear day). |
+| `parent` | string | Put it in this group. |
 
 
 ## Animation
@@ -1504,6 +1646,28 @@ _query · needs view_ · MCP tool `editor_editSelect`
 | `faces` | array |  |
 | `mode` | `vertex` \| `edge` \| `face` |  |
 | `vertices` | array |  |
+
+### editor.uvEditor
+
+Open the UV editor on a mesh (null closes it): its UV map over its picture, to pick and drag UV vertices, edges, faces or islands. Optional select mode and sticky selection.  
+_query · needs view_ · MCP tool `editor_uvEditor`
+
+| Param | Type | |
+| --- | --- | --- |
+| `id` | string | Mesh whose UV map to show, or null to close the UV editor. |
+| `mode` | `vertex` \| `edge` \| `face` \| `island` | What clicks pick. Default vertex. |
+| `sticky` | boolean | Picking a UV vertex also picks the corners of neighbouring faces at the same spot. |
+
+### editor.uvSelect
+
+Set the UV editor's selection: face corners `[face, index]` and / or whole faces (mesh.uvSelect resolves boxes, sticky and islands).  
+_query · needs view_ · MCP tool `editor_uvSelect`
+
+| Param | Type | |
+| --- | --- | --- |
+| `corners` | array | Face corners `[face, index in the face]`. |
+| `faces` | array | Whole faces (all their corners). |
+| `mode` | `vertex` \| `edge` \| `face` \| `island` |  |
 
 ### editor.state
 
