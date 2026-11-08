@@ -16,6 +16,7 @@ pub mod lights;
 pub mod meshedit;
 pub mod model;
 pub mod motion;
+pub mod people;
 mod placement;
 pub mod prefabs;
 pub mod rig;

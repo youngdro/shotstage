@@ -230,7 +230,7 @@ pub const PREFABS: &[PrefabInfo] = &[
     info!(Bench, "bench", "bench", "Bench", Furniture, "Park bench 1.6 m"),
     info!(StreetLamp, "streetLamp", "street_lamp", "Street lamp", Furniture, "Street lamp 4 m"),
     info!(Bicycle, "bicycle", "bicycle", "Bicycle", Furniture, "Bicycle 1.7 m long, front at +Z"),
-    info!(TrafficCone, "trafficCone", "cone", "Cone", Furniture, "Traffic cone 70 cm"),
+    info!(TrafficCone, "trafficCone", "cone", "Traffic cone", Furniture, "Traffic cone 70 cm"),
     info!(Fence, "fence", "fence", "Fence", Furniture, "Picket fence section 2 m"),
     info!(Plant, "plant", "plant", "Plant", Furniture, "Potted plant 1 m"),
     info!(
@@ -286,7 +286,7 @@ pub const PREFABS: &[PrefabInfo] = &[
     ),
     info!(Cart, "cart", "cart", "Cart", Retail, "Shopping trolley, handle at -Z"),
     info!(Basket, "basket", "basket", "Basket", Retail, "Hand basket 0.45 × 0.3 m"),
-    info!(Scale, "scale", "scale", "Scale", Retail, "Produce weighing scale with display"),
+    info!(Scale, "scale", "scale", "Scales", Retail, "Produce weighing scale with display"),
     info!(PriceSign, "priceSign", "price_sign", "Sign", Retail, "Price sign on a stand, 1.3 m"),
     info!(Pallet, "pallet", "pallet", "Pallet", Retail, "Pallet 1.2 × 1.0 m stacked with cartons"),
     info!(

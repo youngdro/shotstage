@@ -20,6 +20,10 @@
 
 视口工具栏的 **📷 Save frame** 把当前帧透过镜头的画面存成 1920 宽的 PNG。
 
+## 界面语言
+
+界面支持 **中文** 和 **English**，顶栏右侧一键切换，选择会被记住；第一次打开时跟随系统（桌面版）或浏览器（网页版）的语言。素材、面板、菜单、预设、模板、提示和帮助都已翻译，搜索框用中文或英文都能搜到。中文字体是内嵌的 Noto Sans SC 子集（界面用到的字加 3755 个常用字，约 0.8 MB，SIL OFL）；桌面版另外会用系统里的中文字体显示其他字。命令名和 API 保持英文。
+
 ## 顺手的操作
 
 - **保存 / 打开**：**Save**（Cmd/Ctrl+S）把整个场景存成 `.shotstage.json`；**Open…** 打开它（也能导入模型和图片），打开算一步，可撤销。每次改动约 2 秒后自动保存（网页存在浏览器本地，桌面版存在 `~/.shotstage/autosave.json`），下次启动会询问是否恢复上次的场景。
@@ -79,6 +83,17 @@
 命令：`person.setBody`、`person.setOutfit`、`person.setExpression`、`person.expressions`、`pose.hand`、`person.get`。
 
 每一次拖动只算一步撤销，背后调用的是 `entity.place`、`entity.moveTo`、`entity.rotate`、`prefab.create`、`camera.frame` 这些命令，agent 可以用完全相同的方式操作。
+
+### 写实人物与风格化人物
+
+素材面板里还有两组更精细的人物，都带完整骨骼（含手指），上面这些姿势、动作预设、拖关节、拿在手里、看向相机都能直接用：
+
+- **写实人物**：年轻女性、年轻男性、年长女性、年长男性。用 MakeHuman 的 Blender 插件 MPFB 生成，衣服、鞋、发型都来自官方 CC0 资源包。
+- **风格化人物**：四个造型（侧分发、寸头加胡子、长发、丸子头），来自 Quaternius 的 Universal Base Characters（CC0）。
+
+每个人物约 2 万个三角面，GLB 文件 0.6–0.9 MB。桌面版、命令行和 MCP 自带这些文件；网页版只在第一次用到某个人物时才通过 HTTP 加载 `people/<文件>.glb`（鼠标移到卡片上就开始预加载），不会增大 wasm。命令：`person.create`（`variant` 见 `person.catalog`）；网页里也可以 `await shotstage.addPerson("realisticWoman", {position: [1, 0, 0]})`。
+
+生成和转换脚本在 `tools/people/`，素材来源和许可见 `assets/LICENSES.md`。
 
 ## 导入导出模型
 
@@ -266,7 +281,7 @@ claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json -
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
 | 网格编辑 | `mesh.editData` `mesh.makeEditable` `mesh.select`（loop / ring / faceLoop / linked / more / all） `mesh.transformElements` `mesh.extrude` `mesh.inset` `mesh.bevel` `mesh.loopCut` `mesh.subdivideFaces` `mesh.connect` `mesh.merge` `mesh.mergeByDistance` `mesh.fill` `mesh.flipNormals` `mesh.deleteElements` `mesh.bridge` `mesh.edgeSlide` `mesh.bisect`（平面切割，可删除一侧） `mesh.knife`（沿表面点路径切） `mesh.spin`（旋转挤出） `mesh.transformElements` 的 `proportional` 参数（衰减编辑） `mesh.boolean`（union / difference / intersect） |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
-| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `pose.hand` `person.setHair` `person.setBody` `person.setOutfit` `person.setExpression` `person.expressions` `person.get` |
+| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `pose.hand` `person.setHair` `person.lookAt` `person.setBody` `person.setOutfit` `person.setExpression` `person.expressions` `person.get` `person.create` `person.catalog` |
 | 模型 | `model.import` `model.export`（都可以用 `path`） |
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |

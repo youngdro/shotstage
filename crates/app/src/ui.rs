@@ -1,6 +1,7 @@
 //! The egui editor: outliner, properties, timeline, command console and the 3D viewport.
 //! Every edit goes through [`crate::hub::dispatch`]; the UI keeps only view state.
 
+use crate::i18n::tr;
 use egui::{Color32, CursorIcon, Pos2, Rect, Sense, Vec2};
 use glam::{Mat4, Vec3, Vec4Swizzles};
 use serde_json::{Value, json};
@@ -27,18 +28,22 @@ enum Block {
     Light(&'static str, &'static str, &'static str),
     /// lighting preset, label, description (click only)
     LightPreset(&'static str, &'static str, &'static str),
+    /// a detailed rigged person from a bundled (desktop) or downloaded (web) GLB
+    Person(&'static shotstage_commands::people::PersonAsset),
 }
 
 impl Block {
     fn label(&self) -> &'static str {
         match self {
             Block::Shape(l, ..) | Block::Prefab(_, l, _) | Block::Light(_, l, _) | Block::LightPreset(_, l, _) => l,
+            Block::Person(a) => a.label,
         }
     }
     fn description(&self) -> &'static str {
         match self {
             Block::Shape(..) => "Basic shape (edit its size in Mesh / with mesh.setPrimitive)",
             Block::Prefab(_, _, d) | Block::Light(_, _, d) | Block::LightPreset(_, _, d) => d,
+            Block::Person(a) => a.description,
         }
     }
     /// Key of this block's palette thumbnail.
@@ -46,6 +51,7 @@ impl Block {
         match self {
             Block::Prefab(k, ..) => Some(format!("prefab:{k}")),
             Block::Shape(l, ..) => Some(format!("shape:{l}")),
+            Block::Person(a) => Some(format!("person:{}", a.key)),
             _ => None,
         }
     }
@@ -55,10 +61,12 @@ impl Block {
             let key = match self {
                 Block::Shape(..) => "",
                 Block::Prefab(k, ..) | Block::Light(k, ..) | Block::LightPreset(k, ..) => k,
+                Block::Person(a) => a.key,
             };
-            self.label().to_lowercase().contains(filter)
+            // either language finds it
+            crate::i18n::both(self.label()).to_lowercase().contains(filter)
                 || key.to_lowercase().contains(filter)
-                || self.description().to_lowercase().contains(filter)
+                || crate::i18n::both(self.description()).to_lowercase().contains(filter)
         }
     }
 }
@@ -150,31 +158,31 @@ fn tree_row(ui: &mut egui::Ui, cx: &mut TreeCtx, e: &shotstage_core::Entity) {
             *cx.renaming = Some((e.id.clone(), e.name.clone()));
         }
         r.context_menu(|ui| {
-            if ui.button("Focus").clicked() {
+            if ui.button(tr("Focus")).clicked() {
                 cx.acts.push(TreeAct::Focus(e.id.clone()));
                 ui.close();
             }
             if !joint {
-                if ui.button("Rename").clicked() {
+                if ui.button(tr("Rename")).clicked() {
                     *cx.renaming = Some((e.id.clone(), e.name.clone()));
                     ui.close();
                 }
-                if ui.button("Duplicate").clicked() {
+                if ui.button(tr("Duplicate")).clicked() {
                     cx.acts.push(TreeAct::Duplicate(e.id.clone()));
                     ui.close();
                 }
             }
-            if ui.button(if e.visible { "Hide" } else { "Show" }).clicked() {
+            if ui.button(tr(if e.visible { "Hide" } else { "Show" })).clicked() {
                 cx.acts.push(TreeAct::Visible(e.id.clone(), !e.visible));
                 ui.close();
             }
             if !joint {
-                if ui.button(if e.locked { "Unlock" } else { "Lock" }).clicked() {
+                if ui.button(tr(if e.locked { "Unlock" } else { "Lock" })).clicked() {
                     cx.acts.push(TreeAct::Locked(e.id.clone(), !e.locked));
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Delete").clicked() {
+                if ui.button(tr("Delete")).clicked() {
                     cx.acts.push(TreeAct::Delete(e.id.clone()));
                     ui.close();
                 }
@@ -182,12 +190,12 @@ fn tree_row(ui: &mut egui::Ui, cx: &mut TreeCtx, e: &shotstage_core::Entity) {
         });
         {
             let small = |s: &str, active: bool| {
-                let t = egui::RichText::new(s).size(12.0);
+                let t = egui::RichText::new(tr(s)).size(12.0);
                 egui::Button::new(if active { t } else { t.weak() }).frame(false).min_size(Vec2::new(18.0, 18.0))
             };
             if ui
                 .add(small(if e.visible { "👁" } else { "⊘" }, !e.visible))
-                .on_hover_text(if e.visible { "Hide" } else { "Show" })
+                .on_hover_text(tr(if e.visible { "Hide" } else { "Show" }))
                 .clicked()
             {
                 cx.acts.push(TreeAct::Visible(e.id.clone(), !e.visible));
@@ -195,11 +203,11 @@ fn tree_row(ui: &mut egui::Ui, cx: &mut TreeCtx, e: &shotstage_core::Entity) {
             if !joint
                 && ui
                     .add(small(if e.locked { "🔒" } else { "🔓" }, e.locked))
-                    .on_hover_text(if e.locked {
+                    .on_hover_text(tr(if e.locked {
                         "Unlock (drags pass through locked objects)"
                     } else {
                         "Lock: drags pass through it"
-                    })
+                    }))
                     .clicked()
             {
                 cx.acts.push(TreeAct::Locked(e.id.clone(), !e.locked));
@@ -319,8 +327,14 @@ fn rank_quick(items: &[QuickItem], query: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(i, it)| {
-            let label = it.label.to_lowercase();
-            let all = format!("{label} {} {}", it.kind.to_lowercase(), it.hint.to_lowercase());
+            // scored on the label as shown; found by either language's wording
+            let label = tr(&it.label).to_lowercase();
+            let all = format!(
+                "{label} {} {} {}",
+                crate::i18n::both(&it.label).to_lowercase(),
+                crate::i18n::both(it.kind).to_lowercase(),
+                crate::i18n::both(&it.hint).to_lowercase()
+            );
             if !words.iter().all(|w| all.contains(w)) {
                 return None;
             }
@@ -382,7 +396,10 @@ Several objects: Shift+click to add · Cmd/Ctrl+drag on empty space to box-selec
 
 /// A collapsible properties section.
 fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(egui::RichText::new(title).strong()).id_salt(title).default_open(open).show(ui, add);
+    egui::CollapsingHeader::new(egui::RichText::new(tr(title)).strong())
+        .id_salt(title)
+        .default_open(open)
+        .show(ui, add);
 }
 
 /// The joint a click on `hit` (at `point`) means: a person's body part's joint, or the nearest
@@ -472,6 +489,30 @@ fn thumb_items() -> Vec<(String, Value)> {
     out
 }
 
+/// The detailed people of one style.
+fn people(realistic: bool) -> Vec<Block> {
+    shotstage_commands::people::PEOPLE.iter().filter(|a| a.realistic == realistic).map(Block::Person).collect()
+}
+
+/// Pre-rendered palette thumbnails of the detailed people (their GLBs load on demand).
+fn person_thumbs() -> Vec<(String, &'static [u8])> {
+    macro_rules! thumbs {
+        ($($k:literal => $f:literal),* $(,)?) => {
+            vec![$((format!("person:{}", $k), include_bytes!(concat!("../../../assets/people/thumbs/", $f)) as &[u8]),)*]
+        };
+    }
+    thumbs!(
+        "realisticWoman" => "realistic_woman.png",
+        "realisticMan" => "realistic_man.png",
+        "realisticWomanOlder" => "realistic_woman_older.png",
+        "realisticManOlder" => "realistic_man_older.png",
+        "stylizedMan" => "stylized_man.png",
+        "stylizedManBeard" => "stylized_man_beard.png",
+        "stylizedWoman" => "stylized_woman.png",
+        "stylizedWomanBuns" => "stylized_woman_buns.png",
+    )
+}
+
 /// Palette sections: title, open at start, blocks.
 fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
     use prefabs::Category;
@@ -511,13 +552,15 @@ fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
         ("People", true, of(Category::People)),
         ("Fresh retail", true, of(Category::Retail)),
         ("Product shoot", true, of(Category::Product)),
+        ("Realistic people", true, people(true)),
+        ("Stylized people", false, people(false)),
         ("Furniture & set", false, of(Category::Furniture)),
         (
             "Lights",
             false,
             vec![
                 Block::Light("sun", "Sun", "Parallel sunlight; aim it to set the time of day"),
-                Block::Light("point", "Point", "A bare bulb: light in every direction"),
+                Block::Light("point", "Point light", "A bare bulb: light in every direction"),
                 Block::Light("spot", "Spot", "A cone of light (stage light, rim light)"),
                 Block::Light("area", "Area", "A soft panel: softbox, window"),
                 Block::LightPreset(
@@ -756,6 +799,9 @@ pub struct EditorApp {
     cam_preview: bool,
     /// The frames the timeline shows when zoomed in (None: all of it).
     tl_view: Option<(f32, f32)>,
+    /// Detailed people's GLBs fetched on the web, and one clicked while its file was loading.
+    people: crate::files::PeopleCache,
+    pending_person: Option<&'static shotstage_commands::people::PersonAsset>,
     /// The storyboard strip above the timeline.
     show_board: bool,
     board: Option<crate::storyboard::Storyboard>,
@@ -866,6 +912,8 @@ impl EditorApp {
             s.visuals.selection.stroke.color = Color32::WHITE;
             s.visuals.hyperlink_color = ACCENT;
         });
+        crate::i18n::init();
+        crate::i18n::install_fonts(&cc.egui_ctx);
         let renderer = cc.wgpu_render_state.as_ref().map(|rs| Renderer::new(&rs.device));
         Self {
             hub,
@@ -874,6 +922,8 @@ impl EditorApp {
             pip: None,
             cam_preview: true,
             show_board: false,
+            people: Default::default(),
+            pending_person: None,
             tl_view: None,
             board: None,
             scroll_mode: ScrollMode::Auto,
@@ -992,6 +1042,21 @@ impl EditorApp {
                 json!({"type": "light", "name": label.to_lowercase(), "light": {"kind": kind}, "position": [0, 2.2, 0]}),
             )?,
             Block::LightPreset(..) => return None,
+            Block::Person(a) => {
+                let mut params = json!({"variant": a.key, "drop": false});
+                if shotstage_commands::people::bundled(a.key).is_none() {
+                    // the web: the file comes over HTTP, once
+                    match crate::files::person_file(&self.people, a.file, &self.hub) {
+                        crate::files::Fetched::Ready(data) => params["data"] = json!(data.as_str()),
+                        crate::files::Fetched::Loading => return None,
+                        crate::files::Fetched::Failed(e) => {
+                            log::warn!("{}: {e}", a.file);
+                            return None;
+                        }
+                    }
+                }
+                self.run_key(key, "person.create", params)?
+            }
         };
         r["id"].as_str().map(str::to_string)
     }
@@ -1096,7 +1161,10 @@ impl EditorApp {
                 // say it once, not every two seconds
                 if !self.autosave_warned {
                     self.autosave_warned = true;
-                    self.toast(format!("Autosave is not keeping this scene ({e}): use Save (Cmd/Ctrl+S)"));
+                    self.toast(crate::lf!(
+                        "Autosave is not keeping this scene ({e}): use Save (Cmd/Ctrl+S)",
+                        "自动保存没能保存这个场景（{e}）：请手动保存（Cmd/Ctrl+S）"
+                    ));
                 }
             }
         }
@@ -1106,9 +1174,9 @@ impl EditorApp {
     fn save_scene(&mut self) {
         let json = serde_json::to_string_pretty(&*self.scene()).unwrap_or_default();
         match crate::files::save("scene.shotstage.json", json.as_bytes(), "application/json") {
-            Ok(Some(w)) => self.toast(format!("Saved the scene: {w}")),
+            Ok(Some(w)) => self.toast(crate::lf!("Saved the scene: {w}", "场景已保存：{w}")),
             Ok(None) => {}
-            Err(e) => self.toast(format!("Could not save: {e}")),
+            Err(e) => self.toast(crate::lf!("Could not save: {e}", "无法保存：{e}")),
         }
     }
 
@@ -1133,8 +1201,12 @@ impl EditorApp {
                         .map_err(|e| e.message)
                 });
                 match opened {
-                    Ok(_) => self.toast(format!("Opened {name} (Undo goes back to the previous scene)")),
-                    Err(e) => self.toast(format!("{name} is not a shotstage scene: {e}")),
+                    Ok(_) => self.toast(crate::lf!(
+                        "Opened {name} (Undo goes back to the previous scene)",
+                        "已打开 {name}（撤销可回到之前的场景）"
+                    )),
+                    Err(e) => self
+                        .toast(crate::lf!("{name} is not a shotstage scene: {e}", "{name} 不是 shotstage 场景：{e}")),
                 }
                 continue;
             }
@@ -1156,9 +1228,12 @@ impl EditorApp {
                     Ok(_) => {
                         self.look_through = true;
                         self.hub.borrow_mut().look_through = true;
-                        self.toast(format!("{name} is laid over the camera view: line the shot up with it"));
+                        self.toast(crate::lf!(
+                            "{name} is laid over the camera view: line the shot up with it",
+                            "{name} 已叠在镜头画面上：对着它对齐构图"
+                        ));
                     }
-                    Err(e) => self.toast(format!("Could not use {name}: {}", e.message)),
+                    Err(e) => self.toast(crate::lf!("Could not use {name}: {}", "无法使用 {name}：{}", e.message)),
                 }
                 continue;
             }
@@ -1177,14 +1252,22 @@ impl EditorApp {
                             self.place_on_ray(&key, &id, ray_at(rect, &view, p), Vec3::ZERO, false);
                         }
                         self.select(Some(id));
-                        self.toast(format!("Added {name} ({} × {} px)", o.result["pixels"][0], o.result["pixels"][1]));
+                        self.toast(crate::lf!(
+                            "Added {name} ({} × {} px)",
+                            "已添加 {name}（{} × {} 像素）",
+                            o.result["pixels"][0],
+                            o.result["pixels"][1]
+                        ));
                     }
-                    Err(e) => self.toast(format!("Could not add {name}: {}", e.message)),
+                    Err(e) => self.toast(crate::lf!("Could not add {name}: {}", "无法添加 {name}：{}", e.message)),
                 }
                 continue;
             }
             let Some(format) = ModelFormat::from_extension(&ext) else {
-                self.toast(format!("{name}: not a model shotstage can import (glb, gltf, obj, stl, fbx, blend)"));
+                self.toast(crate::lf!(
+                    "{name}: not a model shotstage can import (glb, gltf, obj, stl, fbx, blend)",
+                    "{name}：不是 shotstage 能导入的模型（glb、gltf、obj、stl、fbx、blend）"
+                ));
                 continue;
             };
             let key = self.new_key("import");
@@ -1198,16 +1281,17 @@ impl EditorApp {
                     }
                     self.select(Some(id));
                     let skins = o.result["skins"].as_u64().unwrap_or(0);
-                    let mut msg = format!("Imported {name}: {} parts", o.result["entities"]);
+                    let mut msg =
+                        crate::lf!("Imported {name}: {} parts", "已导入 {name}：{} 个部件", o.result["entities"]);
                     if skins > 0 {
                         msg.push_str(" with a skeleton (click it, then a part, to pose)");
                     }
                     if let Some(w) = o.result["warnings"].as_array().and_then(|w| w.first()).and_then(Value::as_str) {
                         msg.push_str(&format!(" · {w}"));
                     }
-                    self.toast(msg);
+                    self.toast(tr(msg));
                 }
-                Err(e) => self.toast(format!("Could not import {name}: {}", e.message)),
+                Err(e) => self.toast(crate::lf!("Could not import {name}: {}", "无法导入 {name}：{}", e.message)),
             }
         }
     }
@@ -1217,13 +1301,13 @@ impl EditorApp {
         let req = json!({"command": "model.export", "params": {"format": format, "frame": self.frame()}});
         let r = match hub::dispatch(&self.hub, req) {
             Ok(o) => o.result,
-            Err(e) => return self.toast(format!("Export failed: {}", e.message)),
+            Err(e) => return self.toast(crate::lf!("Export failed: {}", "导出失败：{}", e.message)),
         };
         let name = r["fileName"].as_str().unwrap_or("scene.glb").to_string();
         let bytes = match (r["data"].as_str(), r["text"].as_str()) {
             (Some(d), _) => base64::engine::general_purpose::STANDARD.decode(d).unwrap_or_default(),
             (None, Some(t)) => t.as_bytes().to_vec(),
-            _ => return self.toast("Export failed: no data"),
+            _ => return self.toast(tr("Export failed: no data")),
         };
         let mime = r["mimeType"].as_str().unwrap_or("application/octet-stream").to_string();
         match crate::files::save(&name, &bytes, &mime) {
@@ -1232,10 +1316,15 @@ impl EditorApp {
                     let mtl_name = name.replace(".obj", ".mtl");
                     let _ = crate::files::save(&mtl_name, mtl.as_bytes(), "text/plain");
                 }
-                self.toast(format!("Exported {} meshes, {} triangles: {where_}", r["meshes"], r["triangles"]));
+                self.toast(crate::lf!(
+                    "Exported {} meshes, {} triangles: {where_}",
+                    "已导出 {} 个网格、{} 个三角面：{where_}",
+                    r["meshes"],
+                    r["triangles"]
+                ));
             }
             Ok(None) => {}
-            Err(e) => self.toast(format!("Export failed: {e}")),
+            Err(e) => self.toast(crate::lf!("Export failed: {e}", "导出失败：{e}")),
         }
     }
 
@@ -1256,23 +1345,20 @@ impl EditorApp {
             &[Group::Object]
         };
         let target = person.clone().unwrap_or_else(|| if is_cam { id.to_string() } else { root_of(scene, id) });
-        section(ui, "Animate", true, |ui| {
+        section(ui, &tr("Animate"), true, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.motion_filter)
-                    .hint_text("Search moves…")
+                    .hint_text(tr("Search moves…"))
                     .desired_width(f32::INFINITY),
             );
             egui::Grid::new("motion_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                ui.label("Length");
-                ui.add(
-                    egui::DragValue::new(&mut self.motion_secs)
-                        .range(0.0..=60.0)
-                        .speed(0.05)
-                        .custom_formatter(|v, _| if v <= 0.0 { "preset".into() } else { format!("{v:.1} s") }),
-                )
-                .on_hover_text("How long the move takes (preset = its own length)");
+                ui.label(tr("Length"));
+                ui.add(egui::DragValue::new(&mut self.motion_secs).range(0.0..=60.0).speed(0.05).custom_formatter(
+                    |v, _| if v <= 0.0 { tr("preset") } else { crate::lf!("{v:.1} s", "{v:.1} 秒") },
+                ))
+                .on_hover_text(tr("How long the move takes (preset = its own length)"));
                 ui.end_row();
-                ui.label("Strength");
+                ui.label(tr("Strength"));
                 ui.add(egui::Slider::new(&mut self.motion_strength, 0.25..=3.0).max_decimals(2));
                 ui.end_row();
             });
@@ -1283,7 +1369,9 @@ impl EditorApp {
                         "Moves around / looks at: {}",
                         scene.get(s).map(|e| e.name.as_str()).unwrap_or(s)
                     )),
-                    None => ui.weak("Select an object first to move around it (otherwise: what the camera looks at)."),
+                    None => {
+                        ui.weak(tr("Select an object first to move around it (otherwise: what the camera looks at)."))
+                    }
                 };
             }
             let filter = self.motion_filter.trim().to_lowercase();
@@ -1297,7 +1385,11 @@ impl EditorApp {
                     {
                         continue;
                     }
-                    if ui.button(p.label).on_hover_text(format!("{} ({} s)", p.description, p.seconds)).clicked() {
+                    if ui
+                        .button(tr(p.label))
+                        .on_hover_text(crate::lf!("{} ({} s)", "{}（{} 秒）", p.description, p.seconds))
+                        .clicked()
+                    {
                         self.apply_motion(p, &target, if is_cam { subject.as_deref() } else { None }, frame);
                     }
                 }
@@ -1344,9 +1436,12 @@ impl EditorApp {
             Ok(_) => {
                 self.also.clear();
                 self.select(Some(id));
-                self.toast(format!("{name} placed where you are looking from: + Shot or the Shots row uses it"));
+                self.toast(crate::lf!(
+                    "{name} placed where you are looking from: + Shot or the Shots row uses it",
+                    "{name} 已放在你当前的视角：+ Shot 或镜头轨会用它"
+                ));
             }
-            Err(e) => self.toast(format!("Could not add a camera: {}", e.message)),
+            Err(e) => self.toast(crate::lf!("Could not add a camera: {}", "无法添加相机：{}", e.message)),
         }
     }
 
@@ -1378,11 +1473,18 @@ impl EditorApp {
         if cut {
             self.delete_selection();
         }
-        self.toast(format!(
-            "{} {n} object{} (paste with Cmd/Ctrl+V, here or in another scene)",
-            if cut { "Cut" } else { "Copied" },
-            if n == 1 { "" } else { "s" }
-        ));
+        self.toast(if crate::i18n::zh() {
+            format!(
+                "{}{n} 个物体（用 Cmd/Ctrl+V 粘贴，可贴到本场景或其他场景）",
+                if cut { "已剪切 " } else { "已复制 " }
+            )
+        } else {
+            format!(
+                "{} {n} object{} (paste with Cmd/Ctrl+V, here or in another scene)",
+                if cut { "Cut" } else { "Copied" },
+                if n == 1 { "" } else { "s" }
+            )
+        });
     }
 
     /// Paste a shotstage clip from the clipboard; other text is ignored. Pasting next to the
@@ -1411,9 +1513,9 @@ impl EditorApp {
                     self.select(Some(first));
                     self.also = ids;
                 }
-                self.toast("Pasted (Undo takes it back)");
+                self.toast(tr("Pasted (Undo takes it back)"));
             }
-            Err(e) => self.toast(format!("Could not paste: {}", e.message)),
+            Err(e) => self.toast(crate::lf!("Could not paste: {}", "无法粘贴：{}", e.message)),
         }
     }
 
@@ -1438,7 +1540,7 @@ impl EditorApp {
                     self.also = new;
                 }
             }
-            Err(e) => self.toast(format!("Could not duplicate: {}", e.message)),
+            Err(e) => self.toast(crate::lf!("Could not duplicate: {}", "无法复制：{}", e.message)),
         }
     }
 
@@ -1478,7 +1580,7 @@ impl EditorApp {
         self.also.clear();
         let steps: Vec<Value> = ids.iter().map(|i| json!({"command": "entity.delete", "params": {"id": i}})).collect();
         if let Err(e) = hub::dispatch(&self.hub, json!({"batch": steps})) {
-            self.toast(format!("Could not delete: {}", e.message));
+            self.toast(crate::lf!("Could not delete: {}", "无法删除：{}", e.message));
         }
     }
 
@@ -1591,16 +1693,16 @@ impl EditorApp {
         for (i, sh) in scene.timeline.shots.iter().enumerate() {
             let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
             out.push(QuickItem {
-                label: format!("Go to shot {}: {}", i + 1, sh.name),
+                label: crate::lf!("Go to shot {}: {}", "跳到镜头 {}：{}", i + 1, sh.name),
                 kind: "Shot",
-                hint: format!("{:.1}s through {cam}", (sh.end + 1 - sh.start) as f32 / fps),
+                hint: crate::lf!("{:.1}s through {cam}", "{:.1} 秒，通过 {cam}", (sh.end + 1 - sh.start) as f32 / fps),
                 run: QuickRun::Shot(sh.start),
             });
         }
         for e in scene.entities.iter().filter(|e| e.parent.is_none()) {
             if matches!(e.kind, EntityKind::Camera(_)) {
                 out.push(QuickItem {
-                    label: format!("Look through {}", e.name),
+                    label: crate::lf!("Look through {}", "透过 {} 看", e.name),
                     kind: "Camera",
                     hint: "makes it the active camera".into(),
                     run: QuickRun::LookThrough(e.id.clone()),
@@ -1729,7 +1831,7 @@ impl EditorApp {
                     ui.set_width(width);
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut query)
-                            .hint_text("Add a block, apply a move or pose, run an action…")
+                            .hint_text(tr("Add a block, apply a move or pose, run an action…"))
                             .desired_width(f32::INFINITY),
                     );
                     edit.request_focus();
@@ -1738,7 +1840,7 @@ impl EditorApp {
                     }
                     ui.add_space(4.0);
                     if ranked.is_empty() {
-                        ui.weak("Nothing matches.");
+                        ui.weak(tr("Nothing matches."));
                     }
                     egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
                         for (row, &i) in ranked.iter().enumerate().take(40) {
@@ -1747,12 +1849,13 @@ impl EditorApp {
                             let r = ui
                                 .horizontal(|ui| {
                                     ui.set_width(ui.available_width());
-                                    let label = egui::RichText::new(&it.label);
+                                    let label = egui::RichText::new(tr(&it.label));
                                     ui.label(if on { label.strong() } else { label });
-                                    ui.weak(egui::RichText::new(it.kind).small());
+                                    ui.weak(egui::RichText::new(tr(it.kind)).small());
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.add(
-                                            egui::Label::new(egui::RichText::new(&it.hint).weak().small()).truncate(),
+                                            egui::Label::new(egui::RichText::new(tr(&it.hint)).weak().small())
+                                                .truncate(),
                                         );
                                     });
                                 })
@@ -1774,7 +1877,7 @@ impl EditorApp {
                         }
                     });
                     ui.add_space(2.0);
-                    ui.weak(egui::RichText::new("↑↓ choose · Enter run · Esc close").small());
+                    ui.weak(egui::RichText::new(tr("↑↓ choose · Enter run · Esc close")).small());
                 });
             })
             .response;
@@ -1872,17 +1975,26 @@ impl eframe::App for EditorApp {
         }
         // palette thumbnails, a few per frame until they are all done
         if let Some(rs) = frame.wgpu_render_state() {
-            let thumbs = self.thumbs.get_or_insert_with(|| crate::thumbs::Thumbs::new(&rs.device, thumb_items()));
+            let thumbs = self
+                .thumbs
+                .get_or_insert_with(|| crate::thumbs::Thumbs::new(&rs.device, thumb_items(), person_thumbs()));
             if thumbs.step(rs, 4) {
                 ui.ctx().request_repaint();
             }
         }
         crate::files::take_dropped(ui.ctx(), &self.incoming);
+        // a person clicked while its file was loading: place it now that it is here
+        if let Some(a) = self.pending_person
+            && !matches!(self.people.borrow().get(a.file), Some(crate::files::Fetched::Loading))
+        {
+            self.pending_person = None;
+            self.use_block(&Block::Person(a));
+        }
         self.autosave(ui.ctx());
         let saved = self.saved.borrow_mut().take();
         match saved {
-            Some(Ok(w)) => self.toast(format!("Saved: {w}")),
-            Some(Err(e)) => self.toast(format!("Could not save: {e}")),
+            Some(Ok(w)) => self.toast(crate::lf!("Saved: {w}", "已保存：{w}")),
+            Some(Err(e)) => self.toast(crate::lf!("Could not save: {e}", "无法保存：{e}")),
             None => {}
         }
         if !self.incoming.borrow().is_empty() {
@@ -2054,9 +2166,9 @@ impl EditorApp {
             match hub::dispatch(&self.hub, json!({"command": "entity.ungroup", "params": {"id": id}})) {
                 Ok(_) => {
                     self.select(None);
-                    self.toast("Ungrouped");
+                    self.toast(tr("Ungrouped"));
                 }
-                Err(e) => self.toast(format!("Could not ungroup: {}", e.message)),
+                Err(e) => self.toast(crate::lf!("Could not ungroup: {}", "无法解组：{}", e.message)),
             }
         }
         let (key, home, end, step) = ui.input(|i| {
@@ -2093,39 +2205,39 @@ impl EditorApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("shotstage").strong().color(ACCENT));
+            ui.label(egui::RichText::new(tr("shotstage")).strong().color(ACCENT));
             ui.separator();
-            if ui.button("Open…").on_hover_text("Open a saved scene (.json), or import models and pictures").clicked() {
+            if ui.button(tr("Open…")).on_hover_text(tr("Open a saved scene (.json), or import models and pictures")).clicked() {
                 crate::files::pick(&self.incoming, ui.ctx());
             }
-            if ui.button("Save").on_hover_text("Save the scene as a .shotstage.json file (Cmd/Ctrl+S)").clicked() {
+            if ui.button(tr("Save")).on_hover_text(tr("Save the scene as a .shotstage.json file (Cmd/Ctrl+S)")).clicked() {
                 self.save_scene();
             }
-            if ui.button("New").on_hover_text("Clear the scene (undoable)").clicked() {
+            if ui.button(tr("New")).on_hover_text(tr("Clear the scene (undoable)")).clicked() {
                 self.new_scene();
             }
-            if ui.button("Undo").on_hover_text("Cmd/Ctrl+Z").clicked() {
+            if ui.button(tr("Undo")).on_hover_text(tr("Cmd/Ctrl+Z")).clicked() {
                 self.run("history.undo", json!({}));
             }
-            if ui.button("Redo").on_hover_text("Cmd/Ctrl+Shift+Z").clicked() {
+            if ui.button(tr("Redo")).on_hover_text(tr("Cmd/Ctrl+Shift+Z")).clicked() {
                 self.run("history.redo", json!({}));
             }
-            if ui.button("🔍 Actions").on_hover_text("Search every block, move, pose, template and action (Cmd/Ctrl+K or /)").clicked() {
+            if ui.button(tr("🔍 Actions")).on_hover_text(tr("Search every block, move, pose, template and action (Cmd/Ctrl+K or /)")).clicked() {
                 self.quick = Some((String::new(), 0));
             }
-            ui.menu_button("History", |ui| {
+            ui.menu_button(tr("History"), |ui| {
                 let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
                 let undo: Vec<String> = info["undo"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                     .unwrap_or_default();
                 if undo.is_empty() {
-                    ui.weak("Nothing to undo yet");
+                    ui.weak(tr("Nothing to undo yet"));
                 } else {
-                    ui.weak("Click a step to go back to before it");
+                    ui.weak(tr("Click a step to go back to before it"));
                 }
                 for (i, label) in undo.iter().take(20).enumerate() {
-                    if ui.button(format!("{}. {}", i + 1, friendly(label))).clicked() {
+                    if ui.button(format!("{}. {}", i + 1, tr(friendly(label)))).clicked() {
                         for _ in 0..=i {
                             self.run("history.undo", json!({}));
                         }
@@ -2135,23 +2247,23 @@ impl EditorApp {
             });
             ui.separator();
             if ui
-                .button("Import…")
-                .on_hover_text("glTF / GLB, OBJ, STL, FBX and .blend (FBX / .blend on the desktop, through Blender). You can also drop files on the view.")
+                .button(tr("Import…"))
+                .on_hover_text(tr("glTF / GLB, OBJ, STL, FBX and .blend (FBX / .blend on the desktop, through Blender). You can also drop files on the view."))
                 .clicked()
             {
                 crate::files::pick(&self.incoming, ui.ctx());
             }
-            ui.menu_button("Templates", |ui| {
-                ui.weak("Start from a ready scene (replaces this one; Undo brings it back)");
+            ui.menu_button(tr("Templates"), |ui| {
+                ui.weak(tr("Start from a ready scene (replaces this one; Undo brings it back)"));
                 for (name, label, desc) in shotstage_commands::templates::TEMPLATES {
-                    if ui.button(*label).on_hover_text(*desc).clicked() {
+                    if ui.button(tr(*label)).on_hover_text(tr(*desc)).clicked() {
                         self.apply_template(name, label);
                         ui.close();
                     }
                 }
             });
-            ui.menu_button("Export", |ui| {
-                ui.weak("The scene posed at the current frame");
+            ui.menu_button(tr("Export"), |ui| {
+                ui.weak(tr("The scene posed at the current frame"));
                 for (label, format, tip) in [
                     ("GLB (glTF binary)", "glb", "Meshes, colours, cameras and lights: Blender, Unreal, Unity, three.js"),
                     ("glTF (text)", "gltf", "The same as GLB, as one JSON file"),
@@ -2159,14 +2271,23 @@ impl EditorApp {
                     ("STL", "stl", "Geometry only, for 3D printing and CAD"),
                     ("FBX (via Blender)", "fbx", "Needs Blender on this computer (desktop editor)"),
                 ] {
-                    if ui.button(label).on_hover_text(tip).clicked() {
+                    if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
                         self.export_model(format);
                         ui.close();
                     }
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak("3D previs for AI images and video");
+                // the language switch, in both languages so it is always findable
+                let zh = crate::i18n::zh();
+                if ui.selectable_label(zh, "中文").on_hover_text("界面语言：中文").clicked() && !zh {
+                    crate::i18n::set_zh(true);
+                }
+                if ui.selectable_label(!zh, "EN").on_hover_text("Interface language: English").clicked() && zh {
+                    crate::i18n::set_zh(false);
+                }
+                ui.separator();
+                ui.weak(tr("3D previs for AI images and video"));
             });
         });
     }
@@ -2184,14 +2305,14 @@ impl EditorApp {
     fn blocks(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.strong("Blocks");
+            ui.strong(tr("Blocks"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.block_filter)
-                    .hint_text("Search blocks…")
+                    .hint_text(tr("Search blocks…"))
                     .desired_width(f32::INFINITY),
             );
         });
-        ui.weak("Drag into the scene, or click to drop it in the middle.");
+        ui.weak(tr("Drag into the scene, or click to drop it in the middle."));
         ui.add_space(2.0);
         let filter = self.block_filter.trim().to_lowercase();
         egui::ScrollArea::vertical().id_salt("blocks").auto_shrink([false, false]).show(ui, |ui| {
@@ -2204,13 +2325,14 @@ impl EditorApp {
             let tile = tile_for(ui.available_width() - ui.spacing().indent);
             for (title, open, blocks) in palette() {
                 // searching a section's name shows all of it
-                let whole = !filter.is_empty() && title.to_lowercase().contains(&filter);
+                let whole = !filter.is_empty() && crate::i18n::both(title).to_lowercase().contains(&filter);
                 let shown: Vec<Block> = blocks.into_iter().filter(|b| whole || b.matches(&filter)).collect();
                 if shown.is_empty() {
                     continue;
                 }
-                let mut header =
-                    egui::CollapsingHeader::new(egui::RichText::new(title).strong()).id_salt(title).default_open(open);
+                let mut header = egui::CollapsingHeader::new(egui::RichText::new(tr(title)).strong())
+                    .id_salt(title)
+                    .default_open(open);
                 if !filter.is_empty() {
                     header = header.open(Some(true));
                 }
@@ -2223,11 +2345,11 @@ impl EditorApp {
                     });
                 });
             }
-            egui::CollapsingHeader::new(egui::RichText::new("Images").strong())
+            egui::CollapsingHeader::new(egui::RichText::new(tr("Images")).strong())
                 .id_salt("images")
                 .default_open(false)
                 .show(ui, |ui| {
-                    ui.weak("Pick a picture, or drop one on the view (a transparent PNG becomes a cut-out).");
+                    ui.weak(tr("Pick a picture, or drop one on the view (a transparent PNG becomes a cut-out)."));
                     ui.horizontal_wrapped(|ui| {
                         for (label, mode, tip) in [
                             ("Card", "card", "A standing picture: reference photo, poster, sign"),
@@ -2235,21 +2357,22 @@ impl EditorApp {
                             ("Backdrop", "backdrop", "Fills the camera's background, behind everything"),
                             ("Floor", "floor", "Lies flat: rug, floor plan, logo on the ground"),
                         ] {
-                            if ui.add_sized([tile, 30.0], egui::Button::new(label)).on_hover_text(tip).clicked() {
+                            if ui.add_sized([tile, 30.0], egui::Button::new(tr(label))).on_hover_text(tr(tip)).clicked()
+                            {
                                 self.image_mode = Some(mode);
                                 crate::files::pick(&self.incoming, ui.ctx());
                             }
                         }
                     });
                 });
-            egui::CollapsingHeader::new(egui::RichText::new("Cameras & helpers").strong())
+            egui::CollapsingHeader::new(egui::RichText::new(tr("Cameras & helpers")).strong())
                 .id_salt("helpers")
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         if ui
-                            .add_sized([tile, 30.0], egui::Button::new("Camera"))
-                            .on_hover_text("A camera where you are looking from")
+                            .add_sized([tile, 30.0], egui::Button::new(tr("Camera")))
+                            .on_hover_text(tr("A camera where you are looking from"))
                             .clicked()
                         {
                             let eye = self.orbit.eye();
@@ -2262,8 +2385,8 @@ impl EditorApp {
                             }
                         }
                         if ui
-                            .add_sized([tile, 30.0], egui::Button::new("Empty"))
-                            .on_hover_text("A group / pivot without geometry")
+                            .add_sized([tile, 30.0], egui::Button::new(tr("Empty")))
+                            .on_hover_text(tr("A group / pivot without geometry"))
                             .clicked()
                             && let Some(r) = self.run("entity.create", json!({"type": "empty"}))
                         {
@@ -2291,7 +2414,7 @@ impl EditorApp {
                 p.text(
                     egui::pos2(rect.center().x, rect.bottom() - 11.0),
                     egui::Align2::CENTER_CENTER,
-                    b.label(),
+                    tr(b.label()),
                     egui::FontId::proportional(11.5),
                     v.text_color(),
                 );
@@ -2299,10 +2422,17 @@ impl EditorApp {
             }
             None => ui.add_sized(
                 [width, 30.0],
-                egui::Button::new(egui::RichText::new(b.label()).size(12.5)).sense(Sense::click_and_drag()),
+                egui::Button::new(egui::RichText::new(tr(b.label())).size(12.5)).sense(Sense::click_and_drag()),
             ),
         };
-        let r = r.on_hover_cursor(CursorIcon::Grab).on_hover_text(b.description());
+        let r = r.on_hover_cursor(CursorIcon::Grab).on_hover_text(tr(b.description()));
+        // start loading a detailed person's file as soon as the pointer is on it
+        if r.hovered()
+            && let Block::Person(a) = b
+            && shotstage_commands::people::bundled(a.key).is_none()
+        {
+            crate::files::person_file(&self.people, a.file, &self.hub);
+        }
         if r.drag_started() && !matches!(b, Block::LightPreset(..)) {
             let key = self.new_key("new");
             self.palette = Some(PaletteDrag { block: b.clone(), spawned: None, key });
@@ -2320,11 +2450,28 @@ impl EditorApp {
                 p["subject"] = json!(s);
             }
             if self.run("light.preset", p).is_some() {
-                self.toast(format!("Lighting: {}", b.label()));
+                self.toast(crate::lf!("Lighting: {}", "灯光：{}", tr(b.label())));
             }
             return;
         }
         let key = self.new_key("new");
+        if let Block::Person(a) = b
+            && shotstage_commands::people::bundled(a.key).is_none()
+        {
+            match crate::files::person_file(&self.people, a.file, &self.hub) {
+                crate::files::Fetched::Loading => {
+                    // placed in the middle when the file arrives
+                    self.pending_person = Some(a);
+                    self.toast(crate::lf!("Loading {}…", "正在加载 {}…", tr(a.label)));
+                    return;
+                }
+                crate::files::Fetched::Failed(e) => {
+                    self.toast(crate::lf!("Could not load {}: {e}", "无法加载 {}：{e}", tr(a.label)));
+                    return;
+                }
+                crate::files::Fetched::Ready(_) => {}
+            }
+        }
         if let Some(id) = self.spawn(b, &key) {
             if let Some((rect, view)) = self.last_view {
                 self.place_on_ray(&key, &id, ray_at(rect, &view, rect.center()), Vec3::ZERO, false);
@@ -2340,12 +2487,16 @@ impl EditorApp {
         let selected = self.selected();
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.strong("Scene");
-            ui.weak(format!("{} objects", scene.entities.iter().filter(|e| e.parent.is_none()).count()));
+            ui.strong(tr("Scene"));
+            ui.weak(crate::lf!(
+                "{} objects",
+                "{} 个物体",
+                scene.entities.iter().filter(|e| e.parent.is_none()).count()
+            ));
             if scene.entities.len() > 8 {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.tree_filter)
-                        .hint_text("Filter…")
+                        .hint_text(tr("Filter…"))
                         .desired_width(ui.available_width()),
                 );
             }
@@ -2373,13 +2524,13 @@ impl EditorApp {
                         tree_row(ui, &mut ctx, e);
                     }
                     if list.is_empty() {
-                        ui.weak("Nothing matches.");
+                        ui.weak(tr("Nothing matches."));
                     }
                 }
                 None => tree_level(ui, &mut ctx, None),
             }
             if scene.entities.is_empty() {
-                ui.weak("Empty scene. Add blocks above, or drive it from the console / API.");
+                ui.weak(tr("Empty scene. Add blocks above, or drive it from the console / API."));
             }
         });
         let acts = std::mem::take(&mut ctx.acts);
@@ -2440,12 +2591,12 @@ impl EditorApp {
             }
             return;
         }
-        let r = ui.add(egui::Label::new(egui::RichText::new(name).heading()).sense(if editable {
+        let r = ui.add(egui::Label::new(egui::RichText::new(tr(name)).heading()).sense(if editable {
             Sense::click()
         } else {
             Sense::hover()
         }));
-        if editable && r.on_hover_cursor(CursorIcon::Text).on_hover_text("Click to rename").clicked() {
+        if editable && r.on_hover_cursor(CursorIcon::Text).on_hover_text(tr("Click to rename")).clicked() {
             self.name_edit = Some((id.to_string(), name.to_string()));
         }
     }
@@ -2453,12 +2604,12 @@ impl EditorApp {
     fn properties(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         let Some(id) = self.selected() else {
-            ui.weak("Nothing selected.");
+            ui.weak(tr("Nothing selected."));
             ui.add_space(6.0);
-            ui.label("• Drag a block from the left into the scene.");
-            ui.label("• Click an object to select it; drag it to slide it over surfaces.");
-            ui.label("• Click a person, then a body part, to pose it.");
-            ui.label("• Drag empty space (or two fingers on a trackpad) to orbit; pinch or wheel to zoom.");
+            ui.label(tr("• Drag a block from the left into the scene."));
+            ui.label(tr("• Click an object to select it; drag it to slide it over surfaces."));
+            ui.label(tr("• Click a person, then a body part, to pose it."));
+            ui.label(tr("• Drag empty space (or two fingers on a trackpad) to orbit; pinch or wheel to zoom."));
             return;
         };
         let scene = self.scene();
@@ -2485,30 +2636,34 @@ impl EditorApp {
                 format!(" · {:.2} × {:.2} × {:.2} m", s.x, s.y, s.z)
             })
             .unwrap_or_default();
-        ui.weak(format!("{kind} · {}{dims}", e.id));
+        ui.weak(format!("{} · {}{dims}", tr(kind), e.id));
         // edit mode: the mesh tools come first, the object panels wait until you are done
         if self.edit_state().is_some_and(|s| s.id == id) {
             ui.add_space(4.0);
-            section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
+            section(ui, &tr("Edit mesh"), true, |ui| self.edit_panel(ui, &id));
             return;
         }
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let mut visible = e.visible;
-            if ui.checkbox(&mut visible, "Visible").changed() {
+            if ui.checkbox(&mut visible, tr("Visible")).changed() {
                 self.run("entity.setVisible", json!({"id": id, "visible": visible}));
             }
             if joint.is_none() {
                 let mut locked = e.locked;
-                if ui.checkbox(&mut locked, "Locked").on_hover_text("Drags in the viewport pass through it").changed() {
+                if ui
+                    .checkbox(&mut locked, tr("Locked"))
+                    .on_hover_text(tr("Drags in the viewport pass through it"))
+                    .changed()
+                {
                     self.run("entity.setLocked", json!({"id": id, "locked": locked}));
                 }
-                if ui.button("Duplicate").on_hover_text("Ctrl/Cmd+D").clicked()
+                if ui.button(tr("Duplicate")).on_hover_text(tr("Ctrl/Cmd+D")).clicked()
                     && let Some(r) = self.run("entity.duplicate", json!({"id": id}))
                 {
                     self.select(r["id"].as_str().map(str::to_string));
                 }
-                if ui.button("Delete").on_hover_text("Delete / Backspace").clicked() {
+                if ui.button(tr("Delete")).on_hover_text(tr("Delete / Backspace")).clicked() {
                     self.run("entity.delete", json!({"id": id}));
                 }
             }
@@ -2528,9 +2683,9 @@ impl EditorApp {
         }
 
         if !matches!(e.kind, EntityKind::Camera(_) | EntityKind::Light(_)) {
-            section(ui, "Place", true, |ui| {
+            section(ui, &tr("Place"), true, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Drop to surface").on_hover_text("entity.place").clicked() {
+                    if ui.button(tr("Drop to surface")).on_hover_text(tr("entity.place")).clicked() {
                         self.run("entity.place", json!({"id": id, "frame": frame}));
                     }
                     // props can be held by a person (they follow the hand)
@@ -2539,8 +2694,8 @@ impl EditorApp {
                         match held_by {
                             Some(_) => {
                                 if ui
-                                    .button("Let go")
-                                    .on_hover_text("Stop following the hand (stays where it is)")
+                                    .button(tr("Let go"))
+                                    .on_hover_text(tr("Stop following the hand (stays where it is)"))
                                     .clicked()
                                 {
                                     self.run("entity.attach", json!({"id": id, "to": null}));
@@ -2556,7 +2711,7 @@ impl EditorApp {
                                     .map(|x| (x.id.clone(), x.name.clone()))
                                     .collect();
                                 if !people.is_empty() {
-                                    ui.menu_button("Hold in hand", |ui| {
+                                    ui.menu_button(tr("Hold in hand"), |ui| {
                                         for (pid, pname) in &people {
                                             for (hand, label) in [("right", "right hand"), ("left", "left hand")] {
                                                 if ui.button(format!("{pname} · {label}")).clicked() {
@@ -2564,7 +2719,9 @@ impl EditorApp {
                                                         "entity.attach",
                                                         json!({"id": id, "to": pid, "hand": hand}),
                                                     );
-                                                    self.toast("It now follows the hand: pose or animate the person");
+                                                    self.toast(tr(
+                                                        "It now follows the hand: pose or animate the person",
+                                                    ));
                                                     ui.close();
                                                 }
                                             }
@@ -2574,40 +2731,40 @@ impl EditorApp {
                             }
                         }
                     }
-                    if ui.button("↺ 45°").on_hover_text("R").clicked() {
+                    if ui.button(tr("↺ 45°")).on_hover_text(tr("R")).clicked() {
                         self.run("entity.rotate", json!({"id": id, "degrees": 45, "frame": frame}));
                     }
-                    if ui.button("↻ 45°").on_hover_text("Shift+R").clicked() {
+                    if ui.button(tr("↻ 45°")).on_hover_text(tr("Shift+R")).clicked() {
                         self.run("entity.rotate", json!({"id": id, "degrees": -45, "frame": frame}));
                     }
                     if let Some(cam) = camera_id_at(&scene, frame)
-                        && ui.button("Face camera").on_hover_text("entity.face").clicked()
+                        && ui.button(tr("Face camera")).on_hover_text(tr("entity.face")).clicked()
                     {
                         self.run("entity.face", json!({"id": id, "target": cam, "frame": frame}));
                     }
                 });
             });
-            section(ui, "Frame it", true, |ui| {
-                ui.weak("Moves the active camera (or adds one) and looks through it.");
+            section(ui, &tr("Frame it"), true, |ui| {
+                ui.weak(tr("Moves the active camera (or adds one) and looks through it."));
                 egui::Grid::new("frame_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                    ui.label("Angle");
-                    egui::ComboBox::from_id_salt("frame_angle").width(130.0).selected_text(self.frame_angle).show_ui(
-                        ui,
-                        |ui| {
+                    ui.label(tr("Angle"));
+                    egui::ComboBox::from_id_salt("frame_angle")
+                        .width(130.0)
+                        .selected_text(tr(self.frame_angle))
+                        .show_ui(ui, |ui| {
                             for a in ["eyeLevel", "high", "low", "birdsEye", "wormsEye"] {
-                                ui.selectable_value(&mut self.frame_angle, a, a);
+                                ui.selectable_value(&mut self.frame_angle, a, tr(a));
                             }
-                        },
-                    );
+                        });
                     ui.end_row();
-                    ui.label("Side");
-                    egui::ComboBox::from_id_salt("frame_side").width(130.0).selected_text(self.frame_side).show_ui(
+                    ui.label(tr("Side"));
+                    egui::ComboBox::from_id_salt("frame_side").width(130.0).selected_text(tr(self.frame_side)).show_ui(
                         ui,
                         |ui| {
                             for a in
                                 ["front", "frontLeft", "left", "backLeft", "back", "backRight", "right", "frontRight"]
                             {
-                                ui.selectable_value(&mut self.frame_side, a, a);
+                                ui.selectable_value(&mut self.frame_side, a, tr(a));
                             }
                         },
                     );
@@ -2624,7 +2781,7 @@ impl EditorApp {
                         ("WS", "wide"),
                         ("EWS", "extremeWide"),
                     ] {
-                        if ui.button(label).on_hover_text(size).clicked() {
+                        if ui.button(tr(label)).on_hover_text(tr(size)).clicked() {
                             let mut p = json!({"subject": id, "size": size, "angle": self.frame_angle, "side": self.frame_side, "frame": frame});
                             if let Some(cam) = camera_id_at(&scene, frame) {
                                 p["camera"] = json!(cam);
@@ -2641,7 +2798,7 @@ impl EditorApp {
 
         self.animate_section(ui, &scene, &id, frame);
         let plain = person.is_none() && !matches!(e.kind, EntityKind::Empty);
-        section(ui, "Transform", plain, |ui| {
+        section(ui, &tr("Transform"), plain, |ui| {
             let animated = self.keyed(&scene, &id);
             let t = local_at(&scene, &id, frame).unwrap_or(e.transform);
             let (mut pos, mut rot, mut scale) = (t.translation, t.euler_degrees(), t.scale);
@@ -2650,7 +2807,7 @@ impl EditorApp {
                 for (label, v, speed) in
                     [("Position", &mut pos, 0.02), ("Rotation", &mut rot, 0.5), ("Scale", &mut scale, 0.01)]
                 {
-                    ui.label(label);
+                    ui.label(tr(label));
                     for x in v.iter_mut() {
                         let r = ui.add_sized([56.0, 20.0], egui::DragValue::new(x).speed(speed).max_decimals(3));
                         changed |= r.changed();
@@ -2670,15 +2827,15 @@ impl EditorApp {
                 self.run_merged(&format!("transform:{id}"), "entity.setTransform", p);
             }
             ui.horizontal(|ui| {
-                if ui.button(format!("Key @ {frame:.0}")).clicked() {
+                if ui.button(crate::lf!("Key @ {frame:.0}", "关键帧 @ {frame:.0}")).clicked() {
                     self.run("entity.setTransform", json!({"id": id, "position": pos, "rotationEuler": rot, "scale": scale, "keyframeAt": frame.round()}));
                 }
-                if animated && ui.button("Delete key").clicked() {
+                if animated && ui.button(tr("Delete key")).clicked() {
                     self.run("keyframe.delete", json!({"id": id, "property": "transform", "frame": frame.round()}));
                 }
             });
             if animated {
-                ui.weak("Animated: edits are keyed at the current frame.");
+                ui.weak(tr("Animated: edits are keyed at the current frame."));
             }
         });
 
@@ -2688,13 +2845,13 @@ impl EditorApp {
                     source,
                     shotstage_core::MeshSource::Skinned { .. } | shotstage_core::MeshSource::Human { .. }
                 ) {
-                    section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
-                    section(ui, "Boolean", false, |ui| self.boolean_panel(ui, &id));
+                    section(ui, &tr("Edit mesh"), true, |ui| self.edit_panel(ui, &id));
+                    section(ui, &tr("Boolean"), false, |ui| self.boolean_panel(ui, &id));
                 }
-                section(ui, "Mesh", true, |ui| {
+                section(ui, &tr("Mesh"), true, |ui| {
                     let mut c = *color;
                     ui.horizontal(|ui| {
-                        ui.label("Colour");
+                        ui.label(tr("Colour"));
                         let r = ui.color_edit_button_rgb(&mut c);
                         if r.clicked() {
                             self.gesture += 1;
@@ -2713,7 +2870,7 @@ impl EditorApp {
                         ui.horizontal(|ui| {
                             let label = match m {
                                 Modifier::Mirror { axis } => {
-                                    format!("Mirror {}", ["X", "Y", "Z"][(*axis).min(2) as usize])
+                                    crate::lf!("Mirror {}", "镜像 {}", ["X", "Y", "Z"][(*axis).min(2) as usize])
                                 }
                                 Modifier::Array { count, offset } => {
                                     format!("Array ×{count} [{:.2}, {:.2}, {:.2}]", offset[0], offset[1], offset[2])
@@ -2722,8 +2879,8 @@ impl EditorApp {
                                     format!("Subdivide {levels}{}", if *smooth { " smooth" } else { "" })
                                 }
                             };
-                            ui.label(label);
-                            if ui.small_button("✕").clicked() {
+                            ui.label(tr(label));
+                            if ui.small_button(tr("✕")).clicked() {
                                 self.run("mesh.removeModifier", json!({"id": id, "index": i}));
                             }
                         });
@@ -2734,14 +2891,14 @@ impl EditorApp {
                             ("+ Array", json!({"type": "array", "count": 3, "offset": [1.2, 0, 0]})),
                             ("+ Subdivide", json!({"type": "subdivide", "levels": 1, "smooth": true})),
                         ] {
-                            if ui.button(label).clicked() {
+                            if ui.button(tr(label)).clicked() {
                                 self.run("mesh.addModifier", json!({"id": id, "modifier": m}));
                             }
                         }
-                        if !modifiers.is_empty() && ui.button("Apply all").clicked() {
+                        if !modifiers.is_empty() && ui.button(tr("Apply all")).clicked() {
                             self.run("mesh.applyModifiers", json!({"id": id}));
                         }
-                        if ui.button("Origin to centre").clicked() {
+                        if ui.button(tr("Origin to centre")).clicked() {
                             self.run("mesh.setOriginToCenter", json!({"id": id}));
                         }
                     });
@@ -2749,10 +2906,10 @@ impl EditorApp {
                 section(ui, "Texture", material.is_some(), |ui| self.material_panel(ui, &id, material.as_ref()));
             }
             EntityKind::Camera(_) => {
-                section(ui, "Camera", true, |ui| {
+                section(ui, &tr("Camera"), true, |ui| {
                     let lens = camera_data_at(&scene, &id, frame).unwrap_or_default();
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Frame");
+                        ui.label(tr("Frame"));
                         for (label, a, tip) in [
                             ("16:9", 16.0 / 9.0, "Landscape video"),
                             ("9:16", 9.0 / 16.0, "Vertical video: Reels, TikTok, Shorts"),
@@ -2762,15 +2919,15 @@ impl EditorApp {
                             ("2.39:1", 2.39, "Cinemascope"),
                         ] {
                             let on = (lens.aspect - a).abs() < 0.01;
-                            if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                            if ui.selectable_label(on, tr(label)).on_hover_text(tr(tip)).clicked() {
                                 self.run("camera.setLens", json!({"id": id, "aspect": a}));
                             }
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
                         if ui
-                            .button("Match current view")
-                            .on_hover_text("Put this camera where you are looking from in the view")
+                            .button(tr("Match current view"))
+                            .on_hover_text(tr("Put this camera where you are looking from in the view"))
                             .clicked()
                         {
                             // one undo step: move, aim, and key it if it is animated
@@ -2783,20 +2940,20 @@ impl EditorApp {
                                 steps.push(json!({"command": "keyframe.set", "params": {"id": id, "property": "transform", "frame": frame.round()}}));
                             }
                             if let Err(e) = hub::dispatch(&self.hub, json!({"batch": steps})) {
-                                self.toast(format!("Could not match the view: {}", e.message));
+                                self.toast(crate::lf!("Could not match the view: {}", "无法匹配视角：{}", e.message));
                             }
                         }
-                        ui.checkbox(&mut self.safe_areas, "Safe areas")
-                            .on_hover_text("Action / title safe frames in the camera view");
+                        ui.checkbox(&mut self.safe_areas, tr("Safe areas"))
+                            .on_hover_text(tr("Action / title safe frames in the camera view"));
                     });
                     // Dutch angle: roll the camera about its view axis
                     let t = local_at(&scene, &id, frame).unwrap_or(e.transform);
                     let mut e3 = t.euler_degrees();
                     ui.horizontal(|ui| {
-                        ui.label("Roll");
+                        ui.label(tr("Roll"));
                         let r = ui
                             .add(egui::Slider::new(&mut e3[2], -45.0..=45.0).suffix("°").max_decimals(0))
-                            .on_hover_text("Tilt the horizon (a Dutch angle)");
+                            .on_hover_text(tr("Tilt the horizon (a Dutch angle)"));
                         if r.drag_started() {
                             self.gesture += 1;
                         }
@@ -2807,18 +2964,18 @@ impl EditorApp {
                             }
                             self.run_merged(&format!("roll:{id}"), "entity.setTransform", p);
                         }
-                        if ui.small_button("Level").clicked() {
+                        if ui.small_button(tr("Level")).clicked() {
                             e3[2] = 0.0;
                             self.run("entity.setTransform", json!({"id": id, "rotationEuler": e3}));
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Reference");
+                        ui.label(tr("Reference"));
                         if ui
-                            .button("Load picture…")
-                            .on_hover_text(
+                            .button(tr("Load picture…"))
+                            .on_hover_text(tr(
                                 "Lay a storyboard frame or a reference photo over this camera's view to match it",
-                            )
+                            ))
                             .clicked()
                         {
                             self.reference_for = Some(id.clone());
@@ -2837,7 +2994,7 @@ impl EditorApp {
                                     json!({"camera": id, "opacity": o}),
                                 );
                             }
-                            if ui.small_button("✕").on_hover_text("Remove the reference").clicked() {
+                            if ui.small_button(tr("✕")).on_hover_text(tr("Remove the reference")).clicked() {
                                 self.run("camera.setReference", json!({"camera": id, "clear": true}));
                             }
                         }
@@ -2845,7 +3002,7 @@ impl EditorApp {
                     let mut focal = lens.focal_length_mm;
                     let focal_animated = scene.timeline.track(&id, TrackProperty::FocalLength).is_some();
                     ui.horizontal(|ui| {
-                        ui.label("Focal length");
+                        ui.label(tr("Focal length"));
                         let r = ui.add(egui::DragValue::new(&mut focal).range(4.0..=600.0).suffix(" mm").speed(0.3));
                         if r.drag_started() {
                             self.gesture += 1;
@@ -2863,7 +3020,7 @@ impl EditorApp {
                                 );
                             }
                         }
-                        if ui.button("Key").clicked() {
+                        if ui.button(tr("Key")).clicked() {
                             self.run(
                                 "keyframe.set",
                                 json!({"id": id, "property": "focalLength", "frame": frame.round()}),
@@ -2877,13 +3034,18 @@ impl EditorApp {
                             }
                         }
                     });
-                    ui.weak(format!("{:.1}° horizontal FOV, aspect {:.3}", lens.hfov().to_degrees(), lens.aspect));
+                    ui.weak(crate::lf!(
+                        "{:.1}° horizontal FOV, aspect {:.3}",
+                        "水平视角 {:.1}°，画幅比 {:.3}",
+                        lens.hfov().to_degrees(),
+                        lens.aspect
+                    ));
                     ui.horizontal(|ui| {
                         let active = scene.active_camera.as_deref() == Some(id.as_str());
-                        if ui.add_enabled(!active, egui::Button::new("Make active")).clicked() {
+                        if ui.add_enabled(!active, egui::Button::new(tr("Make active"))).clicked() {
                             self.run("camera.setActive", json!({"id": id}));
                         }
-                        if ui.button("Look at origin").clicked() {
+                        if ui.button(tr("Look at origin")).clicked() {
                             self.run("camera.lookAt", json!({"id": id, "target": [0, 0.8, 0]}));
                         }
                     });
@@ -2895,18 +3057,18 @@ impl EditorApp {
             EntityKind::Light(l) => self.light_section(ui, &id, l),
             EntityKind::Image(img) => {
                 let img = img.clone();
-                section(ui, "Image", true, |ui| {
+                section(ui, &tr("Image"), true, |ui| {
                     let mut billboard = img.billboard;
                     if ui
-                        .checkbox(&mut billboard, "Always face the camera (billboard)")
-                        .on_hover_text("For cut-out people, trees and signs")
+                        .checkbox(&mut billboard, tr("Always face the camera (billboard)"))
+                        .on_hover_text(tr("For cut-out people, trees and signs"))
                         .changed()
                     {
                         self.run("image.set", json!({"id": id, "billboard": billboard}));
                     }
                     let mut h = img.size[1];
                     ui.horizontal(|ui| {
-                        ui.label("Height");
+                        ui.label(tr("Height"));
                         let r = ui.add(egui::DragValue::new(&mut h).range(0.01..=500.0).speed(0.01).suffix(" m"));
                         if r.drag_started() {
                             self.gesture += 1;
@@ -2916,7 +3078,14 @@ impl EditorApp {
                         }
                     });
                     if let Some(a) = scene.assets.get(&img.asset) {
-                        ui.weak(format!("{} × {} px · {:.2} × {:.2} m", a.width, a.height, img.size[0], img.size[1]));
+                        ui.weak(crate::lf!(
+                            "{} × {} px · {:.2} × {:.2} m",
+                            "{} × {} 像素 · {:.2} × {:.2} 米",
+                            a.width,
+                            a.height,
+                            img.size[0],
+                            img.size[1]
+                        ));
                     }
                 });
             }
@@ -2927,13 +3096,13 @@ impl EditorApp {
     /// A bone of an imported skeleton: plain rotation sliders.
     fn bone_section(&mut self, ui: &mut egui::Ui, scene: &Scene, id: &str, frame: f32) {
         let animated = self.keyed(scene, id);
-        section(ui, "Bone", true, |ui| {
-            ui.weak("Drag the model's surface in the view to bend this bone, or turn the coloured rings.");
+        section(ui, &tr("Bone"), true, |ui| {
+            ui.weak(tr("Drag the model's surface in the view to bend this bone, or turn the coloured rings."));
             let mut r = local_at(scene, id, frame).map(|t| t.euler_degrees()).unwrap_or_default();
             let (mut changed, mut started) = (false, false);
             egui::Grid::new("bone_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
                 for (i, label) in ["X", "Y", "Z"].iter().enumerate() {
-                    ui.label(*label);
+                    ui.label(tr(*label));
                     let resp = ui.add(egui::Slider::new(&mut r[i], -180.0..=180.0).suffix("°").max_decimals(0));
                     changed |= resp.changed();
                     started |= resp.drag_started();
@@ -2950,7 +3119,7 @@ impl EditorApp {
                 }
                 self.run_merged(&format!("bone:{id}"), "entity.setTransform", p);
             }
-            if ui.button("Select model").clicked() {
+            if ui.button(tr("Select model")).clicked() {
                 self.select(Some(root_of(scene, id)));
             }
         });
@@ -2958,50 +3127,50 @@ impl EditorApp {
 
     fn light_section(&mut self, ui: &mut egui::Ui, id: &str, l: &shotstage_core::LightData) {
         use shotstage_core::LightKind;
-        section(ui, "Light", true, |ui| {
+        section(ui, &tr("Light"), true, |ui| {
             let mut n = *l;
             let mut started = false;
             egui::Grid::new("light_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                ui.label("Kind");
+                ui.label(tr("Kind"));
                 ui.horizontal(|ui| {
                     for (k, label) in [
                         (LightKind::Sun, "Sun"),
-                        (LightKind::Point, "Point"),
+                        (LightKind::Point, "Point light"),
                         (LightKind::Spot, "Spot"),
                         (LightKind::Area, "Area"),
                     ] {
-                        ui.selectable_value(&mut n.kind, k, label);
+                        ui.selectable_value(&mut n.kind, k, tr(label));
                     }
                 });
                 ui.end_row();
-                ui.label("Colour");
+                ui.label(tr("Colour"));
                 ui.horizontal(|ui| {
                     started |= ui.color_edit_button_rgb(&mut n.color).clicked();
                     for (label, c) in
                         [("Warm", [1.0, 0.8, 0.6]), ("Neutral", [1.0, 1.0, 1.0]), ("Cool", [0.75, 0.85, 1.0])]
                     {
-                        if ui.small_button(label).clicked() {
+                        if ui.small_button(tr(label)).clicked() {
                             n.color = c;
                         }
                     }
                 });
                 ui.end_row();
-                ui.label("Intensity");
+                ui.label(tr("Intensity"));
                 let r = ui.add(egui::Slider::new(&mut n.intensity, 0.0..=20.0).logarithmic(true).max_decimals(2));
                 started |= r.drag_started();
                 ui.end_row();
                 if n.kind == LightKind::Spot {
-                    ui.label("Cone");
+                    ui.label(tr("Beam angle"));
                     started |= ui.add(egui::Slider::new(&mut n.cone_degrees, 5.0..=170.0).suffix("°")).drag_started();
                     ui.end_row();
                 }
                 if matches!(n.kind, LightKind::Spot | LightKind::Area) {
-                    ui.label("Softness");
+                    ui.label(tr("Softness"));
                     started |= ui.add(egui::Slider::new(&mut n.softness, 0.0..=1.0)).drag_started();
                     ui.end_row();
                 }
                 if n.kind == LightKind::Area {
-                    ui.label("Size");
+                    ui.label(tr("Size"));
                     ui.horizontal(|ui| {
                         for v in n.size.iter_mut() {
                             started |= ui
@@ -3025,15 +3194,15 @@ impl EditorApp {
             }
             ui.horizontal_wrapped(|ui| {
                 if let Some(target) = self.light_target()
-                    && ui.button("Aim at selection's group").on_hover_text("camera.lookAt").clicked()
+                    && ui.button(tr("Aim at selection's group")).on_hover_text(tr("camera.lookAt")).clicked()
                 {
                     self.run("camera.lookAt", json!({"id": id, "target": target}));
                 }
-                if ui.button("Aim at origin").clicked() {
+                if ui.button(tr("Aim at origin")).clicked() {
                     self.run("camera.lookAt", json!({"id": id, "target": [0, 0.8, 0]}));
                 }
             });
-            ui.weak("A light shines along its -Z. Scenes with lights are lit by them; toggle Studio light in the view toolbar to compare.");
+            ui.weak(tr("A light shines along its -Z. Scenes with lights are lit by them; toggle Studio light in the view toolbar to compare."));
         });
     }
 
@@ -3045,18 +3214,18 @@ impl EditorApp {
     /// Several objects selected: group, align, distribute, delete.
     fn multi_section(&mut self, ui: &mut egui::Ui, scene: &Scene, primary: &str) {
         let ids: Vec<String> = std::iter::once(primary.to_string()).chain(self.also.iter().cloned()).collect();
-        ui.heading(format!("{} objects", ids.len()));
+        ui.heading(crate::lf!("{} objects", "{} 个物体", ids.len()));
         ui.weak(
             ids.iter().map(|i| scene.get(i).map(|e| e.name.clone()).unwrap_or_default()).collect::<Vec<_>>().join(", "),
         );
-        ui.weak("Shift+click adds or removes objects; click one alone to select just it.");
+        ui.weak(tr("Shift+click adds or removes objects; click one alone to select just it."));
         ui.add_space(4.0);
-        section(ui, "Arrange", true, |ui| {
+        section(ui, &tr("Arrange"), true, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Group").on_hover_text("Ctrl/Cmd+G").clicked() {
+                if ui.button(tr("Group")).on_hover_text(tr("Ctrl/Cmd+G")).clicked() {
                     self.group_selection();
                 }
-                if ui.button("Delete all").clicked() {
+                if ui.button(tr("Delete all")).clicked() {
                     let steps: Vec<Value> =
                         ids.iter().map(|i| json!({"command": "entity.delete", "params": {"id": i}})).collect();
                     let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
@@ -3065,7 +3234,7 @@ impl EditorApp {
             });
             egui::Grid::new("align_grid").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
                 for (axis, label) in [("x", "Align X"), ("z", "Align Z"), ("y", "Align Y")] {
-                    ui.label(label);
+                    ui.label(tr(label));
                     for (to, t) in [("min", "min"), ("center", "centre"), ("max", "max")] {
                         if ui.small_button(t).clicked() {
                             self.run("entity.align", json!({"ids": ids, "axis": axis, "to": to}));
@@ -3076,9 +3245,9 @@ impl EditorApp {
             });
             if ids.len() >= 3 {
                 ui.horizontal(|ui| {
-                    ui.label("Distribute");
+                    ui.label(tr("Distribute"));
                     for axis in ["x", "z"] {
-                        if ui.small_button(axis.to_uppercase()).clicked() {
+                        if ui.small_button(tr(axis.to_uppercase())).clicked() {
                             self.run("entity.distribute", json!({"ids": ids, "axis": axis}));
                         }
                     }
@@ -3093,16 +3262,16 @@ impl EditorApp {
         match hub::dispatch(&self.hub, json!({"command": "entity.group", "params": {"ids": ids}})) {
             Ok(o) => {
                 self.select(o.result["id"].as_str().map(str::to_string));
-                self.toast("Grouped: they now move together (Ctrl+Shift+G to ungroup)");
+                self.toast(tr("Grouped: they now move together (Ctrl+Shift+G to ungroup)"));
             }
-            Err(e) => self.toast(format!("Could not group: {}", e.message)),
+            Err(e) => self.toast(crate::lf!("Could not group: {}", "无法编组：{}", e.message)),
         }
     }
 
     fn person_section(&mut self, ui: &mut egui::Ui, scene: &Scene, root: &str, frame: f32) {
         let animated = self.auto_key || rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
-        section(ui, "Pose", true, |ui| {
-            ui.weak("Click a body part to select its joint, then drag it (or the rings) to bend it.");
+        section(ui, &tr("Pose"), true, |ui| {
+            ui.weak(tr("Click a body part to select its joint, then drag it (or the rings) to bend it."));
             let apply = |this: &mut Self, name: &str| {
                 let mut req = json!({"id": root, "pose": name, "frame": frame});
                 if animated {
@@ -3112,15 +3281,15 @@ impl EditorApp {
             };
             ui.horizontal_wrapped(|ui| {
                 for p in rig::POSES.iter().filter(|p| COMMON_POSES.contains(&p.name)) {
-                    if ui.button(humanize(p.name)).on_hover_text(p.description).clicked() {
+                    if ui.button(tr(humanize(p.name))).on_hover_text(tr(p.description)).clicked() {
                         apply(self, p.name);
                     }
                 }
-                ui.menu_button("More poses ▾", |ui| {
+                ui.menu_button(tr("More poses ▾"), |ui| {
                     ui.set_max_height(420.0);
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for p in rig::POSES.iter().filter(|p| !COMMON_POSES.contains(&p.name)) {
-                            if ui.button(humanize(p.name)).on_hover_text(p.description).clicked() {
+                            if ui.button(tr(humanize(p.name))).on_hover_text(tr(p.description)).clicked() {
                                 apply(self, p.name);
                                 ui.close();
                             }
@@ -3131,7 +3300,10 @@ impl EditorApp {
         });
         if let Some(cam) = camera_id_at(scene, frame) {
             ui.horizontal(|ui| {
-                if ui.button("Look at camera").on_hover_text("Turn the head and neck towards the shot camera").clicked()
+                if ui
+                    .button(tr("Look at camera"))
+                    .on_hover_text(tr("Turn the head and neck towards the shot camera"))
+                    .clicked()
                 {
                     let mut req = json!({"id": root, "target": cam, "frame": frame});
                     if animated {
@@ -3145,10 +3317,14 @@ impl EditorApp {
             self.human_sections(ui, scene, root, frame, body, outfit, animated);
             return;
         }
-        section(ui, "Hair", true, |ui| {
+        // (imported people bring their own hair)
+        if !scene.contains(&format!("{root}_skull")) {
+            return;
+        }
+        section(ui, &tr("Hair"), true, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for style in rig::HAIR_STYLES {
-                    if ui.button(*style).clicked() {
+                    if ui.button(tr(*style)).clicked() {
                         self.run("person.setHair", json!({"id": root, "style": style}));
                     }
                 }
@@ -3160,7 +3336,7 @@ impl EditorApp {
             if let Some(c) = current {
                 let mut c2 = c;
                 ui.horizontal(|ui| {
-                    ui.label("Colour");
+                    ui.label(tr("Colour"));
                     if ui.color_edit_button_rgb(&mut c2).changed() && c2 != c {
                         let style = if scene.contains(&format!("{root}_hair_back")) {
                             self.hair_style_of(scene, root)
@@ -3394,14 +3570,14 @@ impl EditorApp {
                 }
             }
         };
-        section(ui, "Joint", true, |ui| {
-            ui.weak("Drag a body part in the view to bend it, or turn the coloured rings.");
+        section(ui, &tr("Joint"), true, |ui| {
+            ui.weak(tr("Drag a body part in the view to bend it, or turn the coloured rings."));
             let mut r = local_at(scene, id, frame).map(|t| t.euler_degrees()).unwrap_or_default();
             let mut changed = false;
             let mut started = false;
             egui::Grid::new("joint_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
                 for (i, label) in ["Bend  X", "Twist  Y", "Side  Z"].iter().enumerate() {
-                    ui.label(*label);
+                    ui.label(tr(*label));
                     let resp = ui.add(egui::Slider::new(&mut r[i], -180.0..=180.0).suffix("°").max_decimals(0));
                     changed |= resp.changed();
                     started |= resp.drag_started();
@@ -3415,7 +3591,7 @@ impl EditorApp {
                 set(self, json!({ joint: r }), Some(&format!("joint:{id}")));
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Reset").clicked() {
+                if ui.button(tr("Reset")).clicked() {
                     set(self, json!({ joint: [0, 0, 0] }), None);
                 }
                 let other = joint
@@ -3423,11 +3599,11 @@ impl EditorApp {
                     .map(|b| format!("{b}_r"))
                     .or_else(|| joint.strip_suffix("_r").map(|b| format!("{b}_l")));
                 if let Some(o) = other
-                    && ui.button(format!("Mirror to {o}")).clicked()
+                    && ui.button(crate::lf!("Mirror to {o}", "镜像到 {o}")).clicked()
                 {
                     set(self, json!({ o: [r[0], -r[1], -r[2]] }), None);
                 }
-                if ui.button("Select person").clicked() {
+                if ui.button(tr("Select person")).clicked() {
                     self.select(Some(root.clone()));
                 }
             });
@@ -3440,23 +3616,23 @@ impl EditorApp {
         let fps = t.fps.max(1.0);
         ui.add_space(3.0);
         ui.horizontal(|ui| {
-            if ui.button("⏮").on_hover_text("To the start (Home)").clicked() {
+            if ui.button(tr("⏮")).on_hover_text(tr("To the start (Home)")).clicked() {
                 self.hub.borrow_mut().frame = t.start as f32;
             }
             if ui
-                .add_sized([62.0, 22.0], egui::Button::new(if self.playing { "⏸ Pause" } else { "▶ Play" }))
-                .on_hover_text("Space")
+                .add_sized([62.0, 22.0], egui::Button::new(tr(if self.playing { "⏸ Pause" } else { "▶ Play" })))
+                .on_hover_text(tr("Space"))
                 .clicked()
             {
                 self.playing = !self.playing;
             }
-            if ui.button("⏭").on_hover_text("To the end (End)").clicked() {
+            if ui.button(tr("⏭")).on_hover_text(tr("To the end (End)")).clicked() {
                 self.hub.borrow_mut().frame = t.end as f32;
             }
             let has_cam = camera_id_at(&scene, t.start as f32).is_some();
             if ui
-                .add_enabled(has_cam, egui::Button::new("🎥 Preview shot"))
-                .on_hover_text("Play from the start, looking through the shot camera")
+                .add_enabled(has_cam, egui::Button::new(tr("🎥 Preview shot")))
+                .on_hover_text(tr("Play from the start, looking through the shot camera"))
                 .clicked()
             {
                 self.hub.borrow_mut().frame = t.start as f32;
@@ -3470,19 +3646,19 @@ impl EditorApp {
             ui.separator();
             let sel = self.selected();
             if ui
-                .add_enabled(sel.is_some(), egui::Button::new("◆ Key"))
-                .on_hover_text("Keyframe the selection at this frame (K)")
+                .add_enabled(sel.is_some(), egui::Button::new(tr("◆ Key")))
+                .on_hover_text(tr("Keyframe the selection at this frame (K)"))
                 .clicked()
             {
                 self.key_selection();
             }
-            ui.toggle_value(&mut self.auto_key, "Auto-key")
-                .on_hover_text("Every move, turn or pose change is keyed at the current frame");
+            ui.toggle_value(&mut self.auto_key, tr("Auto-key"))
+                .on_hover_text(tr("Every move, turn or pose change is keyed at the current frame"));
             ui.separator();
             let (mut fps2, mut start, mut end) = (t.fps, t.start, t.end);
             let a = ui.add(egui::DragValue::new(&mut fps2).range(1.0..=120.0).suffix(" fps"));
             let b = ui.add(egui::DragValue::new(&mut start).range(0..=end));
-            ui.label("–");
+            ui.label(tr("–"));
             let c = ui.add(egui::DragValue::new(&mut end).range(start..=100_000));
             if a.changed() || b.changed() || c.changed() {
                 self.run("timeline.set", json!({"fps": fps2, "start": start, "end": end}));
@@ -3495,44 +3671,47 @@ impl EditorApp {
             if let Some(cam) = sel_cam {
                 let name = scene.get(&cam).map(|e| e.name.clone()).unwrap_or(cam.clone());
                 let tip = if t.shots.is_empty() {
-                    format!("A shot through {name} over the whole timeline")
+                    crate::lf!("A shot through {name} over the whole timeline", "通过 {name} 拍摄整条时间轴的镜头")
                 } else {
-                    format!("Cut to {name} at the playhead (select another camera to cut to it)")
+                    crate::lf!(
+                        "Cut to {name} at the playhead (select another camera to cut to it)",
+                        "在播放头处切到 {name}（选中别的相机可切到它）"
+                    )
                 };
-                if ui.small_button("+ Shot").on_hover_text(tip).clicked() {
+                if ui.small_button(tr("+ Shot")).on_hover_text(tr(tip)).clicked() {
                     if t.shots.is_empty() {
                         self.run("shot.create", json!({"camera": cam, "start": t.start, "end": t.end}));
                     } else if let Some(r) = self.run(
                         "shot.cut",
                         json!({"camera": cam, "frame": self.frame().round().max(0.0) as u32, "name": name}),
                     ) {
-                        self.toast(format!("Cut to {name} at frame {}", r["start"]));
+                        self.toast(crate::lf!("Cut to {name} at frame {}", "在第 {} 帧切到 {name}", r["start"]));
                     }
                 }
             }
             if self.tl_view.is_some()
                 && ui
-                    .small_button("Fit")
-                    .on_hover_text(
+                    .small_button(tr("Fit"))
+                    .on_hover_text(tr(
                         "Show the whole timeline (or double-click the ruler; pinch or Cmd/Ctrl+scroll on it to zoom)",
-                    )
+                    ))
                     .clicked()
             {
                 self.tl_view = None;
             }
-            ui.toggle_value(&mut self.show_board, "Storyboard")
-                .on_hover_text("Every shot as a picture through its camera; click one to go there");
+            ui.toggle_value(&mut self.show_board, tr("Storyboard"))
+                .on_hover_text(tr("Every shot as a picture through its camera; click one to go there"));
             ui.separator();
-            ui.toggle_value(&mut self.show_console, "Console")
-                .on_hover_text("Type commands: the same API as window.shotstage, the CLI and MCP");
+            ui.toggle_value(&mut self.show_console, tr("Console"))
+                .on_hover_text(tr("Type commands: the same API as window.shotstage, the CLI and MCP"));
         });
         self.track_strip(ui, &scene);
         if self.show_console {
             ui.separator();
             ui.horizontal(|ui| {
-                ui.strong("Command console");
-                ui.weak("JSON request: {\"command\", \"params\"} or {\"batch\": [...]}");
-                if ui.small_button("List commands").clicked() {
+                ui.strong(tr("Command console"));
+                ui.weak(tr("JSON request: {\"command\", \"params\"} or {\"batch\": [...]}"));
+                if ui.small_button(tr("List commands")).clicked() {
                     let list = self.hub.borrow().session.list();
                     self.console_out =
                         list.iter().map(|c| format!("{:<24} {}", c.id, c.summary)).collect::<Vec<_>>().join("\n");
@@ -3545,13 +3724,13 @@ impl EditorApp {
                         .desired_rows(5)
                         .desired_width(f32::INFINITY),
                 );
-                if cols[0].button("Run").clicked() {
+                if cols[0].button(if crate::i18n::zh() { "运行" } else { "Run" }).clicked() {
                     self.console_out = match serde_json::from_str::<Value>(&self.console) {
                         Ok(req) => match hub::dispatch(&self.hub, req) {
                             Ok(o) => serde_json::to_string_pretty(&o.result).unwrap_or_default(),
                             Err(e) => format!("error {}: {}", e.code, e.message),
                         },
-                        Err(e) => format!("not JSON: {e}"),
+                        Err(e) => crate::lf!("not JSON: {e}", "不是 JSON：{e}"),
                     };
                 }
                 egui::ScrollArea::vertical().id_salt("console_out").max_height(140.0).show(&mut cols[1], |ui| {
@@ -3637,7 +3816,7 @@ impl EditorApp {
         p.text(
             egui::pos2(ruler.left() + 4.0, ruler.center().y),
             egui::Align2::LEFT_CENTER,
-            "Timeline",
+            tr("Timeline"),
             egui::FontId::proportional(11.0),
             Color32::from_gray(170),
         );
@@ -3657,11 +3836,11 @@ impl EditorApp {
         let shots = t.shots.clone();
         ruler_resp.context_menu(|ui| {
             if shots.is_empty() {
-                ui.weak("No shots yet: + Shot makes one through the selected or active camera");
+                ui.weak(tr("No shots yet: + Shot makes one through the selected or active camera"));
             }
             for s in &shots {
                 ui.menu_button(format!("{} · {}–{} · {}", s.name, s.start, s.end, s.camera), |ui| {
-                    if ui.button("Look through its camera").clicked() {
+                    if ui.button(tr("Look through its camera")).clicked() {
                         self.run("camera.setActive", json!({"id": s.camera}));
                         self.select(Some(s.camera.clone()));
                         self.hub.borrow_mut().frame = s.start as f32;
@@ -3669,7 +3848,7 @@ impl EditorApp {
                         self.hub.borrow_mut().look_through = true;
                         ui.close();
                     }
-                    if ui.button("Delete shot").clicked() {
+                    if ui.button(tr("Delete shot")).clicked() {
                         self.run("shot.delete", json!({"id": s.id}));
                         ui.close();
                     }
@@ -3684,7 +3863,7 @@ impl EditorApp {
             p.text(
                 egui::pos2(srow.left() + 6.0, srow.center().y),
                 egui::Align2::LEFT_CENTER,
-                "Shots",
+                tr("Shots"),
                 egui::FontId::proportional(11.5),
                 Color32::from_gray(170),
             );
@@ -3698,11 +3877,11 @@ impl EditorApp {
                 p.text(
                     egui::pos2(area.left() + 6.0, srow.center().y),
                     egui::Align2::LEFT_CENTER,
-                    if scene.entities.iter().any(|e| matches!(e.kind, EntityKind::Camera(_))) {
+                    tr(if scene.entities.iter().any(|e| matches!(e.kind, EntityKind::Camera(_))) {
                         "No shots: + Shot (above) or right-click here"
                     } else {
                         "No camera yet: + Camera in the view toolbar puts one where you look from"
-                    },
+                    }),
                     egui::FontId::proportional(11.0),
                     Color32::from_gray(110),
                 );
@@ -3800,16 +3979,16 @@ impl EditorApp {
             let under = t.shots.iter().find(|s| fr >= s.start as f32 && fr <= s.end as f32).cloned();
             match under {
                 Some(sh) => {
-                    ui.weak(format!("{} · frames {}–{}", sh.name, sh.start, sh.end));
-                    ui.menu_button("Camera", |ui| {
+                    ui.weak(crate::lf!("{} · frames {}–{}", "{} · 第 {}–{} 帧", sh.name, sh.start, sh.end));
+                    ui.menu_button(tr("Camera"), |ui| {
                         for (cid, cname) in &cams {
-                            if ui.selectable_label(*cid == sh.camera, cname).clicked() {
+                            if ui.selectable_label(*cid == sh.camera, tr(cname)).clicked() {
                                 self.run("shot.set", json!({"id": sh.id, "camera": cid}));
                                 ui.close();
                             }
                         }
                     });
-                    if ui.button("Split at the playhead").clicked() {
+                    if ui.button(tr("Split at the playhead")).clicked() {
                         let f = self.frame().round() as u32;
                         if f > sh.start && f <= sh.end {
                             let _ = hub::dispatch(&self.hub, json!({"batch": [
@@ -3819,15 +3998,15 @@ impl EditorApp {
                         }
                         ui.close();
                     }
-                    if ui.button("Delete shot").clicked() {
+                    if ui.button(tr("Delete shot")).clicked() {
                         self.run("shot.delete", json!({"id": sh.id}));
                         ui.close();
                     }
                 }
                 None => {
-                    ui.weak(format!("frame {fr:.0}"));
+                    ui.weak(crate::lf!("frame {fr:.0}", "第 {fr:.0} 帧"));
                     for (cid, cname) in &cams {
-                        if ui.button(format!("New shot here through {cname}")).clicked() {
+                        if ui.button(crate::lf!("New shot here through {cname}", "在这里用 {cname} 新建镜头")).clicked() {
                             let a = fr.round().max(0.0) as u32;
                             let next = t.shots.iter().map(|s| s.start).filter(|s| *s > a).min().unwrap_or(t.end + 1);
                             self.run("shot.create", json!({"camera": cid, "start": a, "end": (a + (t.fps * 3.0) as u32).min(next.saturating_sub(1)).max(a)}));
@@ -3835,7 +4014,7 @@ impl EditorApp {
                         }
                     }
                     if cams.is_empty() {
-                        ui.weak("Add a camera first");
+                        ui.weak(tr("Add a camera first"));
                     }
                 }
             }
@@ -3843,7 +4022,7 @@ impl EditorApp {
         let mut playhead_bottom = srow.bottom();
         egui::ScrollArea::vertical().id_salt("tracks").max_height(row_h * 5.0 + 2.0).auto_shrink([false, true]).show(ui, |ui| {
             if rows.is_empty() {
-                ui.weak("No animation yet: select something and press ◆ Key, or use a preset under Animate on the right.");
+                ui.weak(tr("No animation yet: select something and press ◆ Key, or use a preset under Animate on the right."));
             }
             for (ri, row) in rows.iter().enumerate() {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(full, row_h), Sense::click_and_drag());
@@ -3940,10 +4119,10 @@ impl EditorApp {
                     let Some((_, f)) = menu_for.clone() else {
                         // the whole row
                         let Some((first, last)) = row.frames.first().zip(row.frames.last()).map(|(a, b)| (*a, *b)) else { return };
-                        ui.weak(format!("{}: frames {first:.0}–{last:.0}", row.label));
+                        ui.weak(crate::lf!("{}: frames {first:.0}–{last:.0}", "{}：第 {first:.0}–{last:.0} 帧", row.label));
                         let now = self.frame().round();
                         let go = |ui: &mut egui::Ui, label: &str, tip: &str, params: Value| {
-                            if ui.button(label).on_hover_text(tip).clicked() {
+                            if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
                                 let mut params = params;
                                 params["ids"] = json!(ids);
                                 let _ = hub::dispatch(&self.hub, json!({"command": "keyframe.retime", "params": params}));
@@ -3953,13 +4132,13 @@ impl EditorApp {
                         go(ui, "Start at the playhead", "Slide every key so the animation begins here", json!({"offset": now - first}));
                         go(ui, "Faster", "Play it in two thirds of the time", json!({"scale": 2.0 / 3.0}));
                         go(ui, "Slower", "Take half as long again", json!({"scale": 1.5}));
-                        ui.weak("Tip: drag the bar between the keys to slide it all.");
+                        ui.weak(tr("Tip: drag the bar between the keys to slide it all."));
                         return;
                     };
-                    ui.weak(format!("Key at frame {f:.0}"));
-                    ui.label("Ease into the next key");
+                    ui.weak(crate::lf!("Key at frame {f:.0}", "第 {f:.0} 帧的关键帧"));
+                    ui.label(tr("Ease into the next key"));
                     for (label, interp) in [("Smooth (ease)", "ease"), ("Ease in", "easeIn"), ("Ease out", "easeOut"), ("Linear", "linear"), ("Overshoot", "overshoot"), ("Hold (step)", "step")] {
-                        if ui.button(label).clicked() {
+                        if ui.button(tr(label)).clicked() {
                             let steps: Vec<Value> = row.tracks.iter().filter(|(id, prop)| scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - f).abs() < 1e-3)))
                                 .map(|(id, prop)| json!({"command": "keyframe.setInterp", "params": {"id": id, "property": prop, "frame": f, "interp": interp}})).collect();
                             let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
@@ -3967,7 +4146,7 @@ impl EditorApp {
                         }
                     }
                     ui.separator();
-                    if ui.button("Delete key").clicked() {
+                    if ui.button(tr("Delete key")).clicked() {
                         let steps: Vec<Value> = row.tracks.iter().filter(|(id, prop)| scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - f).abs() < 1e-3)))
                             .map(|(id, prop)| json!({"command": "keyframe.delete", "params": {"id": id, "property": prop, "frame": f}})).collect();
                         let _ = hub::dispatch(&self.hub, json!({"batch": steps}));
@@ -4006,7 +4185,7 @@ impl EditorApp {
         }
         ui.add_space(4.0);
         if shots.is_empty() {
-            ui.weak("No shots yet: add one with + Shot, or right-click the Shots row on the timeline.");
+            ui.weak(tr("No shots yet: add one with + Shot, or right-click the Shots row on the timeline."));
             ui.add_space(4.0);
             return;
         }
@@ -4014,10 +4193,10 @@ impl EditorApp {
         let fps = scene.timeline.fps.max(1.0);
         let card = Vec2::new(160.0, 90.0);
         ui.horizontal(|ui| {
-            ui.weak(format!("{} shots", shots.len()));
+            ui.weak(crate::lf!("{} shots", "{} 个镜头", shots.len()));
             if ui
-                .small_button("Export…")
-                .on_hover_text("Save every shot's picture as one HTML page (open it, print it or send it)")
+                .small_button(tr("Export…"))
+                .on_hover_text(tr("Save every shot's picture as one HTML page (open it, print it or send it)"))
                 .clicked()
             {
                 self.export_board();
@@ -4053,7 +4232,7 @@ impl EditorApp {
                     p.text(
                         pic.left_bottom() + Vec2::new(2.0, 2.0),
                         egui::Align2::LEFT_TOP,
-                        format!("{} · {} · {secs:.1}s", i + 1, sh.name),
+                        crate::lf!("{} · {} · {secs:.1}s", "{} · {} · {secs:.1} 秒", i + 1, sh.name),
                         egui::FontId::proportional(11.0),
                         if current { Color32::WHITE } else { Color32::from_gray(190) },
                     );
@@ -4061,15 +4240,15 @@ impl EditorApp {
                     resp.context_menu(|ui| {
                         ui.weak(format!("{} · {cam}", sh.name));
                         if ui
-                            .button(format!("Select {cam}"))
-                            .on_hover_text("To move it, change its lens or animate it")
+                            .button(crate::lf!("Select {cam}", "选中 {cam}"))
+                            .on_hover_text(tr("To move it, change its lens or animate it"))
                             .clicked()
                         {
                             self.also.clear();
                             self.select(Some(sh.camera.clone()));
                             ui.close();
                         }
-                        if ui.button("Go to its middle frame").on_hover_text("The frame this picture shows").clicked() {
+                        if ui.button(tr("Go to its middle frame")).on_hover_text(tr("The frame this picture shows")).clicked() {
                             self.playing = false;
                             self.look_through = true;
                             let mut h = self.hub.borrow_mut();
@@ -4078,7 +4257,7 @@ impl EditorApp {
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("Delete shot").clicked() {
+                        if ui.button(tr("Delete shot")).clicked() {
                             self.run("shot.delete", json!({"id": sh.id}));
                             ui.close();
                         }
@@ -4155,10 +4334,12 @@ impl EditorApp {
             }
         }
         match hub::dispatch(&self.hub, json!({"batch": steps})) {
-            Ok(_) => {
-                self.toast(format!("Keyed {} at frame {f:.0}", scene.get(&id).map(|e| e.name.clone()).unwrap_or(id)))
-            }
-            Err(e) => self.toast(format!("Could not key: {}", e.message)),
+            Ok(_) => self.toast(crate::lf!(
+                "Keyed {} at frame {f:.0}",
+                "已在第 {f:.0} 帧为 {} 打关键帧",
+                scene.get(&id).map(|e| e.name.clone()).unwrap_or(id)
+            )),
+            Err(e) => self.toast(crate::lf!("Could not key: {}", "无法打关键帧：{}", e.message)),
         }
     }
 
@@ -4963,7 +5144,7 @@ impl EditorApp {
                     p.rect_filled(lr, 3.0, Color32::from_black_alpha(140));
                     p.galley(lr.min + Vec2::new(4.0, 2.0), label, Color32::WHITE);
                     r.on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text("Shot camera at the playhead: click to look through it")
+                        .on_hover_text(tr("Shot camera at the playhead: click to look through it"))
                 })
                 .inner;
             if r.clicked() {
@@ -5026,12 +5207,22 @@ impl EditorApp {
                 );
             }
             let hud = shotstage_core::eval::describe_shot(&scene, c, f, None)
-                .map(|d| format!(" · {}", d.summary))
+                .map(|d| {
+                    if crate::i18n::zh() {
+                        format!(" · {}，{:.0}mm {}", tr(&d.angle), d.focal_length_mm, tr(format!("{} lens", d.lens)))
+                    } else {
+                        format!(" · {}", d.summary)
+                    }
+                })
                 .unwrap_or_default();
             painter.text(
                 rect.left_top() + Vec2::new(8.0, 6.0),
                 egui::Align2::LEFT_TOP,
-                format!("{} · frame {f:.0}{hud}", scene.get(c).map(|e| e.name.as_str()).unwrap_or(c)),
+                crate::lf!(
+                    "{} · frame {f:.0}{hud}",
+                    "{} · 第 {f:.0} 帧{hud}",
+                    scene.get(c).map(|e| e.name.as_str()).unwrap_or(c)
+                ),
                 egui::FontId::monospace(12.0),
                 Color32::from_white_alpha(180),
             );
@@ -5135,10 +5326,13 @@ impl EditorApp {
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
                         ui.set_width(340.0);
-                        ui.strong("Pick up where you left off?");
-                        ui.weak(format!("Your last scene ({n} objects) was saved automatically."));
+                        ui.strong(tr("Pick up where you left off?"));
+                        ui.weak(crate::lf!(
+                            "Your last scene ({n} objects) was saved automatically.",
+                            "上次的场景（{n} 个物体）已自动保存。"
+                        ));
                         ui.horizontal(|ui| {
-                            if ui.button("Restore it").clicked()
+                            if ui.button(tr("Restore it")).clicked()
                                 && let Some((saved, _)) = self.restore_offer.take()
                                 && let Ok(scene) = serde_json::to_value(&*saved)
                             {
@@ -5146,9 +5340,9 @@ impl EditorApp {
                                     &self.hub,
                                     json!({"command": "scene.load", "params": {"scene": scene}}),
                                 );
-                                self.toast("Restored your last scene (Undo goes back)");
+                                self.toast(tr("Restored your last scene (Undo goes back)"));
                             }
-                            if ui.button("Start fresh").clicked() {
+                            if ui.button(tr("Start fresh")).clicked() {
                                 self.restore_offer = None;
                             }
                         });
@@ -5163,7 +5357,7 @@ impl EditorApp {
             painter.text(
                 full.center(),
                 egui::Align2::CENTER_CENTER,
-                "Drop to import (glb, gltf, obj, stl, fbx, blend)",
+                tr("Drop to import (glb, gltf, obj, stl, fbx, blend)"),
                 egui::FontId::proportional(18.0),
                 Color32::WHITE,
             );
@@ -5277,7 +5471,7 @@ impl EditorApp {
                     pick = Some((0.6, 0.35));
                 }
                 let _ = pitch;
-                resp.on_hover_text("Click an axis to look along it (Y: from above) · 3/4: the default view");
+                resp.on_hover_text(tr("Click an axis to look along it (Y: from above) · 3/4: the default view"));
             });
         if let Some((y, p)) = pick {
             (self.orbit.yaw, self.orbit.pitch) = (y, p);
@@ -5294,12 +5488,12 @@ impl EditorApp {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16)).show(ui, |ui| {
                     ui.set_max_width(360.0);
-                    ui.heading("Start a scene");
-                    ui.weak("Pick a ready set (everything stays editable), or drag blocks in from the left.");
+                    ui.heading(tr("Start a scene"));
+                    ui.weak(tr("Pick a ready set (everything stays editable), or drag blocks in from the left."));
                     ui.add_space(6.0);
                     egui::Grid::new("welcome_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
                         for (i, (name, label, desc)) in shotstage_commands::templates::TEMPLATES.iter().enumerate() {
-                            if ui.add_sized([170.0, 34.0], egui::Button::new(*label)).on_hover_text(*desc).clicked() {
+                            if ui.add_sized([170.0, 34.0], egui::Button::new(tr(*label))).on_hover_text(tr(*desc)).clicked() {
                                 self.apply_template(name, label);
                             }
                             if i % 2 == 1 {
@@ -5308,7 +5502,7 @@ impl EditorApp {
                         }
                     });
                     ui.add_space(4.0);
-                    ui.weak("Tip: drop a .glb / .fbx model or a picture on the view to bring it in. Cmd/Ctrl+K searches every block, move and action.");
+                    ui.weak(tr("Tip: drop a .glb / .fbx model or a picture on the view to bring it in. Cmd/Ctrl+K searches every block, move and action."));
                 });
             });
     }
@@ -5323,13 +5517,13 @@ impl EditorApp {
                     // wrap rather than spill over the side panels or under the view cube
                     ui.set_max_width((full.width() - 28.0 - 100.0).max(160.0));
                     ui.horizontal_wrapped(|ui| {
-                        ui.selectable_value(&mut self.pass, Pass::Clay, "Clay").on_hover_text("Clay shading");
-                        ui.selectable_value(&mut self.pass, Pass::Depth, "Depth")
-                            .on_hover_text("Depth pass (near = white)");
-                        ui.selectable_value(&mut self.pass, Pass::Normal, "Normal").on_hover_text("Normal pass");
+                        ui.selectable_value(&mut self.pass, Pass::Clay, tr("Clay")).on_hover_text(tr("Clay shading"));
+                        ui.selectable_value(&mut self.pass, Pass::Depth, tr("Depth"))
+                            .on_hover_text(tr("Depth pass (near = white)"));
+                        ui.selectable_value(&mut self.pass, Pass::Normal, tr("Normal")).on_hover_text(tr("Normal pass"));
                         ui.add_space(6.0);
-                        ui.toggle_value(&mut self.snap, "Snap")
-                            .on_hover_text("Snap dragged blocks to a grid (hold Ctrl to place freely)");
+                        ui.toggle_value(&mut self.snap, tr("Snap"))
+                            .on_hover_text(tr("Snap dragged blocks to a grid (hold Ctrl to place freely)"));
                         ui.add_enabled(
                             self.snap,
                             egui::DragValue::new(&mut self.snap_step).range(0.01..=5.0).speed(0.01).suffix(" m"),
@@ -5337,8 +5531,8 @@ impl EditorApp {
                         ui.add_space(6.0);
                         // (a plain button: an enabled_ui wrapper would wrap its text letter by letter)
                         if ui
-                            .add_enabled(has_cam, egui::Button::selectable(self.look_through, "🎥 Camera view"))
-                            .on_hover_text("Look through the shot camera (the clean reference frame)")
+                            .add_enabled(has_cam, egui::Button::selectable(self.look_through, tr("🎥 Camera view")))
+                            .on_hover_text(tr("Look through the shot camera (the clean reference frame)"))
                             .clicked()
                         {
                             self.look_through = !self.look_through;
@@ -5347,42 +5541,41 @@ impl EditorApp {
                             self.look_through = false;
                         }
                         if ui
-                            .add_enabled(has_cam, egui::Button::new("📷 Save frame"))
-                            .on_hover_text("Save the shot camera's view at this frame as a PNG (1920 px wide)")
+                            .add_enabled(has_cam, egui::Button::new(tr("📷 Save frame")))
+                            .on_hover_text(tr("Save the shot camera's view at this frame as a PNG (1920 px wide)"))
                             .clicked()
                         {
                             crate::files::save_frame(&self.hub, 1920, &self.saved);
                         }
                         if !self.look_through
-                            && ui.button("+ Camera").on_hover_text("A new camera right where you are looking from").clicked()
+                            && ui.button(tr("+ Camera")).on_hover_text(tr("A new camera right where you are looking from")).clicked()
                         {
                             self.camera_from_view();
                         }
-                        ui.menu_button("View ▾", |ui| {
-                            ui.checkbox(&mut self.shadows, "Shadows")
-                                .on_hover_text("Shadows from the key light (snapshots always have them)");
-                            ui.checkbox(&mut self.studio_light, "Studio light").on_hover_text(
-                                "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
+                        ui.menu_button(tr("View ▾"), |ui| {
+                            ui.checkbox(&mut self.shadows, tr("Shadows"))
+                                .on_hover_text(tr("Shadows from the key light (snapshots always have them)"));
+                            ui.checkbox(&mut self.studio_light, tr("Studio light")).on_hover_text(tr("Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)"),
                             );
-                            ui.checkbox(&mut self.safe_areas, "Safe areas in camera view")
-                                .on_hover_text("Action / title safe frames and a centre cross when looking through a camera");
-                            ui.checkbox(&mut self.cam_preview, "Camera preview in the corner")
-                                .on_hover_text("A small live view of the shot camera while you work in the free view");
+                            ui.checkbox(&mut self.safe_areas, tr("Safe areas in camera view"))
+                                .on_hover_text(tr("Action / title safe frames and a centre cross when looking through a camera"));
+                            ui.checkbox(&mut self.cam_preview, tr("Camera preview in the corner"))
+                                .on_hover_text(tr("A small live view of the shot camera while you work in the free view"));
                             ui.separator();
-                            ui.label("Two-finger scroll / mouse wheel");
+                            ui.label(tr("Two-finger scroll / mouse wheel"));
                             ui.horizontal(|ui| {
                                 for (m, label, tip) in [
                                     (ScrollMode::Auto, "Auto", "Trackpad orbits, mouse wheel zooms"),
                                     (ScrollMode::Orbit, "Orbit", "Scrolling orbits (Shift: pan); pinch or Ctrl+scroll zooms"),
                                     (ScrollMode::Zoom, "Zoom", "Scrolling always zooms"),
                                 ] {
-                                    ui.selectable_value(&mut self.scroll_mode, m, label).on_hover_text(tip);
+                                    ui.selectable_value(&mut self.scroll_mode, m, tr(label)).on_hover_text(tr(tip));
                                 }
                             });
                         })
                         .response
-                        .on_hover_text("Shadows, lighting, camera preview and navigation");
-                        ui.label(egui::RichText::new(" ? ").strong()).on_hover_text(HELP);
+                        .on_hover_text(tr("Shadows, lighting, camera preview and navigation"));
+                        ui.label(egui::RichText::new(tr(" ? ")).strong()).on_hover_text(crate::i18n::help(HELP));
                     });
                 });
             });

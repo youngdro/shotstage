@@ -318,3 +318,63 @@ pub fn save_storyboard(hub: &crate::hub::SharedHub, panels: Vec<Panel>, width: u
         }
     }
 }
+
+/// A file fetched over HTTP: still on its way, its contents (base64), or why it failed.
+#[derive(Clone)]
+pub enum Fetched {
+    Loading,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Ready(Rc<String>),
+    Failed(String),
+}
+
+/// Person files fetched so far, by file name.
+pub type PeopleCache = Rc<RefCell<std::collections::HashMap<&'static str, Fetched>>>;
+
+/// The GLB of a detailed person, base64: fetched from `people/<file>` next to the page the
+/// first time it is asked for (the desktop carries them, see `people::bundled`).
+pub fn person_file(cache: &PeopleCache, file: &'static str, hub: &crate::hub::SharedHub) -> Fetched {
+    if let Some(f) = cache.borrow().get(file) {
+        return f.clone();
+    }
+    cache.borrow_mut().insert(file, Fetched::Loading);
+    fetch_person(cache.clone(), file, hub.clone());
+    Fetched::Loading
+}
+
+/// GET `url` (relative to the page) and return the body.
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+    let window = web_sys::window().ok_or("no window")?;
+    let resp = JsFuture::from(window.fetch_with_str(url))
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .dyn_into::<web_sys::Response>()
+        .map_err(|_| "not a response".to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url}: HTTP {}", resp.status()));
+    }
+    let buf = JsFuture::from(resp.array_buffer().map_err(|e| format!("{e:?}"))?).await.map_err(|e| format!("{e:?}"))?;
+    Ok(js_sys::Uint8Array::new(&buf).to_vec())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fetch_person(cache: PeopleCache, file: &'static str, hub: crate::hub::SharedHub) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let entry = match fetch_bytes(&format!("people/{file}")).await {
+            Ok(bytes) => Fetched::Ready(Rc::new(shotstage_commands::model::encode(&bytes))),
+            Err(e) => Fetched::Failed(e),
+        };
+        cache.borrow_mut().insert(file, entry);
+        if let Some(ctx) = &hub.borrow().repaint {
+            ctx.request_repaint();
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fetch_person(cache: PeopleCache, file: &'static str, _hub: crate::hub::SharedHub) {
+    cache.borrow_mut().insert(file, Fetched::Failed("not bundled in this build".into()));
+}
