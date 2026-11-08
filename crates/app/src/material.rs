@@ -18,16 +18,34 @@ fn mapping_name(m: Mapping) -> &'static str {
     MAPPINGS.iter().find(|(x, ..)| *x == m).map(|(_, n, _)| *n).unwrap_or("box")
 }
 
+/// How a mapping is shown in the panel.
+fn mapping_label(name: &str) -> &str {
+    match name {
+        _ if !crate::i18n::zh() => match name {
+            "box" => "Box",
+            "planar" => "Planar",
+            "cylinder" => "Cylinder",
+            "sphere" => "Sphere",
+            _ => "UV",
+        },
+        "box" => "盒状",
+        "planar" => "平面",
+        "cylinder" => "圆柱",
+        "sphere" => "球面",
+        _ => "UV",
+    }
+}
+
 impl EditorApp {
     pub(super) fn material_panel(&mut self, ui: &mut egui::Ui, id: &str, material: Option<&Material>) {
         let scene = self.scene();
         let mat = material.cloned().unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
-            ui.label("Picture");
+            ui.label(tr("Picture"));
             let current = mat.texture.as_deref().and_then(|k| scene.assets.get(k).map(|a| (k, a)));
             let label = match current {
                 Some((k, a)) => format!("{} ({}×{})", k, a.width, a.height),
-                None => "none".into(),
+                None => tr("none"),
             };
             egui::ComboBox::from_id_salt(("texture", id)).selected_text(label).show_ui(ui, |ui| {
                 for (k, a) in &scene.assets {
@@ -37,25 +55,28 @@ impl EditorApp {
                     }
                 }
                 if scene.assets.is_empty() {
-                    ui.weak("No pictures in the scene yet");
+                    ui.weak(tr("No pictures in the scene yet"));
                 }
             });
-            if ui.button("Load…").on_hover_text("Use a PNG, JPEG or WebP file as this mesh's texture").clicked() {
+            if ui.button(tr("Load…")).on_hover_text(tr("Use a PNG, JPEG or WebP file as this mesh's texture")).clicked()
+            {
                 self.texture_for = Some(id.to_string());
                 crate::files::pick(&self.incoming, ui.ctx());
             }
-            if mat.texture.is_some() && ui.small_button("✕").on_hover_text("Remove the texture").clicked() {
+            if mat.texture.is_some() && ui.small_button(tr("✕")).on_hover_text(tr("Remove the texture")).clicked() {
                 self.run("mesh.setMaterial", json!({"id": id, "clear": true}));
             }
         });
         if mat.texture.is_none() {
-            ui.weak("Give the mesh a picture: a label, wood grain, a packaging print…");
+            ui.weak(tr("Give the mesh a picture: a label, wood grain, a packaging print…"));
             return;
         }
         ui.horizontal_wrapped(|ui| {
-            ui.label("Laid on as");
+            ui.label(tr("Laid on as"));
             for (m, name, tip) in MAPPINGS {
-                if ui.selectable_label(mat.mapping == m, name).on_hover_text(tip).clicked() && mat.mapping != m {
+                if ui.selectable_label(mat.mapping == m, mapping_label(name)).on_hover_text(tr(tip)).clicked()
+                    && mat.mapping != m
+                {
                     self.run("mesh.setMaterial", json!({"id": id, "mapping": mapping_name(m)}));
                 }
             }
@@ -63,9 +84,9 @@ impl EditorApp {
         if matches!(mat.mapping, Mapping::Planar | Mapping::Cylinder) {
             let axis = mat.axis.unwrap_or(if mat.mapping == Mapping::Planar { 2 } else { 1 });
             ui.horizontal(|ui| {
-                ui.label("Axis");
+                ui.label(tr("Axis"));
                 for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
-                    if ui.selectable_label(axis as usize == i, *n).clicked() && axis as usize != i {
+                    if ui.selectable_label(axis as usize == i, tr(*n)).clicked() && axis as usize != i {
                         self.run("mesh.setMaterial", json!({"id": id, "axis": i}));
                     }
                 }
@@ -76,7 +97,7 @@ impl EditorApp {
         let mut started = false;
         egui::Grid::new(("texture-grid", id)).num_columns(3).show(ui, |ui| {
             for (label, v, speed, min) in [("Repeat", &mut rep, 0.02, 0.01), ("Offset", &mut off, 0.01, -1e6)] {
-                ui.label(label);
+                ui.label(tr(label));
                 for x in v.iter_mut() {
                     let r = ui
                         .add_sized([56.0, 20.0], egui::DragValue::new(x).speed(speed).range(min..=1e6).max_decimals(3));
@@ -85,7 +106,7 @@ impl EditorApp {
                 }
                 ui.end_row();
             }
-            ui.label("Turn");
+            ui.label(tr("Turn"));
             let r = ui.add_sized([56.0, 20.0], egui::DragValue::new(&mut rot).speed(1.0).suffix("°"));
             changed |= r.changed();
             started |= r.drag_started() || r.gained_focus();
@@ -104,16 +125,20 @@ impl EditorApp {
 
         // UV map
         let picked = self.edit_faces(id).filter(|f| !f.is_empty());
-        let scope = if picked.is_some() { "selected faces" } else { "whole mesh" };
+        let scope = tr(if picked.is_some() { "selected faces" } else { "whole mesh" });
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Unwrap {scope}"));
-            for (method, label, tip) in [
-                ("smart", "Smart", "Cut into flat pieces and pack them without overlap"),
-                ("box", "Box", "Bake a box projection into the UV map"),
-                ("cylinder", "Cylinder", "Bake a cylinder projection (can, bottle)"),
-                ("sphere", "Sphere", "Bake a sphere projection"),
+            ui.label(crate::lf!("Unwrap {scope}", "展开 UV（{scope}）"));
+            for (method, tip) in [
+                ("smart", "Cut into flat pieces and pack them without overlap"),
+                ("box", "Bake a box projection into the UV map"),
+                ("cylinder", "Bake a cylinder projection (can, bottle)"),
+                ("sphere", "Bake a sphere projection"),
             ] {
-                if ui.button(label).on_hover_text(tip).clicked() {
+                let label = match method {
+                    "smart" => tr("Smart"),
+                    m => mapping_label(m).to_string(),
+                };
+                if ui.button(label).on_hover_text(tr(tip)).clicked() {
                     let mut p = json!({"id": id, "method": method});
                     if let Some(f) = &picked {
                         p["faces"] = json!(f);
@@ -124,14 +149,14 @@ impl EditorApp {
         });
         if mat.mapping == Mapping::Uv {
             ui.horizontal_wrapped(|ui| {
-                ui.label(format!("UVs of {scope}"));
+                ui.label(crate::lf!("UVs of {scope}", "UV（{scope}）"));
                 for (label, tip, p) in [
                     ("⟲ 90°", "Turn the picture on these faces", json!({"rotate": 90})),
                     ("Tile ×2", "Show twice as much of the picture", json!({"scale": [2, 2]})),
                     ("Zoom ×2", "Zoom into the picture", json!({"scale": [0.5, 0.5]})),
                     ("Mirror", "Mirror the picture left-right", json!({"scale": [-1, 1]})),
                 ] {
-                    if ui.small_button(label).on_hover_text(tip).clicked() {
+                    if ui.small_button(tr(label)).on_hover_text(tr(tip)).clicked() {
                         let mut p = p;
                         p["id"] = json!(id);
                         if let Some(f) = &picked {
@@ -142,7 +167,7 @@ impl EditorApp {
                 }
             });
             if picked.is_none() {
-                ui.weak("Tip: in edit mode, pick faces to unwrap or nudge just those.");
+                ui.weak(tr("Tip: in edit mode, pick faces to unwrap or nudge just those."));
             }
         }
     }

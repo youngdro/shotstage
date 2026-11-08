@@ -92,8 +92,8 @@ pub(super) enum Tool {
 }
 
 impl Tool {
-    fn name(self) -> &'static str {
-        match self {
+    fn name(self) -> String {
+        tr(match self {
             Tool::Grab => "Move",
             Tool::Rotate => "Rotate",
             Tool::Scale => "Scale",
@@ -103,7 +103,7 @@ impl Tool {
             Tool::LoopCut => "Loop cut",
             Tool::Slide => "Edge slide",
             Tool::Knife => "Knife",
-        }
+        })
     }
 }
 
@@ -293,7 +293,7 @@ impl EditorApp {
                 [one] => one.clone(),
                 [] => {
                     let why = crate::hub::editable(&scene, &id).err().map(|e| e.message).unwrap_or_default();
-                    self.toast(format!("Only meshes can be edited: {why}"));
+                    self.toast(crate::lf!("Only meshes can be edited: {why}", "只有网格可以编辑：{why}"));
                     return;
                 }
                 _ => {
@@ -305,7 +305,7 @@ impl EditorApp {
         self.also.clear();
         match hub::dispatch(&self.hub, json!({"command": "editor.editMesh", "params": {"id": target}})) {
             Ok(_) => self.toast("Edit mode · 1 vertex / 2 edge / 3 face · G move · E extrude · Tab to finish"),
-            Err(e) => self.toast(format!("Cannot edit: {}", e.message)),
+            Err(e) => self.toast(crate::lf!("Cannot edit: {}", "无法编辑：{}", e.message)),
         }
     }
 
@@ -685,7 +685,7 @@ impl EditorApp {
         let f = self.frame();
         let Some(cage) = self.edit_cage(&scene, &st.id, f, rect, &view, self.edit_xray) else { return };
         if !matches!(tool, Tool::LoopCut | Tool::Knife) && st.selection.is_empty() {
-            self.toast(format!("{}: select something first", tool.name()));
+            self.toast(crate::lf!("{}: select something first", "{}：请先选中元素", tool.name()));
             return;
         }
         let center = cage.center.unwrap_or_else(|| cage.world.w_axis.truncate());
@@ -698,7 +698,7 @@ impl EditorApp {
             let rails = match me::slide_rails(&base, &st.selection) {
                 Ok(r) => r,
                 Err(e) => {
-                    self.toast(format!("Edge slide: {e}"));
+                    self.toast(crate::lf!("Edge slide: {e}", "滑边：{e}"));
                     return;
                 }
             };
@@ -879,7 +879,8 @@ impl EditorApp {
                         let tw = world.transform_point3(Vec3::from_array(m.base.positions[v]));
                         m.snap_to = cage.pts[v];
                         let delta = tw - src;
-                        m.shown = format!("snapped to vertex {v} · {:.3} m", delta.length());
+                        m.shown =
+                            crate::lf!("snapped to vertex {v} · {:.3} m", "吸附到顶点 {v} · {:.3} 米", delta.length());
                         Some((
                             "mesh.transformElements".into(),
                             sel_json(json!({"translate": inv.transform_vector3(delta).to_array()})),
@@ -887,7 +888,7 @@ impl EditorApp {
                     }
                     _ => {
                         m.snap_to = None;
-                        m.shown = "hold over a vertex to snap to it".into();
+                        m.shown = tr("hold over a vertex to snap to it");
                         m.tried.clone()
                     }
                 }
@@ -985,12 +986,16 @@ impl EditorApp {
             Tool::Bevel => {
                 let d0 = (m.start - cs).length();
                 let w = typed.unwrap_or_else(|| ((pointer - cs).length() - d0).abs() * wpp / obj_scale);
-                m.shown = format!(
-                    "{:.3} m · {} segment{} (scroll)",
-                    w * obj_scale,
-                    m.segments,
-                    if m.segments == 1 { "" } else { "s" }
-                );
+                m.shown = if crate::i18n::zh() {
+                    format!("{:.3} 米 · {} 段（滚轮调整）", w * obj_scale, m.segments)
+                } else {
+                    format!(
+                        "{:.3} m · {} segment{} (scroll)",
+                        w * obj_scale,
+                        m.segments,
+                        if m.segments == 1 { "" } else { "s" }
+                    )
+                };
                 (w > 1e-5).then(|| ("mesh.bevel".to_string(), sel_json(json!({"width": w, "segments": m.segments}))))
             }
             Tool::LoopCut => {
@@ -1010,7 +1015,11 @@ impl EditorApp {
                         }
                     }
                 }
-                m.shown = format!("{} cut{} (scroll for more)", m.segments, if m.segments == 1 { "" } else { "s" });
+                m.shown = if crate::i18n::zh() {
+                    format!("{} 刀（滚轮增加）", m.segments)
+                } else {
+                    format!("{} cut{} (scroll for more)", m.segments, if m.segments == 1 { "" } else { "s" })
+                };
                 None
             }
             Tool::Slide => {
@@ -1034,9 +1043,13 @@ impl EditorApp {
             }
             Tool::Knife => {
                 m.shown = match m.knife.len() {
-                    0 => "click where the cut starts".into(),
-                    1 => "click the next point (inside a face to turn a corner)".into(),
-                    n => format!("{} points · click more, Enter or click the last point again to cut", n),
+                    0 => tr("click where the cut starts"),
+                    1 => tr("click the next point (inside a face to turn a corner)"),
+                    n => crate::lf!(
+                        "{} points · click more, Enter or click the last point again to cut",
+                        "{} 个点 · 继续点击，按 Enter 或再点最后一个点完成切割",
+                        n
+                    ),
                 };
                 None
             }
@@ -1211,8 +1224,9 @@ impl EditorApp {
             painter.circle_stroke(cp, 4.0, (1.5, Color32::WHITE));
         }
         // header: mode, counts, hint
-        let counts = format!(
+        let counts = crate::lf!(
             "{} / {} verts · {} / {} edges · {} / {} faces",
+            "{} / {} 顶点 · {} / {} 边 · {} / {} 面",
             fl.verts.len(),
             c.mesh.positions.len(),
             fl.edges.len(),
@@ -1222,10 +1236,14 @@ impl EditorApp {
         );
         let hint = match &self.edit_modal {
             Some(m) => {
-                let axis = m.axis.map(|i| format!(" along {}", ["X", "Y", "Z"][i])).unwrap_or_default();
-                let typed = if m.typed.is_empty() { String::new() } else { format!(" · typed {}", m.typed) };
-                let how = if m.release_confirms { "release to apply" } else { "click or Enter to apply" };
-                let extra = match m.tool {
+                let axis = m.axis.map(|i| crate::lf!(" along {}", " 沿 {}", ["X", "Y", "Z"][i])).unwrap_or_default();
+                let typed = if m.typed.is_empty() {
+                    String::new()
+                } else {
+                    crate::lf!(" · typed {}", " · 输入 {}", m.typed)
+                };
+                let how = tr(if m.release_confirms { "release to apply" } else { "click or Enter to apply" });
+                let extra = tr(match m.tool {
                     Tool::Grab | Tool::Rotate | Tool::Scale if self.edit_prop => {
                         " · X Y Z lock an axis · type a number · scroll: proportional radius"
                     }
@@ -1233,8 +1251,13 @@ impl EditorApp {
                     Tool::Rotate | Tool::Scale => " · X Y Z lock an axis · type a number",
                     Tool::Extrude | Tool::Inset | Tool::Bevel | Tool::Slide => " · type a number",
                     Tool::LoopCut | Tool::Knife => "",
-                };
-                format!("{}{axis}: {}{typed} · {how}, Esc / right-click to cancel{extra}", m.tool.name(), m.shown)
+                });
+                crate::lf!(
+                    "{}{axis}: {}{typed} · {how}, Esc / right-click to cancel{extra}",
+                    "{}{axis}：{}{typed} · {how}，Esc / 右键取消{extra}",
+                    m.tool.name(),
+                    m.shown
+                )
             }
             None => counts,
         };
@@ -1258,22 +1281,22 @@ impl EditorApp {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Edit mode").strong().color(SEL));
+                        ui.label(egui::RichText::new(tr("Edit mode")).strong().color(SEL));
                         ui.separator();
                         for (m, label, tip) in [
                             (SelectMode::Vertex, "Vertex", "Pick vertices (1)"),
                             (SelectMode::Edge, "Edge", "Pick edges (2)"),
                             (SelectMode::Face, "Face", "Pick faces (3)"),
                         ] {
-                            ui.selectable_value(&mut mode, m, label).on_hover_text(tip);
+                            ui.selectable_value(&mut mode, m, tr(label)).on_hover_text(tr(tip));
                         }
                         ui.separator();
-                        ui.toggle_value(&mut self.edit_xray, "X-ray")
-                            .on_hover_text("See and pick through the mesh (Alt+Z)");
-                        ui.toggle_value(&mut self.edit_prop, "◎ Proportional").on_hover_text(
-                            "Moving, rotating or scaling also pulls nearby vertices, fading out (O; scroll while moving to resize)",
+                        ui.toggle_value(&mut self.edit_xray, tr("X-ray"))
+                            .on_hover_text(tr("See and pick through the mesh (Alt+Z)"));
+                        ui.toggle_value(&mut self.edit_prop, tr("◎ Proportional")).on_hover_text(
+                            tr("Moving, rotating or scaling also pulls nearby vertices, fading out (O; scroll while moving to resize)"),
                         );
-                        if ui.button("Done").on_hover_text("Back to objects (Tab)").clicked() {
+                        if ui.button(tr("Done")).on_hover_text(tr("Back to objects (Tab)")).clicked() {
                             leave = true;
                         }
                     });
@@ -1483,8 +1506,8 @@ impl EditorApp {
         let Some(st) = editing else {
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .button("✏ Edit mesh")
-                    .on_hover_text("Edit vertices, edges and faces: extrude, bevel, loop cut… (Tab)")
+                    .button(tr("✏ Edit mesh"))
+                    .on_hover_text(tr("Edit vertices, edges and faces: extrude, bevel, loop cut… (Tab)"))
                     .clicked()
                 {
                     self.enter_edit();
@@ -1495,45 +1518,45 @@ impl EditorApp {
         ui.horizontal_wrapped(|ui| {
             let mut mode = st.mode;
             for (m, label) in [(SelectMode::Vertex, "Vertex"), (SelectMode::Edge, "Edge"), (SelectMode::Face, "Face")] {
-                ui.selectable_value(&mut mode, m, label);
+                ui.selectable_value(&mut mode, m, tr(label));
             }
             if mode != st.mode {
                 self.set_edit_mode(mode);
             }
-            if ui.button("Done").on_hover_text("Tab").clicked() {
+            if ui.button(tr("Done")).on_hover_text(tr("Tab")).clicked() {
                 self.leave_edit();
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label("Select");
-            if ui.small_button("All").on_hover_text("A").clicked() {
+            ui.label(tr("Select"));
+            if ui.small_button(tr("All")).on_hover_text(tr("A")).clicked() {
                 self.edit_select_all(true);
             }
-            if ui.small_button("None").on_hover_text("Alt+A").clicked() {
+            if ui.small_button(tr("None")).on_hover_text(tr("Alt+A")).clicked() {
                 self.edit_select_all(false);
             }
             if ui
-                .small_button("Linked")
-                .on_hover_text("Everything joined to the selection (Ctrl+L; L under the pointer)")
+                .small_button(tr("Linked"))
+                .on_hover_text(tr("Everything joined to the selection (Ctrl+L; L under the pointer)"))
                 .clicked()
             {
                 self.edit_select_how("linked", None, false);
             }
-            if ui.small_button("More").on_hover_text("Grow by one step (Ctrl +)").clicked() {
+            if ui.small_button(tr("More")).on_hover_text(tr("Grow by one step (Ctrl +)")).clicked() {
                 self.edit_select_how("more", None, false);
             }
             let first_edge = self.edit_first_edge();
             if ui
-                .add_enabled(first_edge.is_some(), egui::Button::new("Loop").small())
-                .on_hover_text("Edge loop through the first selected edge (Alt+click)")
+                .add_enabled(first_edge.is_some(), egui::Button::new(tr("Loop")).small())
+                .on_hover_text(tr("Edge loop through the first selected edge (Alt+click)"))
                 .clicked()
                 && let Some(e) = first_edge
             {
                 self.edit_select_how_edge("loop", e);
             }
             if ui
-                .add_enabled(first_edge.is_some(), egui::Button::new("Ring").small())
-                .on_hover_text("Edge ring across the first selected edge")
+                .add_enabled(first_edge.is_some(), egui::Button::new(tr("Ring")).small())
+                .on_hover_text(tr("Edge ring across the first selected edge"))
                 .clicked()
                 && let Some(e) = first_edge
             {
@@ -1546,53 +1569,61 @@ impl EditorApp {
         let mut run: Option<(&str, Value)> = None;
         let mut start: Option<Tool> = None;
         egui::Grid::new("edit_tools").num_columns(3).spacing([6.0, 4.0]).show(ui, |ui| {
-            if ui.button("Extrude").on_hover_text("E: drag it out · or apply the distance here").clicked() {
+            if ui.button(tr("Extrude")).on_hover_text(tr("E: drag it out · or apply the distance here")).clicked() {
                 run = Some(("mesh.extrude", json!({"distance": a.extrude})));
             }
             ui.add(egui::DragValue::new(&mut a.extrude).speed(0.01).range(-100.0..=100.0).suffix(" m"));
-            if ui.small_button("drag").on_hover_text("Extrude and follow the pointer (E)").clicked() {
+            if ui.small_button(tr("drag")).on_hover_text(tr("Extrude and follow the pointer (E)")).clicked() {
                 start = Some(Tool::Extrude);
             }
             ui.end_row();
-            if ui.button("Inset").on_hover_text("I: a smaller face inside").clicked() {
+            if ui.button(tr("Inset")).on_hover_text(tr("I: a smaller face inside")).clicked() {
                 run = Some(("mesh.inset", json!({"thickness": a.inset, "depth": a.depth})));
             }
             ui.add(egui::DragValue::new(&mut a.inset).speed(0.005).range(0.0..=100.0).suffix(" m"));
-            ui.add(egui::DragValue::new(&mut a.depth).speed(0.005).range(-100.0..=100.0).prefix("depth ").suffix(" m"));
+            ui.add(
+                egui::DragValue::new(&mut a.depth).speed(0.005).range(-100.0..=100.0).prefix(tr("depth ")).suffix(" m"),
+            );
             ui.end_row();
-            if ui.button("Bevel").on_hover_text("Ctrl+B: round off edges (faces: their edges)").clicked() {
+            if ui.button(tr("Bevel")).on_hover_text(tr("Ctrl+B: round off edges (faces: their edges)")).clicked() {
                 run = Some(("mesh.bevel", json!({"width": a.bevel, "segments": a.segments})));
             }
             ui.add(egui::DragValue::new(&mut a.bevel).speed(0.005).range(0.0001..=100.0).suffix(" m"));
-            ui.add(egui::DragValue::new(&mut a.segments).range(1..=16).suffix(" seg"));
+            ui.add(egui::DragValue::new(&mut a.segments).range(1..=16).suffix(tr(" seg")));
             ui.end_row();
             if ui
-                .button("Loop cut")
-                .on_hover_text("Ctrl+R or C: hover an edge, scroll for more cuts, click to cut")
+                .button(tr("Loop cut"))
+                .on_hover_text(tr("Ctrl+R or C: hover an edge, scroll for more cuts, click to cut"))
                 .clicked()
             {
                 start = Some(Tool::LoopCut);
             }
-            ui.add(egui::DragValue::new(&mut a.cuts).range(1..=32).suffix(" cuts"));
+            ui.add(egui::DragValue::new(&mut a.cuts).range(1..=32).suffix(tr(" cuts")));
             ui.label("");
             ui.end_row();
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Edge slide").on_hover_text("G G: slide the selected edges along their neighbours").clicked() {
+            if ui
+                .button(tr("Edge slide"))
+                .on_hover_text(tr("G G: slide the selected edges along their neighbours"))
+                .clicked()
+            {
                 start = Some(Tool::Slide);
             }
             if ui
-                .button("Knife")
-                .on_hover_text(
+                .button(tr("Knife"))
+                .on_hover_text(tr(
                     "K: click two points to cut along the line (the faces it crosses, or the selected faces)",
-                )
+                ))
                 .clicked()
             {
                 start = Some(Tool::Knife);
             }
             if ui
-                .button("Bridge")
-                .on_hover_text("Join two border loops with faces; with two faces selected, makes a tunnel between them")
+                .button(tr("Bridge"))
+                .on_hover_text(tr(
+                    "Join two border loops with faces; with two faces selected, makes a tunnel between them",
+                ))
                 .clicked()
             {
                 run = Some(("mesh.bridge", json!({})));
@@ -1601,8 +1632,8 @@ impl EditorApp {
         ui.horizontal_wrapped(|ui| {
             let a = &mut self.edit_amounts;
             if ui
-                .button("Spin")
-                .on_hover_text("Extrude the selected edges or faces round the object's origin (360° joins up)")
+                .button(tr("Spin"))
+                .on_hover_text(tr("Extrude the selected edges or faces round the object's origin (360° joins up)"))
                 .clicked()
             {
                 let mut axis = [0.0; 3];
@@ -1613,18 +1644,19 @@ impl EditorApp {
                 ));
             }
             ui.add(egui::DragValue::new(&mut a.spin_angle).speed(1.0).range(-3600.0..=3600.0).suffix("°"));
-            ui.add(egui::DragValue::new(&mut a.spin_steps).range(1..=256).suffix(" steps"));
+            ui.add(egui::DragValue::new(&mut a.spin_steps).range(1..=256).suffix(tr(" steps")));
             for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
-                ui.selectable_value(&mut a.spin_axis, i, *n);
+                ui.selectable_value(&mut a.spin_axis, i, tr(*n));
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.edit_prop, "Proportional").on_hover_text("O: G / R / S also pull nearby vertices");
+            ui.checkbox(&mut self.edit_prop, tr("Proportional"))
+                .on_hover_text(tr("O: G / R / S also pull nearby vertices"));
             let a = &mut self.edit_amounts;
             ui.add(
                 egui::DragValue::new(&mut a.prop_radius).speed(0.01).range(0.001..=1000.0).prefix("r ").suffix(" m"),
             );
-            egui::ComboBox::from_id_salt("falloff").selected_text(format!("{:?}", a.falloff)).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("falloff").selected_text(tr(format!("{:?}", a.falloff))).show_ui(ui, |ui| {
                 for f in [
                     me::Falloff::Smooth,
                     me::Falloff::Linear,
@@ -1632,7 +1664,7 @@ impl EditorApp {
                     me::Falloff::Sphere,
                     me::Falloff::Constant,
                 ] {
-                    ui.selectable_value(&mut a.falloff, f, format!("{f:?}"));
+                    ui.selectable_value(&mut a.falloff, f, tr(format!("{f:?}")));
                 }
             });
         });
@@ -1645,18 +1677,18 @@ impl EditorApp {
                 ("Flip", "mesh.flipNormals", "Turn the selected faces inside out"),
                 ("Delete", "mesh.deleteElements", "X / Delete: remove the selection"),
             ] {
-                if ui.button(label).on_hover_text(tip).clicked() {
+                if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
                     run = Some((cmd, json!({})));
                 }
             }
             if ui
-                .button("Clean up")
-                .on_hover_text("Merge vertices closer than 0.1 mm (whole mesh): fixes split imported meshes")
+                .button(tr("Clean up"))
+                .on_hover_text(tr("Merge vertices closer than 0.1 mm (whole mesh): fixes split imported meshes"))
                 .clicked()
                 && let Some(st) = self.edit_state()
             {
                 match hub::dispatch(&self.hub, json!({"command": "mesh.mergeByDistance", "params": {"id": st.id}})) {
-                    Ok(o) => self.toast(format!("Merged {} vertices", o.result["removed"])),
+                    Ok(o) => self.toast(crate::lf!("Merged {} vertices", "合并了 {} 个顶点", o.result["removed"])),
                     Err(e) => self.toast(e.message),
                 }
             }
@@ -1669,7 +1701,7 @@ impl EditorApp {
         }
         ui.add_space(2.0);
         ui.weak(
-            "Click to pick · Shift+click add · Alt+click loop · Cmd/Ctrl+drag box · drag a selection to move it · G R S move, rotate, scale (X Y Z lock, type a number) · G G edge slide · K knife · double-click or L linked",
+            tr("Click to pick · Shift+click add · Alt+click loop · Cmd/Ctrl+drag box · drag a selection to move it · G R S move, rotate, scale (X Y Z lock, type a number) · G G edge slide · K knife · double-click or L linked"),
         );
     }
 
@@ -1736,7 +1768,7 @@ impl EditorApp {
             .map(|e| (e.id.clone(), e.name.clone()))
             .collect();
         if others.is_empty() {
-            ui.weak("Add a second mesh to cut with or merge in.");
+            ui.weak(tr("Add a second mesh to cut with or merge in."));
             return;
         }
         if self.bool_with.as_ref().is_none_or(|w| !others.iter().any(|(i, _)| i == w)) {
@@ -1745,7 +1777,7 @@ impl EditorApp {
         let with = self.bool_with.clone().unwrap_or_default();
         let label = others.iter().find(|(i, _)| *i == with).map(|(_, n)| n.clone()).unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
-            ui.label("With");
+            ui.label(tr("With"));
             egui::ComboBox::from_id_salt("bool_with").selected_text(label).show_ui(ui, |ui| {
                 for (i, n) in &others {
                     ui.selectable_value(&mut self.bool_with, Some(i.clone()), n);
@@ -1758,18 +1790,18 @@ impl EditorApp {
                 (BoolOp::Union, "Union", "Merge both into one solid"),
                 (BoolOp::Intersect, "Intersect", "Keep only where they overlap"),
             ] {
-                ui.selectable_value(&mut self.bool_op, op, name).on_hover_text(tip);
+                ui.selectable_value(&mut self.bool_op, op, tr(name)).on_hover_text(tr(tip));
             }
         });
         if ui
-            .button("Apply")
-            .on_hover_text("Changes this mesh and hides the other one. Both should be closed solids.")
+            .button(tr("Apply"))
+            .on_hover_text(tr("Changes this mesh and hides the other one. Both should be closed solids."))
             .clicked()
         {
             let op = serde_json::to_value(self.bool_op).unwrap_or(json!("difference"));
             let req = json!({"command": "mesh.boolean", "params": {"id": id, "with": with, "operation": op}});
             match hub::dispatch(&self.hub, req) {
-                Ok(o) => self.toast(format!("Boolean done: {} faces", o.result["faces"])),
+                Ok(o) => self.toast(crate::lf!("Boolean done: {} faces", "布尔运算完成：{} 个面", o.result["faces"])),
                 Err(e) => self.toast(e.message),
             }
         }
