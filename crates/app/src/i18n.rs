@@ -785,6 +785,38 @@ static ZH_TABLE: &[(&str, &str)] = &[
         "Tables and chairs, two people talking, a counter with a clerk; a gentle arc around them",
         "桌椅、两人交谈、柜台和店员；缓缓环绕他们",
     ),
+    ("Product close-ups", "商品特写"),
+    ("Scenes", "场景"),
+    ("Dark rim light", "暗调轮廓光"),
+    (
+        "A bottle on a black plinth in the dark: two strip lights behind trace its edges, a soft spot from above, a glow on the wall behind; a slow arc, then a push-in on the label",
+        "黑色展台上的瓶子，暗场：身后两条灯条勾出瓶身轮廓，顶部一盏柔和聚光，背景墙上一圈光晕；先缓慢环绕，再推近瓶标",
+    ),
+    ("High-key white", "高调白底"),
+    (
+        "Skincare set on white cubes in a white cove: a big soft overhead light, side strips, faint shadows; a slide across, then a detail push-in",
+        "白色无缝影棚里白色方台上的护肤品组合：顶前方大面积柔光、两侧灯条、淡淡的阴影；先横移，再推近细节",
+    ),
+    ("Golden window light", "暖阳窗影"),
+    (
+        "A bottle and a jar on a stone block in low warm sun, leaf shadows falling across them, cool fill; a slow push-in",
+        "石台上的瓶子和面霜罐，低角度暖阳斜照，树叶的影子落在产品上，冷色补光；缓慢推近",
+    ),
+    ("Pastel pop", "糖果色"),
+    (
+        "A drinks can on stacked pastel podiums with spheres and a cube, soft key light and pink and blue gels; an arc around it",
+        "叠放的马卡龙色圆台上的饮料罐，配小球和方块，柔和主光加粉、蓝色片光；环绕拍摄",
+    ),
+    ("Ice-cold drink", "冰爽饮料"),
+    (
+        "A can on ice on a deep blue set, cyan strip lights behind, a blue glow on the wall; low angle, push-in",
+        "深蓝场景里冰块中的饮料罐，身后青色灯条勾边，背景墙泛蓝光；低角度推近",
+    ),
+    ("Macro fruit", "微距水果"),
+    (
+        "Strawberries, grapes and lemon on dark slate, warm backlight and soft side light; a 100 mm close lens sliding sideways",
+        "深色石板上的草莓、葡萄和柠檬，暖色逆光加柔和侧光；100mm 近摄镜头横移",
+    ),
     ("Empty studio", "空摄影棚"),
     (
         "Just an infinity cove, a camera and three-point light, ready for your own blocks",
