@@ -192,6 +192,7 @@ UV 编辑的命令都以「面角」`[面, 面内序号]` 指定点，也可以�
 ## 导出动画和分镜
 
 - **带动画的导出**：场景里有关键帧时，GLB / glTF / FBX 导出会带上整段时间轴的动画（运镜、物体运动、人物动作，逐帧采样），在 Blender、Unreal 等软件里直接能播放；`animation: false` 只导出当前帧。
+- **参考视频（MP4）**：顶栏「导出」或故事板的「导出…」里选「参考视频 720p / 1080p」或「深度视频」，按镜头切换机位把整条时间轴渲染成 MP4，带进度条，可随时取消。网页版直接在浏览器里编码（WebCodecs，H.264，不支持时用 VP9），不需要装任何东西；桌面版用本机的 ffmpeg。脚本里是 `await editor.call("render.sequence", { video: true, passes: ["clay", "depth"] })`，每个通道返回一个 MP4（base64）。
 - **逐帧序列**：`shotstage render -s shot.json -o frames/ --pass clay,depth,normal --video` 按镜头切换逐帧渲染（深度图整段用同一个深度范围，不会闪），同时输出每帧相机参数 `camera.json`；装了 ffmpeg 时 `--video` 直接合成 MP4，可以作为视频模型的深度 / 法线控制序列。
 - **分镜**：`shotstage storyboard -s shot.json -o board/` 给每个镜头渲染首帧、中间帧、尾帧（加 `--depth` 同时出深度图），并生成 `storyboard.json`（镜头描述、逐帧相机内外参）和可直接打开的 `index.html`。首尾帧正好可以作为图生视频模型的首帧 / 尾帧条件。
 - **分镜表**：`shotstage sheet -s shot.json -o sheet.pdf --lang zh` 导出给拍摄团队的分镜表：每个镜头一行，带镜号、画面、景别和角度、焦距、运镜、时长和备注；`--layout grid` 换成故事板拼版，`-o sheet.png` 出一张长图。运镜由相机动画自动识别（推、拉、左右移、升降、摇、环绕、跟拍、变焦、滑动变焦、手持、固定），备注用 `shot.set {"notes": ...}` 写，或在编辑器故事板里右键镜头填写。编辑器里在顶栏「导出」或故事板的「导出…」菜单一键导出。

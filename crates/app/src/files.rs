@@ -365,3 +365,205 @@ fn save_rendered(
         }
     }
 }
+
+/// A video being exported: frames rendered of all of them; set `cancel` to stop it.
+#[derive(Clone, Debug, Default)]
+pub struct VideoJob {
+    pub done: usize,
+    pub total: usize,
+    pub cancel: bool,
+}
+
+pub type VideoProgress = Rc<RefCell<Option<VideoJob>>>;
+
+/// Render `render.sequence` params (one pass) as an MP4 and save it as `name`: encoded in the
+/// browser (WebCodecs), with ffmpeg on the desktop. `progress` follows it; the outcome lands in
+/// `done`.
+pub fn save_video(
+    hub: &crate::hub::SharedHub,
+    params: serde_json::Value,
+    name: String,
+    progress: &VideoProgress,
+    done: &Outbox,
+) {
+    let mut params = params;
+    params["video"] = serde_json::json!(true);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(path) = rfd::FileDialog::new().set_file_name(&name).add_filter("MP4", &["mp4"]).save_file() else {
+            return;
+        };
+        let stamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let tmp = std::env::temp_dir().join(format!("shotstage-video-{}-{stamp}", std::process::id()));
+        params["out"] = serde_json::json!(tmp.display().to_string());
+        *progress.borrow_mut() = None;
+        let r = crate::hub::dispatch(hub, serde_json::json!({ "command": "render.sequence", "params": params }))
+            .map_err(|e| e.message)
+            .and_then(|o| {
+                let made = o.result["videos"].get(0).and_then(|v| v.as_str()).map(String::from);
+                let why =
+                    o.result["warnings"].get(0).and_then(|v| v.as_str()).unwrap_or("no video was made").to_string();
+                let made = made.ok_or(why)?;
+                std::fs::copy(&made, &path).map_err(|e| format!("writing {}: {e}", path.display()))?;
+                Ok(path.display().to_string())
+            });
+        let _ = std::fs::remove_dir_all(&tmp);
+        *done.borrow_mut() = Some(r);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let (hub, progress, done) = (hub.clone(), progress.clone(), done.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let scene = hub.borrow().session.scene().clone();
+            let r = match shotstage_commands::host::sequence_plan(&scene, params, 1280) {
+                Err(e) => Err(e.message),
+                Ok(plan) => {
+                    *progress.borrow_mut() = Some(VideoJob { total: plan.frames.len(), ..Default::default() });
+                    encode_video(&hub, &plan, 0, Some(&progress)).await
+                }
+            };
+            let cancelled = progress.borrow().as_ref().is_some_and(|j| j.cancel);
+            *progress.borrow_mut() = None;
+            *done.borrow_mut() = match r {
+                _ if cancelled => None,
+                Ok(mp4) => match save(&name, &mp4, "video/mp4") {
+                    Ok(Some(w)) => Some(Ok(w)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                },
+                Err(e) => Some(Err(e)),
+            };
+            if let Some(ctx) = &hub.borrow().repaint {
+                ctx.request_repaint();
+            }
+        });
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod video_js {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(module = "/js/video.js")]
+    extern "C" {
+        #[wasm_bindgen(catch, js_name = openVideo)]
+        pub async fn open_video(width: u32, height: u32, fps: f64, bitrate: f64) -> Result<JsValue, JsValue>;
+        #[wasm_bindgen(catch, js_name = videoAdd)]
+        pub async fn video_add(v: &JsValue, rgba: &js_sys::Uint8Array, index: u32) -> Result<JsValue, JsValue>;
+        #[wasm_bindgen(catch, js_name = videoFinish)]
+        pub async fn video_finish(v: &JsValue) -> Result<JsValue, JsValue>;
+        #[wasm_bindgen(js_name = videoCancel)]
+        pub fn video_cancel(v: &JsValue);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_message(e: wasm_bindgen::JsValue) -> String {
+    js_sys::Reflect::get(&e, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .or_else(|| e.as_string())
+        .unwrap_or_else(|| format!("{e:?}"))
+}
+
+/// Render one picture (`render.snapshot` params) and read its RGBA pixels back.
+#[cfg(target_arch = "wasm32")]
+async fn render_rgba(hub: &crate::hub::SharedHub, params: serde_json::Value) -> Result<js_sys::Uint8Array, String> {
+    use wasm_bindgen::{JsCast, JsValue};
+    struct SingleThread<T>(T);
+    // SAFETY: wasm32 without atomics has a single thread; the value is only used on it.
+    unsafe impl<T> Send for SingleThread<T> {}
+    impl<T> SingleThread<T> {
+        fn into_inner(self) -> T {
+            self.0
+        }
+    }
+    let drawn = hub.borrow_mut().draw_snapshot(params);
+    let (_, rs, rb) = drawn.map_err(|e| e.message)?;
+    hub.borrow_mut().pending_snapshots += 1;
+    let mut rb = Some(rb);
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let rb = rb.take().expect("the executor runs once");
+        let buffer = rb.buffer.clone();
+        let cell = SingleThread((hub.clone(), rb, resolve, reject));
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            let (hub, rb, resolve, reject) = cell.into_inner();
+            hub.borrow_mut().pending_snapshots -= 1;
+            match r.map_err(|e| e.to_string()).and_then(|_| rb.rgba()) {
+                Ok(px) => resolve.call1(&JsValue::NULL, &js_sys::Uint8Array::from(&px[..])),
+                Err(e) => reject.call1(&JsValue::NULL, &JsValue::from_str(&e)),
+            }
+            .ok();
+        });
+        let _ = rs.device.poll(wgpu::PollType::Poll);
+    });
+    if let Some(ctx) = &hub.borrow().repaint {
+        ctx.request_repaint();
+    }
+    let px = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(js_message)?;
+    Ok(px.unchecked_into())
+}
+
+/// Encode pass `pass` of a planned sequence (planned with `video`) as an MP4 in the browser.
+#[cfg(target_arch = "wasm32")]
+pub async fn encode_video(
+    hub: &crate::hub::SharedHub,
+    plan: &shotstage_commands::host::SequencePlan,
+    pass: usize,
+    progress: Option<&VideoProgress>,
+) -> Result<Vec<u8>, String> {
+    use wasm_bindgen::JsCast;
+    let first = plan.frames.first().ok_or("no frames to render")?;
+    let snap = &first.snapshots.get(pass).ok_or("no such pass")?.1;
+    let (w, h) = (snap["width"].as_u64().unwrap_or(1280) as u32, snap["height"].as_u64().unwrap_or(720) as u32);
+    let step = match plan.frames.as_slice() {
+        [a, b, ..] => (b.frame - a.frame).max(1),
+        _ => 1,
+    };
+    let fps = (plan.fps / step as f32).max(1.0) as f64;
+    let bitrate = (w as f64 * h as f64 * fps * 0.15).clamp(1.0e6, 40.0e6);
+    let enc = video_js::open_video(w, h, fps, bitrate).await.map_err(js_message)?;
+    for (i, f) in plan.frames.iter().enumerate() {
+        if progress.is_some_and(|p| p.borrow().as_ref().is_some_and(|j| j.cancel)) {
+            video_js::video_cancel(&enc);
+            return Err("cancelled".into());
+        }
+        let px = match render_rgba(hub, f.snapshots[pass].1.clone()).await {
+            Ok(px) => px,
+            Err(e) => {
+                video_js::video_cancel(&enc);
+                return Err(e);
+            }
+        };
+        video_js::video_add(&enc, &px, i as u32).await.map_err(js_message)?;
+        if let Some(p) = progress
+            && let Some(j) = p.borrow_mut().as_mut()
+        {
+            j.done = i + 1;
+        }
+    }
+    let out = video_js::video_finish(&enc).await.map_err(js_message)?;
+    let get = |k: &str| js_sys::Reflect::get(&out, &k.into()).unwrap_or_default();
+    let codec = match get("kind").as_string().as_deref() {
+        Some("avc") => {
+            let d = get("description");
+            if d.is_undefined() || d.is_null() {
+                return Err("the H.264 encoder gave no decoder configuration".into());
+            }
+            crate::mp4::Codec::Avc(d.unchecked_into::<js_sys::Uint8Array>().to_vec())
+        }
+        _ => crate::mp4::Codec::Vp9,
+    };
+    let chunks: js_sys::Array = get("chunks").unchecked_into();
+    let samples: Vec<crate::mp4::Sample> = chunks
+        .iter()
+        .map(|c| crate::mp4::Sample {
+            data: js_sys::Reflect::get(&c, &"data".into())
+                .map(|d| d.unchecked_into::<js_sys::Uint8Array>().to_vec())
+                .unwrap_or_default(),
+            key: js_sys::Reflect::get(&c, &"key".into()).ok().and_then(|k| k.as_bool()).unwrap_or(false),
+        })
+        .collect();
+    Ok(crate::mp4::write(&codec, w, h, fps as f32, &samples))
+}
