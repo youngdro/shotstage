@@ -325,7 +325,7 @@ async fn render_many(hub: &SharedHub, command: &str, params: Value) -> Result<Va
         let snap = &plan.frames[0].snapshots[0].1;
         return Ok(json!({
             "fps": plan.fps, "frames": plan.frames.len(), "width": snap["width"], "height": snap["height"],
-            "depthRange": plan.depth_range, "videos": videos, "cameras": host::sequence_cameras(&plan),
+            "depthRange": plan.depth_range.to_vec(), "videos": videos, "cameras": host::sequence_cameras(&plan),
         }));
     }
     let mut sink = host::SequenceSink::new(plan).map_err(err_js)?;

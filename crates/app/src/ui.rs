@@ -785,6 +785,8 @@ impl Orbit {
 pub struct EditorApp {
     hub: SharedHub,
     renderer: Option<Renderer>,
+    /// The depth map the viewport last drew with (shown when switching to a manual range).
+    depth_seen: shotstage_render::DepthMap,
     texture: Option<(egui::TextureId, u64)>,
     /// The small shot-camera preview in the corner of the free view.
     pip: Option<Pip>,
@@ -951,6 +953,7 @@ impl EditorApp {
             sky_next: false,
             also: vec![],
             shadows: true,
+            depth_seen: Default::default(),
             autosaved: (u64::MAX, 0.0),
             autosave_warned: false,
             restore_offer: crate::files::autosave_read().and_then(|j| {
@@ -4663,12 +4666,12 @@ impl EditorApp {
                     size.y = size.x / a
                 }
                 let rect = Rect::from_center_size(full.center(), size);
-                (rect, View { view: world.inverse(), proj: lens.projection(a), depth_near: 0.0, depth_far: 0.0 })
+                (rect, View { view: world.inverse(), proj: lens.projection(a), depth: self.hub.borrow().depth_range })
             }
             None => {
                 let aspect = (full.width() / full.height().max(1.0)).max(0.01);
                 let proj = Mat4::perspective_rh(45f32.to_radians(), aspect, 0.05, 1000.0);
-                (full, View { view: self.orbit.view(), proj, depth_near: 0.0, depth_far: 0.0 })
+                (full, View { view: self.orbit.view(), proj, depth: self.hub.borrow().depth_range })
             }
         };
 
@@ -5350,6 +5353,7 @@ impl EditorApp {
             return;
         }
         renderer.render(&rs.device, &rs.queue, &scene, f, view, pass, &overlay, px);
+        self.depth_seen = renderer.last_depth;
         let generation = renderer.target_generation;
         if self.texture.is_none_or(|(_, g)| g != generation)
             && let Some(view_tex) = renderer.color_view()
@@ -5393,8 +5397,7 @@ impl EditorApp {
             if pip.key.as_deref() != Some(key.as_str()) {
                 // at most ~20 times a second while something is being dragged
                 if now - pip.at >= 0.05 || pip.key.is_none() {
-                    let view =
-                        View { view: world.inverse(), proj: lens.projection(a), depth_near: 0.0, depth_far: 0.0 };
+                    let view = View { view: world.inverse(), proj: lens.projection(a), depth: None };
                     let mut ov = shotstage_render::clean_overlay(&c);
                     ov.studio_light = self.studio_light;
                     ov.no_shadows = !self.shadows;
@@ -5812,6 +5815,49 @@ impl EditorApp {
             });
     }
 
+    /// The depth pass range: fitted to the subjects in frame, or fixed near / far distances.
+    fn depth_menu(&mut self, ui: &mut egui::Ui) {
+        let cur = self.hub.borrow().depth_range;
+        let label = if cur.is_some() { tr("Range: manual") } else { tr("Range: auto") };
+        ui.menu_button(format!("{label} ▾"), |ui| {
+            let mut manual = cur.is_some();
+            ui.radio_value(&mut manual, false, tr("Auto (subjects stand out)")).on_hover_text(tr(
+                "Fit the greys to what is in frame; the subjects (not the floor, walls or a table top running out of frame) get most of them",
+            ));
+            ui.radio_value(&mut manual, true, tr("Manual near / far"));
+            let mut next = match (manual, cur) {
+                (false, _) => None,
+                (true, Some(d)) => Some(d),
+                // start from what the auto fit shows now, without its focus
+                (true, None) => Some(shotstage_render::DepthMap::linear(self.depth_seen.near, self.depth_seen.far)),
+            };
+            if let Some(d) = next.as_mut() {
+                let (mut n, mut f) = (d.near, d.far);
+                egui::Grid::new("depth_range").num_columns(2).show(ui, |ui| {
+                    ui.label(tr("Near (white)"));
+                    ui.add(egui::DragValue::new(&mut n).range(0.0..=f - 0.01).speed(0.01).max_decimals(2).suffix(" m"));
+                    ui.end_row();
+                    ui.label(tr("Far (black)"));
+                    ui.add(egui::DragValue::new(&mut f).range(n + 0.01..=10_000.0).speed(0.02).max_decimals(2).suffix(" m"));
+                    ui.end_row();
+                });
+                if (n, f) != (d.near, d.far) {
+                    *d = shotstage_render::DepthMap::linear(n, f);
+                }
+            } else {
+                let d = self.depth_seen;
+                let text = match d.focus {
+                    Some([a, b]) => format!("{:.2}–{:.2} m ({} {:.2}–{:.2} m)", d.near, d.far, tr("subjects"), a, b),
+                    None => format!("{:.2}–{:.2} m", d.near, d.far),
+                };
+                ui.weak(text);
+            }
+            if next != cur {
+                self.hub.borrow_mut().depth_range = next;
+            }
+        });
+    }
+
     /// Floating view options at the top-left of the viewport.
     fn toolbar(&mut self, ui: &egui::Ui, full: Rect, has_cam: bool) {
         egui::Area::new(egui::Id::unique("viewport_toolbar"))
@@ -5826,6 +5872,9 @@ impl EditorApp {
                         ui.selectable_value(&mut self.pass, Pass::Depth, tr("Depth"))
                             .on_hover_text(tr("Depth pass (near = white)"));
                         ui.selectable_value(&mut self.pass, Pass::Normal, tr("Normal")).on_hover_text(tr("Normal pass"));
+                        if self.pass == Pass::Depth {
+                            self.depth_menu(ui);
+                        }
                         ui.add_space(6.0);
                         ui.toggle_value(&mut self.snap, tr("Snap"))
                             .on_hover_text(tr("Snap dragged blocks to a grid (hold Ctrl to place freely)"));

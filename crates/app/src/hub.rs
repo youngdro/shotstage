@@ -25,6 +25,8 @@ pub struct Hub {
     pub pass: shotstage_render::Pass,
     /// Viewport shows the shot camera instead of the free orbit view.
     pub look_through: bool,
+    /// Viewport depth pass range; `None` fits it to what is in frame.
+    pub depth_range: Option<shotstage_render::DepthMap>,
     /// The scene as of a revision, shared by the UI until it changes (no copy per call).
     pub(crate) scene_cache: Option<(u64, Rc<shotstage_core::Scene>)>,
     /// GPU of the editor window, used for snapshots.
@@ -100,8 +102,7 @@ impl Hub {
         let plan = shotstage_commands::snapshot::plan(self.session.scene(), params, Some(self.frame))?;
         let rs = self.gpu.clone().ok_or_else(|| CommandError::new("unsupported", "the editor has no GPU"))?;
         let renderer = self.snap_renderer.get_or_insert_with(|| Renderer::new(&rs.device));
-        let [depth_near, depth_far] = plan.depth_range.unwrap_or([0.0, 0.0]);
-        let view = View { view: plan.view, proj: plan.proj, depth_near, depth_far };
+        let view = View { view: plan.view, proj: plan.proj, depth: plan.depth_range };
         renderer.render(
             &rs.device,
             &rs.queue,
@@ -159,6 +160,7 @@ fn editor_command(hub: &mut Hub, request: &Value) -> Option<Result<Outcome, Comm
         look_through: hub.look_through,
         edit: hub.edit.clone(),
         uv: hub.uv.clone(),
+        depth_range: hub.depth_range,
     };
     let r = view_command(&mut view, hub.session.scene(), cmd, params)?;
     hub.edit = view.edit;
@@ -167,6 +169,7 @@ fn editor_command(hub: &mut Hub, request: &Value) -> Option<Result<Outcome, Comm
     hub.frame = view.frame.unwrap_or(hub.frame);
     hub.pass = render_pass(view.pass);
     hub.look_through = view.look_through;
+    hub.depth_range = view.depth_range;
     let revision = hub.session.revision();
     Some(r.map(|result| Outcome { result, revision, changed: false }))
 }
