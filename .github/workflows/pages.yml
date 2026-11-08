@@ -28,10 +28,19 @@ jobs:
       - name: Install wasm-bindgen-cli (same version as Cargo.lock)
         run: |
           version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
-          mkdir -p "$HOME/.local/bin" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          curl -sSfL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${version}/wasm-bindgen-${version}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz --strip-components=1 -C "$HOME/.local/bin" "wasm-bindgen-${version}-x86_64-unknown-linux-musl/wasm-bindgen"
-          "$HOME/.local/bin/wasm-bindgen" --version
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin" && echo "$bin" >> "$GITHUB_PATH"
+          name="wasm-bindgen-${version}-x86_64-unknown-linux-musl"
+          # The prebuilt release is quick; GitHub's release downloads sometimes answer 504, so
+          # retry, then fall back to building it from crates.io.
+          if curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/wb.tar.gz \
+               "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${version}/${name}.tar.gz" \
+             && tar -xzf /tmp/wb.tar.gz --strip-components=1 -C "$bin" "${name}/wasm-bindgen"; then
+            echo "prebuilt wasm-bindgen ${version}"
+          else
+            cargo install wasm-bindgen-cli --version "${version}" --locked --root "$HOME/.local"
+          fi
+          "$bin/wasm-bindgen" --version
       - run: ./scripts/build-web.sh
       - name: No Jekyll processing
         run: |
