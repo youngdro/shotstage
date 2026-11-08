@@ -251,6 +251,14 @@ impl EditorApp {
         Some(e)
     }
 
+    /// The faces picked in edit mode on `id` (whatever the select mode), or `None` when not
+    /// editing it.
+    pub(super) fn edit_faces(&mut self, id: &str) -> Option<Vec<u32>> {
+        let st = self.edit_state().filter(|s| s.id == id)?;
+        let c = self.edit_cache.as_ref()?;
+        Some(convert(&c.mesh, &st.selection, SelectMode::Face).faces)
+    }
+
     fn set_edit_sel(&self, sel: Elements) {
         if let Some(e) = self.hub.borrow_mut().edit.as_mut() {
             e.selection = sel.normalized();

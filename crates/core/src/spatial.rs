@@ -531,6 +531,7 @@ mod tests {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size } },
                 modifiers: vec![],
                 color: [0.5; 3],
+                material: None,
             },
         }
     }

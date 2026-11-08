@@ -209,22 +209,34 @@ pub fn flush_with(m: &Mesh, topo: &Topology, sel: &Elements) -> Result<Flushed> 
 /// Remove repeated corners and faces that collapsed, drop unused vertices, and carry the
 /// selection over to the new indices.
 fn finish(mut m: Mesh, sel: Elements) -> (Mesh, Elements) {
+    // UVs survive tools that keep every face (moves, merges); the rest drop them
+    let had_uvs = m.has_uvs();
+    let old_uvs = std::mem::take(&mut m.uvs);
     let mut face_map = vec![None; m.faces.len()];
     let mut faces = Vec::with_capacity(m.faces.len());
+    let mut uvs: Vec<Vec<[f32; 2]>> = Vec::new();
     for (fi, f) in std::mem::take(&mut m.faces).into_iter().enumerate() {
         let mut g: Vec<u32> = Vec::with_capacity(f.len());
-        for v in f {
+        let mut gu: Vec<[f32; 2]> = Vec::with_capacity(f.len());
+        for (k, v) in f.into_iter().enumerate() {
             if g.last() != Some(&v) {
                 g.push(v);
+                if had_uvs {
+                    gu.push(old_uvs[fi][k]);
+                }
             }
         }
         while g.len() > 1 && g.first() == g.last() {
             g.pop();
+            gu.pop();
         }
         let unique: HashSet<u32> = g.iter().copied().collect();
         if unique.len() >= 3 {
             face_map[fi] = Some(faces.len() as u32);
             faces.push(g);
+            if had_uvs {
+                uvs.push(gu);
+            }
         }
     }
     let mut used = vec![false; m.positions.len()];
@@ -252,7 +264,7 @@ fn finish(mut m: Mesh, sel: Elements) -> (Mesh, Elements) {
         edges: sel.edges.iter().filter_map(|e| Some([map_v(e[0])?, map_v(e[1])?])).filter(|e| e[0] != e[1]).collect(),
         faces: sel.faces.iter().filter_map(|&f| face_map.get(f as usize).copied().flatten()).collect(),
     };
-    let out = Mesh { positions, faces };
+    let out = Mesh { positions, faces, uvs };
     // only keep edges that still exist
     let topo = Topology::new(&out);
     let mut sel = sel.normalized();
@@ -535,7 +547,7 @@ pub fn bevel(m: &Mesh, sel: &Elements, width: f32, segments: u32) -> Result<(Mes
     need(!edges.is_empty(), "select edges shared by two faces to bevel")?;
     let bverts: HashSet<u32> = edges.iter().flat_map(|e| [e.0, e.1]).collect();
 
-    let mut out = Mesh { positions: m.positions.clone(), faces: Vec::new() };
+    let mut out = Mesh { positions: m.positions.clone(), faces: Vec::new(), uvs: Vec::new() };
     // origin of every vertex (new ones come from the vertex they were split off)
     let mut origin: Vec<u32> = (0..m.positions.len() as u32).collect();
     let mut slides: HashMap<(u32, u32), u32> = HashMap::new();
@@ -1040,7 +1052,7 @@ pub fn subdivide(m: &Mesh, sel: &Elements) -> Result<(Mesh, Elements)> {
 pub fn connect(m: &Mesh, sel: &Elements) -> Result<(Mesh, Elements)> {
     let f = flush(m, sel)?;
     need(f.verts.len() >= 2, "select at least two vertices on the same face")?;
-    let mut out = Mesh { positions: m.positions.clone(), faces: Vec::new() };
+    let mut out = Mesh { positions: m.positions.clone(), faces: Vec::new(), uvs: Vec::new() };
     let mut new_edges = Vec::new();
     for face in &m.faces {
         let picked: Vec<usize> = (0..face.len()).filter(|&i| f.verts.contains(&face[i])).collect();
@@ -1277,8 +1289,12 @@ pub fn flip(m: &Mesh, sel: &Elements) -> Result<(Mesh, Elements)> {
     let faces: Vec<u32> =
         if sel.is_empty() { (0..m.faces.len() as u32).collect() } else { flush(m, sel)?.faces.into_iter().collect() };
     need(!faces.is_empty(), "select faces to flip")?;
+    let uv = out.has_uvs();
     for &f in &faces {
         out.faces[f as usize].reverse();
+        if uv {
+            out.uvs[f as usize].reverse();
+        }
     }
     Ok((out, sel.clone().normalized()))
 }
@@ -1963,7 +1979,7 @@ pub fn spin(m: &Mesh, sel: &Elements, center: Vec3, axis: Vec3, angle: f32, step
             })
             .cloned()
             .collect();
-        let out = Mesh { positions: welded.positions, faces };
+        let out = Mesh { positions: welded.positions, faces, uvs: Vec::new() };
         return Ok(finish(out, Elements::default()));
     }
     Ok(finish(cur, s))
@@ -2161,6 +2177,7 @@ mod tests {
         let m = Mesh {
             positions: vec![[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
             faces: vec![vec![0, 1, 2, 3]],
+            uvs: vec![],
         };
         let (half, sel) = spin(&m, &Elements::faces([0]), Vec3::ZERO, Vec3::Y, 180.0, 6).unwrap();
         assert_eq!(sel.faces.len(), 1);

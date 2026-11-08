@@ -19,6 +19,7 @@ pub mod prefabs;
 pub mod rig;
 pub mod snapshot;
 pub mod templates;
+pub mod texture;
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;

@@ -96,6 +96,25 @@
 
 编辑器的编辑模式状态也开放给脚本：`editor.editMesh`（`{id, mode}` 进入，`{id: null}` 退出）、`editor.editSelect`（设置选择）、`editor.state` 会带上 `edit`。
 
+## 贴图与 UV
+
+选中一个网格，在属性面板 **Texture** 里点 **Load…** 选一张 PNG / JPEG / WebP（或者从下拉里选场景里已有的图片），图片就贴到了网格上。第一次贴图时网格颜色会变成白色，让图片按原色显示；颜色仍然会和图片相乘，可以用来调色。
+
+- **贴法**：`box`（默认，每个面从它最朝向的方向投影，适合盒子、包装箱）、`planar`（沿一个轴平铺，适合地面、墙面、标签）、`cylinder`（绕轴包一圈，适合罐头、瓶子，上下底面单独平铺）、`sphere`（像地球仪一样包，适合水果、球）、`uv`（按网格自己的 UV 展开）。投影是实时算的，移动顶点、挤出、加修改器之后会自动跟着走。
+- **Repeat / Offset / Turn**：图片重复次数、偏移和旋转角度，拖动数值实时预览。
+- **展开 UV**：**Smart** 把网格按折角切成平坦的几块，铺平后不重叠地排进一张图里（类似 Blender 的 Smart UV Project）；**Box / Cylinder / Sphere** 把对应的投影烘焙进 UV。在编辑模式里先选中一些面，就只展开、旋转或缩放这些面的 UV，例如把商品标签单独放到正面。
+- 移动类的编辑（移动、旋转、缩放、边滑移、衰减编辑、翻转法线）会保留 UV；改拓扑的操作（挤出、环切、刀切等）会丢掉 UV，贴图自动退回 box 投影，需要的话再展开一次。
+- **导入导出**：glTF / GLB 导入时会读出 baseColor 贴图和 TEXCOORD_0，模型直接带着贴图显示；导出 GLB / glTF 时会写入 UV 和内嵌图片，Blender 等软件打开就能看到。
+- 命令：`mesh.setMaterial`（`textureData` 传 base64 图片，或 `texture` 传已有的图片 key；`mapping`、`axis`、`repeat`、`offset`、`rotation`；`clear: true` 去掉材质）、`mesh.unwrap`（`method`、`faces`、`angle`、`margin`）、`mesh.uvTransform`（`faces`、`translate`、`rotate`、`scale`）、`mesh.uvData`（返回 UV 和最终贴图坐标）。
+
+```json
+{"batch": [
+  {"command": "mesh.setMaterial", "params": {"id": "can_1", "textureData": "<base64 PNG>", "mapping": "cylinder", "repeat": [2, 1]}},
+  {"command": "mesh.unwrap", "params": {"id": "box_1", "method": "smart"}},
+  {"command": "mesh.uvTransform", "params": {"id": "box_1", "faces": [4], "scale": [0.5, 0.5]}}
+]}
+```
+
 ## 图片
 
 把 PNG / JPEG / WebP 拖进视口，或者在左侧 **Images** 里选一种用法，图片会按原比例变成场景里的一张卡片：
@@ -218,6 +237,7 @@ MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `enti
 | 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
 | 网格编辑 | `mesh.editData` `mesh.makeEditable` `mesh.select`（loop / ring / faceLoop / linked / more / all） `mesh.transformElements` `mesh.extrude` `mesh.inset` `mesh.bevel` `mesh.loopCut` `mesh.subdivideFaces` `mesh.connect` `mesh.merge` `mesh.mergeByDistance` `mesh.fill` `mesh.flipNormals` `mesh.deleteElements` `mesh.bridge` `mesh.edgeSlide` `mesh.bisect`（平面切割，可删除一侧） `mesh.knife`（沿表面点路径切） `mesh.spin`（旋转挤出） `mesh.transformElements` 的 `proportional` 参数（衰减编辑） `mesh.boolean`（union / difference / intersect） |
+| 贴图与 UV | `mesh.setMaterial` `mesh.unwrap` `mesh.uvTransform` `mesh.uvData` |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
 | 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` |
 | 模型 | `model.import` `model.export` |
@@ -247,7 +267,7 @@ cargo run -p shotstage-app [scene.json]          # 原生编辑器
 - **M2 镜头与时间线**：时间线 UI（关键帧拖拽、曲线）、相机支架（轨道 / 摇臂）、更多命名运镜
 - **M3 导出**：离屏逐帧渲染，导出首尾帧、mp4、深度 / 法线 / OpenPose / ID 序列，以及导出包
 - **M4 Agent**：`render_frame` 返回图片、MCP 实时桥（agent 驱动用户打开的网页编辑器）、权限分级
-- **网格编辑**：点 / 边 / 面编辑模式、挤出、内插、倒角、环切、边滑移、刀切、桥接、布尔运算已完成；下一步是减面、UV 与材质
+- **网格编辑**：点 / 边 / 面编辑模式、挤出、内插、倒角、环切、边滑移、刀切、桥接、布尔运算、贴图与 UV 展开已完成；下一步是减面和 UV 编辑器
 
 ## License
 

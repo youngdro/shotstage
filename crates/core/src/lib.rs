@@ -14,6 +14,7 @@ pub mod meshedit;
 pub mod scene;
 pub mod spatial;
 pub mod timeline;
+pub mod uv;
 
 pub use camera::{CameraData, Intrinsics};
 pub use eval::{EvaluatedEntity, EvaluatedScene, evaluate};

@@ -14,6 +14,8 @@ use crate::hub::{self, SharedHub};
 
 #[path = "editmode.rs"]
 mod editmode;
+#[path = "material.rs"]
+mod material;
 
 /// Something in the block palette.
 #[derive(Clone)]
@@ -780,6 +782,8 @@ pub struct EditorApp {
     name_edit: Option<(String, String)>,
     /// The camera the next picked picture becomes the reference of.
     reference_for: Option<String>,
+    /// The mesh whose texture the next picked picture becomes.
+    texture_for: Option<String>,
     /// egui textures of reference pictures: asset key -> (identity of the pixels, texture).
     ref_textures: std::collections::HashMap<String, (usize, egui::TextureHandle)>,
     /// Palette thumbnails (rendered in the background).
@@ -879,6 +883,7 @@ impl EditorApp {
             safe_areas: false,
             thumbs: None,
             reference_for: None,
+            texture_for: None,
             also: vec![],
             shadows: true,
             autosaved: (u64::MAX, 0.0),
@@ -1110,6 +1115,16 @@ impl EditorApp {
                 match opened {
                     Ok(_) => self.toast(format!("Opened {name} (Undo goes back to the previous scene)")),
                     Err(e) => self.toast(format!("{name} is not a shotstage scene: {e}")),
+                }
+                continue;
+            }
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
+                && let Some(mesh) = self.texture_for.take()
+            {
+                let req = json!({"command": "mesh.setMaterial", "params": {"id": mesh, "textureData": encode(&bytes)}});
+                match hub::dispatch(&self.hub, req) {
+                    Ok(_) => self.toast(format!("{name} is now the texture of {mesh}")),
+                    Err(e) => self.toast(format!("Could not use {name}: {}", e.message)),
                 }
                 continue;
             }
@@ -2648,7 +2663,7 @@ impl EditorApp {
         });
 
         match &e.kind {
-            EntityKind::Mesh { modifiers, color, source } => {
+            EntityKind::Mesh { modifiers, color, source, material } => {
                 if !matches!(source, shotstage_core::MeshSource::Skinned { .. }) {
                     section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
                     section(ui, "Boolean", false, |ui| self.boolean_panel(ui, &id));
@@ -2708,6 +2723,7 @@ impl EditorApp {
                         }
                     });
                 });
+                section(ui, "Texture", material.is_some(), |ui| self.material_panel(ui, &id, material.as_ref()));
             }
             EntityKind::Camera(_) => {
                 section(ui, "Camera", true, |ui| {

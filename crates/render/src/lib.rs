@@ -10,7 +10,7 @@ use glam::Mat4;
 use shotstage_core::Scene;
 use wgpu::util::DeviceExt as _;
 
-use geometry::{ImageVertex, LineVertex, Vertex};
+use geometry::{ImageVertex, LineVertex, TexVertex, Vertex};
 pub use geometry::{Overlay, pick};
 
 /// Colour format of the offscreen target.
@@ -77,7 +77,7 @@ struct GpuLight {
 /// light, else the studio key. Returns (world -> shadow clip, light index or -1, depth bias).
 fn shadow_setup(geo: &geometry::Geometry, lights: &[GpuLight]) -> Option<(Mat4, f32, f32)> {
     use glam::Vec3;
-    let mut it = geo.triangles.iter().map(|v| Vec3::from_array(v.pos));
+    let mut it = geo.solid_positions().map(Vec3::from_array);
     let first = it.next()?;
     let (lo, hi) = it.fold((first, first), |(a, b), p| (a.min(p), b.max(p)));
     let (center, radius) = ((lo + hi) / 2.0, ((hi - lo).length() / 2.0).max(0.5));
@@ -174,30 +174,19 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     return o;
 }
 
-@fragment fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
-    let n = normalize(i.n);
-    let pass_id = u32(u.params.x + 0.5);
-    if (pass_id == 1u) {
-        let d = clamp((i.vz - u.params.y) / max(u.params.z - u.params.y, 1e-4), 0.0, 1.0);
-        let g = 1.0 - d;
-        return vec4<f32>(g, g, g, 1.0);
-    }
-    if (pass_id == 2u) {
-        let vn = normalize((u.view * vec4<f32>(n, 0.0)).xyz);
-        return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
-    }
-    let vis = shadow_vis(i.wp);
+fn lit(c: vec3<f32>, n: vec3<f32>, wp: vec3<f32>) -> vec4<f32> {
+    let vis = shadow_vis(wp);
     let count = u32(u.light_params.x + 0.5);
     if (count > 0u) {
         // scene lights: soft sky ambient plus each light's Lambert term (no shadows)
-        var col = i.c * (u.light_params.y * (0.75 + 0.25 * n.y));
+        var col = c * (u.light_params.y * (0.75 + 0.25 * n.y));
         for (var k = 0u; k < count; k = k + 1u) {
             let l = u.lights[k];
             let kind = u32(l.pos.w + 0.5);
             var ldir = -l.dir.xyz;
             var att = 1.0;
             if (kind != 0u) {
-                let d = l.pos.xyz - i.wp;
+                let d = l.pos.xyz - wp;
                 let dist2 = max(dot(d, d), 0.01);
                 ldir = d * inverseSqrt(dist2);
                 // brightness 1 at 2 m, falling off with the square of the distance
@@ -213,7 +202,7 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
             if (f32(k) == u.shadow_params.z) {
                 att = att * vis;
             }
-            col = col + i.c * l.rad.rgb * ndl * att;
+            col = col + c * l.rad.rgb * ndl * att;
         }
         // roll highlights off softly instead of clipping to white
         let knee = vec3<f32>(0.75);
@@ -226,7 +215,59 @@ struct MeshOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, 
     // the studio key casts a soft shadow (so things sit on the ground)
     let key_vis = mix(1.0, vis, 0.7);
     let light = 0.28 + 0.62 * max(dot(n, key), 0.0) * key_vis + 0.18 * max(dot(n, fill), 0.0) + 0.08 * max(n.y, 0.0);
-    return vec4<f32>(i.c * light, 1.0);
+    return vec4<f32>(c * light, 1.0);
+}
+
+@fragment fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
+    let n = normalize(i.n);
+    let pass_id = u32(u.params.x + 0.5);
+    if (pass_id == 1u) {
+        let d = clamp((i.vz - u.params.y) / max(u.params.z - u.params.y, 1e-4), 0.0, 1.0);
+        let g = 1.0 - d;
+        return vec4<f32>(g, g, g, 1.0);
+    }
+    if (pass_id == 2u) {
+        let vn = normalize((u.view * vec4<f32>(n, 0.0)).xyz);
+        return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
+    }
+    return lit(i.c, n, i.wp);
+}
+
+@group(1) @binding(0) var tex_tex: texture_2d<f32>;
+@group(1) @binding(1) var tex_smp: sampler;
+
+struct TexIn { @location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) color: vec3<f32> };
+struct TexOut { @builtin(position) clip: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec3<f32>, @location(2) vz: f32, @location(3) wp: vec3<f32>, @location(4) uv: vec2<f32> };
+
+@vertex fn vs_tex(v: TexIn) -> TexOut {
+    var o: TexOut;
+    o.clip = u.view_proj * vec4<f32>(v.pos, 1.0);
+    o.n = v.normal;
+    o.c = v.color;
+    o.vz = -(u.view * vec4<f32>(v.pos, 1.0)).z;
+    o.wp = v.pos;
+    o.uv = v.uv;
+    return o;
+}
+
+@fragment fn fs_tex(i: TexOut) -> @location(0) vec4<f32> {
+    let t = textureSample(tex_tex, tex_smp, i.uv);
+    // see-through pixels of a cut-out texture are holes
+    if (t.a < 0.5) {
+        discard;
+    }
+    let n = normalize(i.n);
+    let pass_id = u32(u.params.x + 0.5);
+    if (pass_id == 1u) {
+        let d = clamp((i.vz - u.params.y) / max(u.params.z - u.params.y, 1e-4), 0.0, 1.0);
+        let g = 1.0 - d;
+        return vec4<f32>(g, g, g, 1.0);
+    }
+    if (pass_id == 2u) {
+        let vn = normalize((u.view * vec4<f32>(n, 0.0)).xyz);
+        return vec4<f32>(vn * 0.5 + vec3<f32>(0.5), 1.0);
+    }
+    return lit(t.rgb * i.c, n, i.wp);
 }
 
 @group(1) @binding(0) var img_tex: texture_2d<f32>;
@@ -283,8 +324,7 @@ struct LineOut { @builtin(position) clip: vec4<f32>, @location(0) c: vec3<f32> }
 /// Vertex positions are a cheap stand-in for visible surfaces; a vertex behind the camera can
 /// belong to a visible face, so the near end stays at the camera.
 pub fn depth_range(geo: &geometry::Geometry, view: Mat4) -> (f32, f32) {
-    let far =
-        geo.triangles.iter().map(|v| -view.transform_point3(glam::Vec3::from_array(v.pos)).z).fold(0.0f32, f32::max);
+    let far = geo.solid_positions().map(|p| -view.transform_point3(glam::Vec3::from_array(p)).z).fold(0.0f32, f32::max);
     (0.0, if far > 0.01 { far } else { 10.0 })
 }
 
@@ -302,10 +342,13 @@ pub struct Renderer {
     shadow_view: wgpu::TextureView,
     line_pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
+    /// Textured meshes: lit like plain meshes, coloured by their texture.
+    tex_pipeline: wgpu::RenderPipeline,
+    repeat_sampler: wgpu::Sampler,
     image_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// GPU textures of image assets: key -> (identity of the pixels, bind group).
-    textures: std::collections::HashMap<String, (usize, wgpu::BindGroup)>,
+    textures: std::collections::HashMap<String, (usize, wgpu::BindGroup, wgpu::BindGroup)>,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     target: Option<Target>,
@@ -556,6 +599,50 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let repeat_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shotstage texture"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let tex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3];
+        let tex_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vs_tex"),
+            layout: Some(&image_pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_tex"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<TexVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &tex_attrs,
+                })],
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_tex"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             mesh_pipeline,
             shadow_pipeline,
@@ -563,8 +650,10 @@ impl Renderer {
             shadow_view,
             line_pipeline,
             image_pipeline,
+            tex_pipeline,
             image_layout,
             sampler,
+            repeat_sampler,
             textures: Default::default(),
             uniform,
             bind_group,
@@ -580,7 +669,7 @@ impl Renderer {
             let Some(asset) = scene.assets.get(*key) else { continue };
             // the pixels are shared (`Arc`), so their address identifies them
             let identity = asset.data.as_ptr() as usize ^ asset.data.len();
-            if self.textures.get(*key).is_some_and(|(id, _)| *id == identity) {
+            if self.textures.get(*key).is_some_and(|(id, _, _)| *id == identity) {
                 continue;
             }
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(asset.data.as_bytes()) else { continue };
@@ -618,7 +707,16 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 ],
             });
-            self.textures.insert(key.to_string(), (identity, bg));
+            // textured meshes tile their picture: a second binding that repeats
+            let bg_repeat = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shotstage texture"),
+                layout: &self.image_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                ],
+            });
+            self.textures.insert(key.to_string(), (identity, bg, bg_repeat));
         }
         self.textures.retain(|k, _| scene.assets.contains_key(k));
     }
@@ -685,7 +783,8 @@ impl Renderer {
         overlay.eye = Some(view.view.inverse().w_axis.truncate().to_array());
         let overlay = &overlay;
         let geo = geometry::build(scene, frame, overlay);
-        let used: Vec<&str> = geo.images.iter().map(|q| q.asset.as_str()).collect();
+        let used: Vec<&str> =
+            geo.images.iter().map(|q| q.asset.as_str()).chain(geo.textured.iter().map(|b| b.asset.as_str())).collect();
         self.sync_textures(device, queue, scene, &used);
         let Some(target) = &self.target else { return };
         let (near, far) = if view.depth_far > view.depth_near {
@@ -730,6 +829,24 @@ impl Renderer {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
+        let tex_verts: Vec<TexVertex> = geo.textured.iter().flat_map(|b| b.vertices.iter().copied()).collect();
+        let tex_buf = (!tex_verts.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shotstage textured"),
+                contents: bytemuck::cast_slice(&tex_verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
+        // shadows come from every solid triangle, textured or not
+        let shadow_tris: Vec<Vertex> =
+            geo.solid_positions().map(|pos| Vertex { pos, normal: [0.0; 3], color: [0.0; 3], id: 0 }).collect();
+        let shadow_buf = (!shadow_tris.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shotstage shadow casters"),
+                contents: bytemuck::cast_slice(&shadow_tris),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
         let img_verts: Vec<ImageVertex> = geo.images.iter().flat_map(|q| q.vertices).collect();
         let img_buf = (!img_verts.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -744,7 +861,7 @@ impl Renderer {
             Pass::Normal => wgpu::Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 },
         };
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("shotstage") });
-        if let (Some(_), Some(b)) = (shadow, &tri_buf) {
+        if let (Some(_), Some(b)) = (shadow, &shadow_buf) {
             let mut sp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shotstage shadow"),
                 color_attachments: &[],
@@ -760,7 +877,7 @@ impl Renderer {
             sp.set_pipeline(&self.shadow_pipeline);
             sp.set_bind_group(0, &self.shadow_bind_group, &[]);
             sp.set_vertex_buffer(0, b.slice(..));
-            sp.draw(0..geo.triangles.len() as u32, 0..1);
+            sp.draw(0..shadow_tris.len() as u32, 0..1);
         }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -786,11 +903,24 @@ impl Renderer {
                 rp.set_vertex_buffer(0, b.slice(..));
                 rp.draw(0..geo.triangles.len() as u32, 0..1);
             }
+            if let Some(b) = &tex_buf {
+                rp.set_pipeline(&self.tex_pipeline);
+                rp.set_vertex_buffer(0, b.slice(..));
+                let mut start = 0u32;
+                for batch in &geo.textured {
+                    let n = batch.vertices.len() as u32;
+                    if let Some((_, _, bg)) = self.textures.get(&batch.asset) {
+                        rp.set_bind_group(1, bg, &[]);
+                        rp.draw(start..start + n, 0..1);
+                    }
+                    start += n;
+                }
+            }
             if let Some(b) = &img_buf {
                 rp.set_pipeline(&self.image_pipeline);
                 rp.set_vertex_buffer(0, b.slice(..));
                 for (i, q) in geo.images.iter().enumerate() {
-                    if let Some((_, bg)) = self.textures.get(&q.asset) {
+                    if let Some((_, bg, _)) = self.textures.get(&q.asset) {
                         rp.set_bind_group(1, bg, &[]);
                         rp.draw(i as u32 * 6..i as u32 * 6 + 6, 0..1);
                     }

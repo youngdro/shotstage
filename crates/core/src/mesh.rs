@@ -18,6 +18,10 @@ use crate::{CoreError, Result};
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub faces: Vec<Vec<u32>>,
+    /// Texture coordinates per face corner (`uvs[f][i]` goes with `faces[f][i]`), or empty
+    /// when the mesh has no UV map (a material then projects its texture).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uvs: Vec<Vec<[f32; 2]>>,
 }
 
 /// Parametric primitives. Sizes in metres; the primitive is centred on its origin.
@@ -136,6 +140,8 @@ pub struct TriMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    /// One per position when the mesh has a UV map, else empty.
+    pub uvs: Vec<[f32; 2]>,
 }
 
 const MAX_SEGMENTS: u32 = 256;
@@ -246,13 +252,14 @@ impl Primitive {
                     vec![7, 6, 2, 3], // +Y
                     vec![0, 1, 5, 4], // -Y
                 ];
-                Ok(Mesh { positions, faces })
+                Ok(Mesh { positions, faces, uvs: Vec::new() })
             }
             Primitive::Plane { size } => {
                 let [x, z] = [check_size(size[0], "size.x")? / 2.0, check_size(size[1], "size.y")? / 2.0];
                 Ok(Mesh {
                     positions: vec![[-x, 0.0, z], [x, 0.0, z], [x, 0.0, -z], [-x, 0.0, -z]],
                     faces: vec![vec![0, 1, 2, 3]],
+                    uvs: vec![vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
                 })
             }
             Primitive::Sphere { radius, segments, rings } => {
@@ -282,7 +289,7 @@ impl Primitive {
                 for j in 0..seg {
                     faces.push(vec![ring(rings - 2, j + 1), ring(rings - 2, j), bottom]);
                 }
-                Ok(Mesh { positions, faces })
+                Ok(Mesh { positions, faces, uvs: Vec::new() })
             }
             Primitive::Cylinder { radius, height, segments } | Primitive::Cone { radius, height, segments } => {
                 let cone = matches!(self, Primitive::Cone { .. });
@@ -312,7 +319,7 @@ impl Primitive {
                     faces.push((0..seg).map(|j| seg + j).collect());
                 }
                 faces.push((0..seg).rev().collect());
-                Ok(Mesh { positions, faces })
+                Ok(Mesh { positions, faces, uvs: Vec::new() })
             }
             Primitive::Cove { size, radius } => {
                 let [w, h, d] =
@@ -332,7 +339,7 @@ impl Primitive {
                     positions.push([w / 2.0, y - h / 2.0, *z]);
                 }
                 let faces = (0..prof.len() as u32 - 1).map(|i| vec![2 * i, 2 * i + 1, 2 * i + 3, 2 * i + 2]).collect();
-                Ok(Mesh { positions, faces })
+                Ok(Mesh { positions, faces, uvs: Vec::new() })
             }
             Primitive::Capsule { radius, height, segments } => {
                 let r = check_size(radius, "radius")?;
@@ -373,7 +380,7 @@ impl Primitive {
                 for j in 0..seg {
                     faces.push(vec![ring(n - 1, j + 1), ring(n - 1, j), bottom]);
                 }
-                Ok(Mesh { positions, faces })
+                Ok(Mesh { positions, faces, uvs: Vec::new() })
             }
             Primitive::Torus { major_radius, minor_radius, major_segments, minor_segments } => {
                 let big = check_size(major_radius, "majorRadius")?;
@@ -396,7 +403,7 @@ impl Primitive {
                         faces.push(vec![idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)]);
                     }
                 }
-                Ok(Mesh { positions, faces })
+                Ok(Mesh { positions, faces, uvs: Vec::new() })
             }
         }
     }
@@ -453,6 +460,9 @@ impl Modifier {
                 for f in &mut flipped.faces {
                     f.reverse();
                 }
+                for u in &mut flipped.uvs {
+                    u.reverse();
+                }
                 m.append(&flipped);
                 m
             }
@@ -505,13 +515,32 @@ impl Mesh {
         if self.faces.len() > MAX_FACES {
             return Err(CoreError::Invalid(format!("mesh has {} faces (limit {MAX_FACES})", self.faces.len())));
         }
+        if !self.uvs.is_empty() && !self.has_uvs() {
+            return Err(CoreError::Invalid("`uvs` needs one list per face with one [u, v] per corner".into()));
+        }
+        if self.uvs.iter().flatten().flatten().any(|v| !v.is_finite()) {
+            return Err(CoreError::Invalid("UVs must be finite".into()));
+        }
         Ok(())
     }
 
+    /// Whether `uvs` holds a coordinate for every face corner.
+    pub fn has_uvs(&self) -> bool {
+        !self.faces.is_empty()
+            && self.uvs.len() == self.faces.len()
+            && self.uvs.iter().zip(&self.faces).all(|(u, f)| u.len() == f.len())
+    }
+
     pub fn append(&mut self, other: &Mesh) {
+        let keep = (self.faces.is_empty() || self.has_uvs()) && other.has_uvs();
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&other.positions);
         self.faces.extend(other.faces.iter().map(|f| f.iter().map(|v| v + base).collect()));
+        if keep {
+            self.uvs.extend(other.uvs.iter().cloned());
+        } else {
+            self.uvs.clear();
+        }
     }
 
     pub fn transformed(&self, m: Mat4) -> Mesh {
@@ -527,6 +556,17 @@ impl Mesh {
                         f.reverse();
                     }
                     f
+                })
+                .collect(),
+            uvs: self
+                .uvs
+                .iter()
+                .map(|u| {
+                    let mut u = u.clone();
+                    if flip {
+                        u.reverse();
+                    }
+                    u
                 })
                 .collect(),
         }
@@ -650,8 +690,12 @@ impl Mesh {
         }
         let cos = angle_degrees.to_radians().cos();
         let mut t = TriMesh::default();
+        let uv = self.has_uvs();
         for (fi, f) in self.faces.iter().enumerate() {
             let base = t.positions.len() as u32;
+            if uv {
+                t.uvs.extend_from_slice(&self.uvs[fi]);
+            }
             for &v in f {
                 let mut n = Vec3::ZERO;
                 for &g in &around[v as usize] {
@@ -700,12 +744,16 @@ impl Mesh {
                 }
             }
         } else {
-            for f in &self.faces {
+            let uv = self.has_uvs();
+            for (fi, f) in self.faces.iter().enumerate() {
                 let n = face_normal(f).to_array();
                 let base = t.positions.len() as u32;
                 for &v in f {
                     t.positions.push(self.positions[v as usize]);
                     t.normals.push(n);
+                }
+                if uv {
+                    t.uvs.extend_from_slice(&self.uvs[fi]);
                 }
                 for i in 1..f.len() as u32 - 1 {
                     t.indices.extend_from_slice(&[base, base + i, base + i + 1]);
@@ -824,7 +872,7 @@ mod tests {
         let cap = Primitive::Capsule { radius: 0.5, height: 3.0, segments: 12 }.build().unwrap();
         let (lo, hi) = cap.bounds().unwrap();
         assert!((hi.y - 1.5).abs() < 1e-5 && (lo.y + 1.5).abs() < 1e-5 && (hi.x - 0.5).abs() < 1e-5);
-        assert!(Mesh { positions: vec![[0.0; 3]], faces: vec![vec![0, 1, 2]] }.validate().is_err());
+        assert!(Mesh { positions: vec![[0.0; 3]], faces: vec![vec![0, 1, 2]], uvs: vec![] }.validate().is_err());
     }
 
     #[test]

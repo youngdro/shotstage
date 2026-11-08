@@ -55,7 +55,7 @@ fn mesh_parts<'a>(
     id: &str,
 ) -> CmdResult<(&'a mut MeshSource, &'a mut Vec<Modifier>, &'a mut [f32; 3])> {
     match &mut scene.get_mut(id)?.kind {
-        EntityKind::Mesh { source, modifiers, color } => Ok((source, modifiers, color)),
+        EntityKind::Mesh { source, modifiers, color, .. } => Ok((source, modifiers, color)),
         _ => Err(CommandError::new("failed", format!("entity `{id}` is not a mesh"))),
     }
 }
@@ -415,7 +415,12 @@ fn create(scene: &mut Scene, p: CreateParams) -> CmdResult<Value> {
                 (None, prim) => MeshSource::Primitive { primitive: prim.unwrap_or(Primitive::Cube { size: [1.0; 3] }) },
             };
             source.base_mesh()?;
-            EntityKind::Mesh { source, modifiers: vec![], color: color(p.color.unwrap_or([0.72, 0.70, 0.66]))? }
+            EntityKind::Mesh {
+                source,
+                modifiers: vec![],
+                color: color(p.color.unwrap_or([0.72, 0.70, 0.66]))?,
+                material: None,
+            }
         }
         CreateType::Camera => {
             let c = p.camera.unwrap_or_default();
@@ -851,5 +856,6 @@ pub fn registry() -> Vec<Command> {
     .chain(crate::arrange::commands())
     .chain(crate::clipboard::commands())
     .chain(crate::meshedit::commands())
+    .chain(crate::texture::commands())
     .collect()
 }
