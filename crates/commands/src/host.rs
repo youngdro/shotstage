@@ -47,6 +47,12 @@ pub fn host_commands() -> Vec<HostCommand> {
             schema: schema_of::<StoryboardParams>,
         },
         HostCommand {
+            id: crate::sheet::SHEET_COMMAND,
+            summary: "Export a shot sheet for the crew: every shot's picture with its number, name, camera, shot size and angle, focal length, camera move (worked out from the animation), duration and notes. A table or storyboard grid, as a PDF (A4 landscape) or one PNG, labels in English or Chinese. With `out` writes the file; otherwise returns it as base64 `data` with `fileName` and `mimeType`. The analysed rows come back as `shots`.",
+            needs: &[GPU],
+            schema: schema_of::<crate::sheet::ShotSheetParams>,
+        },
+        HostCommand {
             id: SEQUENCE_COMMAND,
             summary: "Render every frame of a range through the shot cameras (clay / depth / normal; depth uses one range for the whole sequence so it does not flicker) plus per-frame camera data, as control sequences for video models. With `out` writes numbered PNGs, camera.json and, with `video`, MP4s (ffmpeg).",
             needs: &[GPU],
@@ -1009,6 +1015,13 @@ pub fn render_with(
                 pngs.push(render(p.snapshot.clone())?);
             }
             finish_storyboard(plan, &pngs)
+        }),
+        crate::sheet::SHEET_COMMAND => crate::sheet::sheet_plan(scene, params).and_then(|plan| {
+            let mut pngs = Vec::with_capacity(plan.pictures.len());
+            for p in &plan.pictures {
+                pngs.push(render(p.clone())?);
+            }
+            crate::sheet::finish_sheet(&plan, &pngs)
         }),
         SEQUENCE_COMMAND => sequence_plan(scene, params, 1280).and_then(SequenceSink::new).and_then(|mut sink| {
             let jobs = sink.jobs();

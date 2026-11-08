@@ -228,15 +228,52 @@ figcaption{{margin-top:6px;display:flex;flex-direction:column;gap:2px}}figcaptio
 
 /// Render every panel through its camera and save one storyboard HTML page.
 pub fn save_storyboard(hub: &crate::hub::SharedHub, panels: Vec<Panel>, width: u32, done: &Outbox) {
-    let name = "storyboard.html";
-    let title = "Storyboard";
-    let params = |p: &Panel| serde_json::json!({ "width": width, "camera": p.camera, "frame": p.frame });
+    let shots: Vec<serde_json::Value> =
+        panels.iter().map(|p| serde_json::json!({ "width": width, "camera": p.camera, "frame": p.frame })).collect();
+    save_rendered(hub, shots, done, move |pngs| {
+        Ok(("storyboard.html".into(), board_html("Storyboard", &panels, &pngs).into_bytes(), "text/html"))
+    });
+}
+
+/// Render a shot sheet (`render.shotSheet` params) and save the PDF / PNG.
+pub fn save_shot_sheet(hub: &crate::hub::SharedHub, params: serde_json::Value, done: &Outbox) {
+    use shotstage_commands::sheet;
+    let plan = match sheet::sheet_plan(hub.borrow().session.scene(), params) {
+        Ok(p) => p,
+        Err(e) => {
+            *done.borrow_mut() = Some(Err(e.message));
+            return;
+        }
+    };
+    let shots = plan.pictures.clone();
+    save_rendered(hub, shots, done, move |pngs| {
+        let bytes = plan.encode(&sheet::compose(&plan, &pngs)).map_err(|e| e.message)?;
+        Ok((plan.file_name().to_string(), bytes, plan.mime()))
+    });
+}
+
+type Finish = (String, Vec<u8>, &'static str);
+
+/// Render `shots` (`render.snapshot` params), make a file of the pictures with `finish` and
+/// save it; the outcome lands in `done`. Synchronous on the desktop, picture by picture as the
+/// GPU finishes in the browser.
+fn save_rendered(
+    hub: &crate::hub::SharedHub,
+    shots: Vec<serde_json::Value>,
+    done: &Outbox,
+    finish: impl FnOnce(Vec<Vec<u8>>) -> Result<Finish, String> + 'static,
+) {
+    let deliver = |r: Result<Finish, String>| match r.and_then(|(name, bytes, mime)| save(&name, &bytes, mime)) {
+        Ok(Some(w)) => Some(Ok(w)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    };
     #[cfg(not(target_arch = "wasm32"))]
     {
         use base64::Engine as _;
         let mut pngs = Vec::new();
-        for p in &panels {
-            let r = crate::hub::dispatch(hub, serde_json::json!({ "command": "render.snapshot", "params": params(p) }))
+        for p in shots {
+            let r = crate::hub::dispatch(hub, serde_json::json!({ "command": "render.snapshot", "params": p }))
                 .map_err(|e| e.message)
                 .and_then(|o| {
                     let b64 = o.result["data"].as_str().unwrap_or_default().to_string();
@@ -250,12 +287,7 @@ pub fn save_storyboard(hub: &crate::hub::SharedHub, panels: Vec<Panel>, width: u
                 }
             }
         }
-        let html = board_html(title, &panels, &pngs);
-        *done.borrow_mut() = match save(name, html.as_bytes(), "text/html") {
-            Ok(Some(w)) => Some(Ok(w)),
-            Ok(None) => None,
-            Err(e) => Some(Err(e)),
-        };
+        *done.borrow_mut() = deliver(finish(pngs));
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -269,12 +301,22 @@ pub fn save_storyboard(hub: &crate::hub::SharedHub, panels: Vec<Panel>, width: u
                 self.0
             }
         }
-        // the pictures arrive one by one; the page is written when the last one is in
-        let n = panels.len();
-        let state = Rc::new(RefCell::new((vec![None::<Vec<u8>>; n], n, None::<String>)));
-        let panels = Rc::new(panels);
-        for i in 0..n {
-            let drawn = hub.borrow_mut().draw_snapshot(params(&panels[i]));
+        type Pending = (
+            Vec<Option<Vec<u8>>>,
+            usize,
+            Option<String>,
+            Option<Box<dyn FnOnce(Vec<Vec<u8>>) -> Result<Finish, String>>>,
+        );
+        // the pictures arrive one by one; the file is made when the last one is in
+        let n = shots.len();
+        let state: Rc<RefCell<Pending>> = Rc::new(RefCell::new((vec![None; n], n, None, Some(Box::new(finish)))));
+        if n == 0 {
+            let f = state.borrow_mut().3.take().expect("set above");
+            *done.borrow_mut() = deliver(f(vec![]));
+            return;
+        }
+        for (i, p) in shots.into_iter().enumerate() {
+            let drawn = hub.borrow_mut().draw_snapshot(p);
             let (_, rs, rb) = match drawn {
                 Ok(x) => x,
                 Err(e) => {
@@ -284,9 +326,9 @@ pub fn save_storyboard(hub: &crate::hub::SharedHub, panels: Vec<Panel>, width: u
             };
             hub.borrow_mut().pending_snapshots += 1;
             let buffer = rb.buffer.clone();
-            let cell = SingleThread((hub.clone(), rb, done.clone(), state.clone(), panels.clone()));
+            let cell = SingleThread((hub.clone(), rb, done.clone(), state.clone()));
             buffer.map_async(wgpu::MapMode::Read, .., move |r| {
-                let (hub, rb, done, state, panels) = cell.into_inner();
+                let (hub, rb, done, state) = cell.into_inner();
                 hub.borrow_mut().pending_snapshots -= 1;
                 let png = r
                     .map_err(|e| e.to_string())
@@ -299,16 +341,20 @@ pub fn save_storyboard(hub: &crate::hub::SharedHub, panels: Vec<Panel>, width: u
                 }
                 st.1 -= 1;
                 if st.1 == 0 {
-                    *done.borrow_mut() = match st.2.take() {
-                        Some(e) => Some(Err(e)),
+                    let out = match st.2.take() {
+                        Some(e) => Err(e),
                         None => {
                             let pngs: Vec<Vec<u8>> = st.0.iter_mut().map(|p| p.take().unwrap_or_default()).collect();
-                            match save(name, board_html(title, &panels, &pngs).as_bytes(), "text/html") {
-                                Ok(Some(w)) => Some(Ok(w)),
-                                Ok(None) => None,
-                                Err(e) => Some(Err(e)),
+                            match st.3.take() {
+                                Some(f) => f(pngs),
+                                None => Err("already saved".into()),
                             }
                         }
+                    };
+                    *done.borrow_mut() = match out.and_then(|(name, bytes, mime)| save(&name, &bytes, mime)) {
+                        Ok(Some(w)) => Some(Ok(w)),
+                        Ok(None) => None,
+                        Err(e) => Some(Err(e)),
                     };
                 }
                 if let Some(ctx) = &hub.borrow().repaint {

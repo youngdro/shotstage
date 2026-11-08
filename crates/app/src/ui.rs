@@ -289,6 +289,7 @@ enum QuickAction {
     CameraHere,
     SaveFrame,
     ExportBoard,
+    ExportSheet,
     Play,
     Start,
     CameraView,
@@ -1650,6 +1651,11 @@ impl EditorApp {
         }
         if !scene.timeline.shots.is_empty() {
             out.push(act("Export storyboard", "every shot as one HTML page", QuickAction::ExportBoard));
+            out.push(act(
+                "Export shot sheet (PDF)",
+                "shot size, lens, camera move and notes of every shot",
+                QuickAction::ExportSheet,
+            ));
         }
         if sel.is_some() {
             out.push(act("Focus the selection", "F", QuickAction::Focus));
@@ -1787,6 +1793,7 @@ impl EditorApp {
                 QuickAction::CameraHere => self.camera_from_view(),
                 QuickAction::SaveFrame => crate::files::save_frame(&self.hub, 1920, &self.saved),
                 QuickAction::ExportBoard => self.export_board(),
+                QuickAction::ExportSheet => self.export_sheet("pdf", "table"),
                 QuickAction::Play => self.playing = !self.playing,
                 QuickAction::Start => {
                     self.playing = false;
@@ -2285,6 +2292,8 @@ impl EditorApp {
                         ui.close();
                     }
                 }
+                ui.separator();
+                self.sheet_menu(ui);
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // the language switch, in both languages so it is always findable
@@ -4361,13 +4370,9 @@ impl EditorApp {
         let card = Vec2::new(160.0, 90.0);
         ui.horizontal(|ui| {
             ui.weak(crate::lf!("{} shots", "{} 个镜头", shots.len()));
-            if ui
-                .small_button(tr("Export…"))
-                .on_hover_text(tr("Save every shot's picture as one HTML page (open it, print it or send it)"))
-                .clicked()
-            {
-                self.export_board();
-            }
+            ui.menu_button(tr("Export…"), |ui| self.sheet_menu(ui))
+                .response
+                .on_hover_text(tr("Save the shots for the crew: a shot sheet (PDF or picture) or one HTML page"));
         });
         egui::ScrollArea::horizontal().id_salt("storyboard").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -4424,6 +4429,17 @@ impl EditorApp {
                             ui.close();
                         }
                         ui.separator();
+                        ui.label(tr("Notes for the crew"))
+                            .on_hover_text(tr("Action, dialogue, how the camera moves: printed on the shot sheet"));
+                        let mut notes = sh.notes.clone();
+                        let edit = egui::TextEdit::multiline(&mut notes)
+                            .desired_rows(3)
+                            .desired_width(240.0)
+                            .hint_text(tr("e.g. She picks up the melon and smiles"));
+                        if ui.add(edit).changed() {
+                            self.run_key(&format!("notes:{}", sh.id), "shot.set", json!({"id": sh.id, "notes": notes}));
+                        }
+                        ui.separator();
                         if ui.button(tr("Delete shot")).clicked() {
                             self.run("shot.delete", json!({"id": sh.id}));
                             ui.close();
@@ -4444,6 +4460,51 @@ impl EditorApp {
             });
         });
         ui.add_space(2.0);
+    }
+
+    /// The shot sheet exports (and the HTML storyboard), for the Export menus.
+    fn sheet_menu(&mut self, ui: &mut egui::Ui) {
+        let scene = self.scene();
+        ui.weak(tr("Shots, for the crew"));
+        if scene.timeline.shots.is_empty() && scene.active_camera.is_none() {
+            ui.weak(tr("Add a camera or a shot first"));
+            return;
+        }
+        for (label, tip, format, layout) in [
+            (
+                "Shot sheet (PDF)",
+                "A table of every shot: picture, shot size and angle, focal length, camera move, duration and notes",
+                "pdf",
+                "table",
+            ),
+            ("Storyboard panels (PDF)", "Every shot's picture with its caption, three to a row", "pdf", "grid"),
+            ("Shot sheet as a picture (PNG)", "The same table as one long image, to paste into a chat", "png", "table"),
+        ] {
+            if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
+                self.export_sheet(format, layout);
+                ui.close();
+            }
+        }
+        if !scene.timeline.shots.is_empty()
+            && ui
+                .button(tr("Storyboard web page (HTML)"))
+                .on_hover_text(tr("Save every shot's picture as one HTML page (open it, print it or send it)"))
+                .clicked()
+        {
+            self.export_board();
+            ui.close();
+        }
+    }
+
+    /// Render and save the shot sheet, labels in the interface language.
+    fn export_sheet(&mut self, format: &str, layout: &str) {
+        let lang = if crate::i18n::zh() { "zh" } else { "en" };
+        self.toast(tr("Rendering the shot sheet…"));
+        crate::files::save_shot_sheet(
+            &self.hub,
+            json!({ "format": format, "layout": layout, "lang": lang }),
+            &self.saved,
+        );
     }
 
     /// Every shot through its camera at its middle frame, saved as one HTML page.

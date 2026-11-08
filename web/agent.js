@@ -73,8 +73,30 @@ async function snapshot(editor, params) {
   };
 }
 
+/** The shot sheet: saved to the person's downloads; page 1 and the shot list go to the model. */
+async function shotSheet(editor, params) {
+  const { out, ...rest } = params ?? {};
+  const r = await editor.call("render.shotSheet", { ...rest, preview: true });
+  const { data, preview, ...doc } = r;
+  let saved = false;
+  if (typeof document !== "undefined" && data) {
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: r.mimeType }));
+    const a = Object.assign(document.createElement("a"), { href: url, download: r.fileName });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    saved = true;
+  }
+  doc.shots = (doc.shots ?? []).map(({ text: _t, ...s }) => s);
+  doc.saved = saved ? `downloaded as ${r.fileName} in the person's browser` : "not saved (no page)";
+  const content = [{ type: "text", text: JSON.stringify(doc) }];
+  if (preview) content.push({ type: "image", data: preview, mimeType: "image/png" });
+  return { content, isError: false };
+}
+
 async function runCommand(editor, command, params) {
   if (command === "render.snapshot") return snapshot(editor, params);
+  if (command === "render.shotSheet") return shotSheet(editor, params);
   if (command === "render.storyboard" || command === "render.sequence") {
     return pullImages(await editor.call(command, params ?? {}));
   }
@@ -110,6 +132,8 @@ export async function callTool(editor, name, args = {}) {
         return await snapshot(editor, args);
       case "render_storyboard":
         return pullImages(await editor.call("render.storyboard", args));
+      case "render_shotSheet":
+        return await shotSheet(editor, args);
       default: {
         // A catalog command published under its tool name (`camera_frame`), as `shotstage mcp` does.
         const cmd = editor.commands().find((c) => c.id.replace(/\./g, "_") === name);

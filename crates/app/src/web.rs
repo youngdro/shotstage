@@ -192,7 +192,8 @@ impl Shotstage {
 
     /// Run any command of the catalog and resolve to its result: the same commands, params and
     /// results as the CLI and the MCP server. Document commands run at once; the host commands
-    /// that render many pictures (`render.storyboard`, `render.sequence`) and `render.snapshot`
+    /// that render many pictures (`render.storyboard`, `render.shotSheet`, `render.sequence`) and
+    /// `render.snapshot`
     /// resolve when the GPU is done. Rejects with an `Error` carrying `code`.
     ///
     /// ```js
@@ -201,6 +202,7 @@ impl Shotstage {
     /// ```
     pub fn call(&self, command: String, params: JsValue) -> js_sys::Promise {
         use shotstage_commands::host::{SEQUENCE_COMMAND, STORYBOARD_COMMAND};
+        use shotstage_commands::sheet::SHEET_COMMAND;
         let params = match from_js(&params) {
             Ok(Value::Null) => json!({}),
             Ok(v) => v,
@@ -208,7 +210,7 @@ impl Shotstage {
         };
         match command.as_str() {
             shotstage_commands::snapshot::SNAPSHOT_COMMAND => snapshot_promise(&self.hub, params),
-            STORYBOARD_COMMAND | SEQUENCE_COMMAND => {
+            STORYBOARD_COMMAND | SEQUENCE_COMMAND | SHEET_COMMAND => {
                 let hub = self.hub.clone();
                 wasm_bindgen_futures::future_to_promise(async move {
                     render_many(&hub, &command, params).await.map(|v| to_js(&v))
@@ -280,7 +282,7 @@ async fn render_png(hub: &SharedHub, params: Value) -> Result<Vec<u8>, JsValue> 
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-/// `render.storyboard` / `render.sequence` in the browser: the shared plan, rendered picture by
+/// `render.storyboard` / `render.shotSheet` / `render.sequence` in the browser: the shared plan, rendered picture by
 /// picture without blocking the page, finished by the shared code (data URLs, no files).
 async fn render_many(hub: &SharedHub, command: &str, params: Value) -> Result<Value, JsValue> {
     use shotstage_commands::host::{self, STORYBOARD_COMMAND};
@@ -295,6 +297,14 @@ async fn render_many(hub: &SharedHub, command: &str, params: Value) -> Result<Va
             pngs.push(render_png(hub, p.snapshot.clone()).await?);
         }
         return host::finish_storyboard(plan, &pngs).map_err(err_js);
+    }
+    if command == shotstage_commands::sheet::SHEET_COMMAND {
+        let plan = shotstage_commands::sheet::sheet_plan(&scene, params).map_err(err_js)?;
+        let mut pngs = Vec::with_capacity(plan.pictures.len());
+        for p in &plan.pictures {
+            pngs.push(render_png(hub, p.clone()).await?);
+        }
+        return shotstage_commands::sheet::finish_sheet(&plan, &pngs).map_err(err_js);
     }
     let plan = host::sequence_plan(&scene, params, 640).map_err(err_js)?;
     let mut sink = host::SequenceSink::new(plan).map_err(err_js)?;

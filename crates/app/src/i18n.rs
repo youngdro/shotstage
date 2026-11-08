@@ -127,9 +127,13 @@ fn system_locale() -> Option<String> {
 /// the desktop a system Chinese font, when there is one, covers everything else people type.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // shot sheets draw Latin text with the same font as the interface (one copy in the bundle)
+    if let Some(data) = fonts.font_data.get("Ubuntu-Light") {
+        shotstage_commands::sheet::register_latin_font((*data.font).as_ref().to_vec());
+    }
     fonts.font_data.insert(
         "noto_sc".into(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../../assets/fonts/NotoSansSC-subset.otf"))),
+        std::sync::Arc::new(egui::FontData::from_static(shotstage_commands::sheet::CJK_FONT)),
     );
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut extra = Vec::from(["noto_sc".to_string()]);
@@ -584,6 +588,28 @@ static ZH_TABLE: &[(&str, &str)] = &[
         "Save every shot's picture as one HTML page (open it, print it or send it)",
         "把每个镜头的图片存成一个 HTML 页面（可打开、打印或发送）",
     ),
+    (
+        "Save the shots for the crew: a shot sheet (PDF or picture) or one HTML page",
+        "导出给拍摄团队的镜头资料：分镜表（PDF 或图片）或 HTML 页面",
+    ),
+    ("Shots, for the crew", "镜头资料（给拍摄团队）"),
+    ("Add a camera or a shot first", "先添加相机或镜头"),
+    ("Shot sheet (PDF)", "分镜表（PDF）"),
+    (
+        "A table of every shot: picture, shot size and angle, focal length, camera move, duration and notes",
+        "每个镜头一行：画面、景别和角度、焦距、运镜、时长和备注",
+    ),
+    ("Storyboard panels (PDF)", "故事板拼版（PDF）"),
+    ("Every shot's picture with its caption, three to a row", "每个镜头的画面配文字说明，一行三格"),
+    ("Shot sheet as a picture (PNG)", "分镜表长图（PNG）"),
+    ("The same table as one long image, to paste into a chat", "同样的表格存成一张长图，方便发到聊天里"),
+    ("Storyboard web page (HTML)", "故事板网页（HTML）"),
+    ("Rendering the shot sheet…", "正在生成分镜表…"),
+    ("Export shot sheet (PDF)", "导出分镜表（PDF）"),
+    ("shot size, lens, camera move and notes of every shot", "每个镜头的景别、焦距、运镜和备注"),
+    ("Notes for the crew", "备注（给拍摄团队）"),
+    ("Action, dialogue, how the camera moves: printed on the shot sheet", "动作、台词、运镜要求等，会印在分镜表上"),
+    ("e.g. She picks up the melon and smiles", "例如：她拿起西瓜，微笑"),
     ("To move it, change its lens or animate it", "用来移动它、换镜头或做动画"),
     ("Go to its middle frame", "跳到它的中间帧"),
     ("The frame this picture shows", "这张图显示的那一帧"),

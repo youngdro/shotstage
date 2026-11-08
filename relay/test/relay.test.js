@@ -141,11 +141,15 @@ function fakeEditor() {
       revision++;
       return { result: { ok: true }, revision, changed: true };
     },
-    async call(command) {
+    async call(command, params) {
       if (command === "render.snapshot") return { mimeType: "image/png", data: "AAAA", dataUrl: "data:image/png;base64,AAAA", width: 4, height: 2 };
       if (command === "render.storyboard") {
         const img = (p) => ({ images: { clay: "data:image/png;base64,QkJC", [p]: "data:image/png;base64,Q0ND" } });
         return { shots: [{ frames: [img("depth"), img("depth")] }], html: "<html>…</html>" };
+      }
+      if (command === "render.shotSheet") {
+        log.push({ command, params });
+        return { fileName: "shot-sheet.pdf", mimeType: "application/pdf", pages: 1, data: "JVBERg==", preview: "UFJF", shots: [{ number: 1, movement: "static", text: { movement: "固定镜头" } }] };
       }
       throw new Error("unexpected");
     },
@@ -184,6 +188,14 @@ test("page: commands, batches, snapshots and storyboards become MCP results", as
   assert.ok(images.every((i) => i.data === "QkJC"));
   assert.ok(!board.content[0].text.includes("html"));
   assert.ok(!board.content[0].text.includes("base64"));
+
+  // the shot sheet: page 1 comes back as a picture, the file itself stays out of the reply
+  const sheet = await callTool(ed, "render_shotSheet", { lang: "zh", out: "/tmp/x.pdf" });
+  assert.equal(sheet.isError, false);
+  assert.deepEqual(ed.log.at(-1), { command: "render.shotSheet", params: { lang: "zh", preview: true } });
+  assert.deepEqual(sheet.content[1], { type: "image", data: "UFJF", mimeType: "image/png" });
+  assert.ok(!sheet.content[0].text.includes("JVBERg") && !sheet.content[0].text.includes("固定镜头"));
+  assert.ok(JSON.parse(sheet.content[0].text).shots[0].movement === "static");
 
   const status = await callTool(ed, "editor_status", {});
   assert.deepEqual(status.structuredContent.summary, { entities: 3 });

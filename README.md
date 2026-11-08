@@ -194,6 +194,7 @@ UV 编辑的命令都以「面角」`[面, 面内序号]` 指定点，也可以�
 - **带动画的导出**：场景里有关键帧时，GLB / glTF / FBX 导出会带上整段时间轴的动画（运镜、物体运动、人物动作，逐帧采样），在 Blender、Unreal 等软件里直接能播放；`animation: false` 只导出当前帧。
 - **逐帧序列**：`shotstage render -s shot.json -o frames/ --pass clay,depth,normal --video` 按镜头切换逐帧渲染（深度图整段用同一个深度范围，不会闪），同时输出每帧相机参数 `camera.json`；装了 ffmpeg 时 `--video` 直接合成 MP4，可以作为视频模型的深度 / 法线控制序列。
 - **分镜**：`shotstage storyboard -s shot.json -o board/` 给每个镜头渲染首帧、中间帧、尾帧（加 `--depth` 同时出深度图），并生成 `storyboard.json`（镜头描述、逐帧相机内外参）和可直接打开的 `index.html`。首尾帧正好可以作为图生视频模型的首帧 / 尾帧条件。
+- **分镜表**：`shotstage sheet -s shot.json -o sheet.pdf --lang zh` 导出给拍摄团队的分镜表：每个镜头一行，带镜号、画面、景别和角度、焦距、运镜、时长和备注；`--layout grid` 换成故事板拼版，`-o sheet.png` 出一张长图。运镜由相机动画自动识别（推、拉、左右移、升降、摇、环绕、跟拍、变焦、滑动变焦、手持、固定），备注用 `shot.set {"notes": ...}` 写，或在编辑器故事板里右键镜头填写。编辑器里在顶栏「导出」或故事板的「导出…」菜单一键导出。
 
 ## 结构
 
@@ -238,6 +239,7 @@ const sub = editor.on(ev => {});   // { type: "change" | "command", revision, re
 editor.off(sub);
 const shot = await editor.snapshot({ pass: "depth", width: 1024 }); // 透过镜头截图：{ dataUrl, data(base64), width, height, ... }
 const board = await editor.call("render.storyboard", { passes: ["clay", "depth"] }); // 分镜：每个镜头首/中/尾帧 + 镜头描述 + 相机数据，图片是 data URL，board.html 是独立网页
+const sheet = await editor.call("render.shotSheet", { lang: "zh" }); // 分镜表 PDF：sheet.data 是 base64，sheet.shots 是每个镜头的景别、焦距、运镜
 const seq = await editor.call("render.sequence", { start: 0, end: 47, passes: ["depth"] }); // 逐帧控制序列（统一深度范围）+ 每帧相机参数
 editor.destroy();                  // 停止渲染并移除 canvas
 ```
@@ -271,7 +273,7 @@ shotstage snapshot -s shot.json -o frame.png --pass depth   # 透过镜头渲染
 claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json
 ```
 
-MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch` 三个通用工具；工具预算紧的客户端可以加 `--compact`，只发布通用工具和几个常用工具，其余照样能用 `command_run` 调。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图；`render_storyboard` 把分镜写到场景文件旁边的 `<场景>.storyboard/` 文件夹，同时把各镜头的画面作为图片返回。
+MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch` 三个通用工具；工具预算紧的客户端可以加 `--compact`，只发布通用工具和几个常用工具，其余照样能用 `command_run` 调。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图；`render_storyboard` 把分镜写到场景文件旁边的 `<场景>.storyboard/` 文件夹，同时把各镜头的画面作为图片返回；`render_shotSheet` 把分镜表写成 `<场景>.shot-sheet.pdf`，并把第一页作为图片返回。
 
 ### 端到端示例
 
@@ -327,7 +329,7 @@ claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json -
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list` `light.shadows` `light.fromEnvironment`（创建用 `entity.create` 的 `type: "light"`） |
 | 天空 / 环境光 | `environment.set` `environment.import`（HDRI）`environment.list` |
-| 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG） `render.storyboard`（分镜） `render.sequence`（逐帧序列 + 相机数据，可出 MP4） |
+| 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG） `render.storyboard`（分镜） `render.shotSheet`（分镜表 PDF / PNG） `render.sequence`（逐帧序列 + 相机数据，可出 MP4） |
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.cut` `shot.set` `shot.delete` |
 | 复制粘贴 | `entity.copy` `entity.paste` |

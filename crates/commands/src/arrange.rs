@@ -83,6 +83,8 @@ struct ShotSetParams {
     start: Option<u32>,
     /// Last frame.
     end: Option<u32>,
+    /// Notes for the crew (action, dialogue, camera move); "" clears them.
+    notes: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -129,6 +131,7 @@ fn cut(scene: &mut Scene, p: CutParams) -> CmdResult<Value> {
         camera: p.camera,
         start: f,
         end,
+        notes: String::new(),
     });
     t.shots.sort_by_key(|x| x.start);
     if end > t.end {
@@ -156,6 +159,12 @@ fn shot_set(scene: &mut Scene, p: ShotSetParams) -> CmdResult<Value> {
     }
     if let Some(c) = p.camera {
         shot.camera = c;
+    }
+    if let Some(n) = p.notes {
+        if n.len() > 4000 {
+            return Err(CommandError::invalid("notes must be at most 4000 bytes"));
+        }
+        shot.notes = n;
     }
     shot.start = p.start.unwrap_or(shot.start);
     shot.end = p.end.unwrap_or(shot.end);
@@ -429,7 +438,7 @@ pub fn commands() -> Vec<Command> {
         command!("entity.distribute", "Space three or more entities evenly along a world axis (the outer two stay).", mutates: true, DistributeParams, distribute),
         command!("entity.attach", "Make a prop follow something: a person's hand (it moves with their poses and actions), or any entity; null detaches it. Hands snap the prop to the palm.", mutates: true, AttachParams, attach),
         command!("shot.cut", "Cut to a camera at a frame: splits the shot playing there (or switches the camera of a shot starting there, or fills the gap to the next shot).", mutates: true, CutParams, cut),
-        command!("shot.set", "Change a shot: its name, camera, first and last frame (retime it).", mutates: true, ShotSetParams, shot_set),
+        command!("shot.set", "Change a shot: its name, camera, first and last frame (retime it), notes for the crew.", mutates: true, ShotSetParams, shot_set),
         command!("person.lookAt", "Turn a person's head and neck towards an entity (e.g. the camera) or a point.", mutates: true, LookParams, look),
     ]
 }
