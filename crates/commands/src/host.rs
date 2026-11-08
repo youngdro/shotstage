@@ -229,7 +229,7 @@ impl EditState {
 pub fn editable(scene: &Scene, id: &str) -> CmdResult<()> {
     use shotstage_core::{EntityKind, MeshSource};
     match scene.get(id).map(|e| &e.kind) {
-        Ok(EntityKind::Mesh { source: MeshSource::Skinned { .. }, .. }) => {
+        Ok(EntityKind::Mesh { source: MeshSource::Skinned { .. } | MeshSource::Human { .. }, .. }) => {
             Err(CommandError::new("failed", format!("`{id}` is rigged: pose it instead of editing its mesh")))
         }
         Ok(EntityKind::Mesh { .. }) => Ok(()),

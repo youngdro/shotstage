@@ -4,7 +4,7 @@
 use egui::{Color32, CursorIcon, Pos2, Rect, Sense, Vec2};
 use glam::{Mat4, Vec3, Vec4Swizzles};
 use serde_json::{Value, json};
-use shotstage_commands::{prefabs, rig};
+use shotstage_commands::{humans, prefabs, rig};
 use shotstage_core::eval::{camera_data_at, camera_id_at, local_at, world_at};
 use shotstage_core::spatial::{self, RayOptions, raycast};
 use shotstage_core::{EntityKind, Modifier, Scene, TrackProperty};
@@ -347,6 +347,26 @@ fn rank_quick(items: &[QuickItem], query: &str) -> Vec<usize> {
     scored.sort_by_key(|&(s, i)| (s, i));
     scored.into_iter().map(|(_, i)| i).collect()
 }
+
+/// Poses shown as buttons in the person panel; the rest are under "More poses".
+const COMMON_POSES: &[&str] = &[
+    "stand",
+    "relaxed",
+    "walk",
+    "run",
+    "sit",
+    "crouch",
+    "wave",
+    "point",
+    "reach",
+    "pickUp",
+    "phone",
+    "armsCrossed",
+    "handsOnHips",
+    "thinking",
+    "browse",
+    "carryBag",
+];
 
 /// The one accent colour of the UI.
 const ACCENT: Color32 = Color32::from_rgb(70, 150, 255);
@@ -2664,7 +2684,10 @@ impl EditorApp {
 
         match &e.kind {
             EntityKind::Mesh { modifiers, color, source, material } => {
-                if !matches!(source, shotstage_core::MeshSource::Skinned { .. }) {
+                if !matches!(
+                    source,
+                    shotstage_core::MeshSource::Skinned { .. } | shotstage_core::MeshSource::Human { .. }
+                ) {
                     section(ui, "Edit mesh", true, |ui| self.edit_panel(ui, &id));
                     section(ui, "Boolean", false, |ui| self.boolean_panel(ui, &id));
                 }
@@ -3080,16 +3103,30 @@ impl EditorApp {
         let animated = self.auto_key || rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
         section(ui, "Pose", true, |ui| {
             ui.weak("Click a body part to select its joint, then drag it (or the rings) to bend it.");
+            let apply = |this: &mut Self, name: &str| {
+                let mut req = json!({"id": root, "pose": name, "frame": frame});
+                if animated {
+                    req["keyframeAt"] = json!(frame.round());
+                }
+                this.run("pose.set", req);
+            };
             ui.horizontal_wrapped(|ui| {
-                for p in rig::POSES {
+                for p in rig::POSES.iter().filter(|p| COMMON_POSES.contains(&p.name)) {
                     if ui.button(humanize(p.name)).on_hover_text(p.description).clicked() {
-                        let mut req = json!({"id": root, "pose": p.name, "frame": frame});
-                        if animated {
-                            req["keyframeAt"] = json!(frame.round());
-                        }
-                        self.run("pose.set", req);
+                        apply(self, p.name);
                     }
                 }
+                ui.menu_button("More poses ▾", |ui| {
+                    ui.set_max_height(420.0);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for p in rig::POSES.iter().filter(|p| !COMMON_POSES.contains(&p.name)) {
+                            if ui.button(humanize(p.name)).on_hover_text(p.description).clicked() {
+                                apply(self, p.name);
+                                ui.close();
+                            }
+                        }
+                    });
+                });
             });
         });
         if let Some(cam) = camera_id_at(scene, frame) {
@@ -3103,6 +3140,10 @@ impl EditorApp {
                     self.run("person.lookAt", req);
                 }
             });
+        }
+        if let Some((body, outfit)) = humans::human_of(scene, root) {
+            self.human_sections(ui, scene, root, frame, body, outfit, animated);
+            return;
         }
         section(ui, "Hair", true, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -3135,6 +3176,190 @@ impl EditorApp {
                 });
             }
         });
+    }
+
+    /// Body, clothes, hair, face and hands of a realistic person.
+    #[allow(clippy::too_many_arguments)]
+    fn human_sections(
+        &mut self,
+        ui: &mut egui::Ui,
+        scene: &Scene,
+        root: &str,
+        frame: f32,
+        body: shotstage_core::human::HumanBody,
+        outfit: shotstage_core::human::HumanOutfit,
+        animated: bool,
+    ) {
+        let part_color = |part: &str| {
+            scene.get(&format!("{root}_{part}")).ok().and_then(|e| match &e.kind {
+                EntityKind::Mesh { color, .. } => Some(*color),
+                _ => None,
+            })
+        };
+        section(ui, "Hands", false, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for h in humans::HAND_SHAPES {
+                    if ui.small_button(humanize(h.name)).on_hover_text(h.description).clicked() {
+                        let mut req = json!({"id": root, "shape": h.name, "frame": frame});
+                        if animated {
+                            req["keyframeAt"] = json!(frame.round());
+                        }
+                        self.run("pose.hand", req);
+                    }
+                }
+            });
+        });
+        section(ui, "Face", true, |ui| {
+            // with expression keys the face follows the timeline: show and key what is there
+            let keyed = scene
+                .timeline
+                .track(root, TrackProperty::Expression)
+                .and_then(|t| t.sample(frame))
+                .and_then(|v| if let shotstage_core::KeyValue::Expression(m) = v { Some(m) } else { None });
+            let keyed_now = keyed.map(|m| if m.a_amount >= m.b_amount { m.a } else { m.b });
+            ui.horizontal_wrapped(|ui| {
+                for (i, e) in shotstage_core::human::EXPRESSIONS.iter().enumerate() {
+                    let on = match keyed_now {
+                        Some(k) => k as usize == i,
+                        None => {
+                            (!body.face.is_empty()
+                                && e.units.len() == body.face.len()
+                                && e.units.iter().all(|(u, w)| body.face.get(*u).is_some_and(|v| (v - w).abs() < 1e-3)))
+                                || (e.units.is_empty() && body.face.is_empty())
+                        }
+                    };
+                    if ui.selectable_label(on, humanize(e.name)).on_hover_text(e.description).clicked() {
+                        let mut req = json!({"id": root, "expression": e.name});
+                        if animated || keyed.is_some() {
+                            req["keyframeAt"] = json!(frame.round());
+                        }
+                        self.run("person.setExpression", req);
+                    }
+                }
+            });
+            if keyed.is_some() {
+                ui.weak("Keyed: the face cross-fades between expression keys.");
+            }
+        });
+        section(ui, "Body", true, |ui| {
+            egui::Grid::new("human_body").num_columns(2).show(ui, |ui| {
+                let mut b = body.clone();
+                let mut started = false;
+                let mut changed = false;
+                let mut row = |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, tip: &str| {
+                    ui.label(label).on_hover_text(tip);
+                    let r = ui.add(egui::Slider::new(v, range).max_decimals(2));
+                    started |= r.drag_started();
+                    changed |= r.changed();
+                    ui.end_row();
+                };
+                row(ui, "Female ↔ male", &mut b.gender, 0.0..=1.0, "0 = female, 1 = male");
+                row(ui, "Age", &mut b.age, 11.0..=90.0, "Years");
+                row(ui, "Weight", &mut b.weight, -1.0..=1.0, "Thin … heavy");
+                row(ui, "Muscle", &mut b.muscle, -1.0..=1.0, "Slight … muscular");
+                row(ui, "Height", &mut b.height, -1.0..=1.0, "Short … tall");
+                if started {
+                    self.gesture += 1;
+                }
+                if changed {
+                    self.run_merged(
+                        &format!("body:{root}"),
+                        "person.setBody",
+                        json!({"id": root, "gender": b.gender, "age": b.age, "weight": b.weight, "muscle": b.muscle, "height": b.height}),
+                    );
+                }
+            });
+            let h = shotstage_core::human::rest(&body).height();
+            ui.weak(format!("{:.2} m tall", h));
+        });
+        section(ui, "Clothes", true, |ui| {
+            let mut o = outfit.clone();
+            let mut changed = false;
+            let mut started = false;
+            egui::Grid::new("human_clothes").num_columns(3).show(ui, |ui| {
+                changed |= ui.checkbox(&mut o.top, "Top").changed();
+                let r = ui
+                    .add_enabled(o.top, egui::Slider::new(&mut o.sleeves, 0.0..=2.0).text("sleeves").show_value(false));
+                started |= r.drag_started();
+                changed |= r.changed();
+                self.part_color_button(ui, root, "top", part_color("top"));
+                ui.end_row();
+                changed |= ui.checkbox(&mut o.bottom, "Bottom").changed();
+                let r =
+                    ui.add_enabled(o.bottom, egui::Slider::new(&mut o.legs, 0.0..=2.0).text("legs").show_value(false));
+                started |= r.drag_started();
+                changed |= r.changed();
+                self.part_color_button(ui, root, "bottom", part_color("bottom"));
+                ui.end_row();
+                changed |= ui.checkbox(&mut o.shoes, "Shoes").changed();
+                ui.label("");
+                self.part_color_button(ui, root, "shoes", part_color("shoes"));
+                ui.end_row();
+                changed |= ui.checkbox(&mut o.apron, "Apron").changed();
+                ui.label("");
+                self.part_color_button(ui, root, "apron", part_color("apron"));
+                ui.end_row();
+                ui.label("Skin");
+                ui.label("");
+                self.part_color_button(ui, root, "skin", part_color("skin"));
+                ui.end_row();
+                ui.label("Eyes");
+                ui.label("");
+                self.part_color_button(ui, root, "eyes", part_color("irises"));
+                ui.end_row();
+            });
+            if started {
+                self.gesture += 1;
+            }
+            if changed {
+                self.run_merged(
+                    &format!("outfit:{root}"),
+                    "person.setOutfit",
+                    json!({"id": root, "top": o.top, "sleeves": o.sleeves, "bottom": o.bottom, "legs": o.legs, "shoes": o.shoes, "apron": o.apron}),
+                );
+            }
+        });
+        section(ui, "Hair", true, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for style in rig::HAIR_STYLES {
+                    if ui.button(humanize(style)).clicked() {
+                        self.run("person.setHair", json!({"id": root, "style": style}));
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut len = outfit.hair;
+                ui.label("Length");
+                let r = ui.add(egui::Slider::new(&mut len, 0.0..=1.6).show_value(false));
+                if r.drag_started() {
+                    self.gesture += 1;
+                }
+                if r.changed() {
+                    self.run_merged(&format!("hairlen:{root}"), "person.setOutfit", json!({"id": root, "hair": len}));
+                }
+                self.part_color_button(ui, root, "hair", part_color("hair"));
+            });
+        });
+    }
+
+    /// A colour button for one part of a realistic person (`person.setOutfit` colours).
+    fn part_color_button(&mut self, ui: &mut egui::Ui, root: &str, key: &str, current: Option<[f32; 3]>) {
+        let Some(c) = current else {
+            ui.label("");
+            return;
+        };
+        let mut c2 = c;
+        let r = ui.color_edit_button_rgb(&mut c2);
+        if r.clicked() {
+            self.gesture += 1;
+        }
+        if c2 != c {
+            self.run_merged(
+                &format!("color:{root}:{key}"),
+                "person.setOutfit",
+                json!({"id": root, "colors": { key: c2 }}),
+            );
+        }
     }
 
     /// Best guess of the current hairstyle from the parts under the head.
@@ -3909,7 +4134,15 @@ impl EditorApp {
         let mut steps = vec![];
         let ids: Vec<String> = match rig::person_root(&scene, &id) {
             Ok(root) if root == id => {
-                std::iter::once(root.clone()).chain(rig::JOINTS.iter().map(|j| format!("{root}_{j}"))).collect()
+                // realistic people key every joint (fingers too) and their expression
+                let joints: Vec<String> = humans::human_parts(&scene, &root)
+                    .first()
+                    .and_then(|(part, ..)| scene.get(part).ok().and_then(rig::mesh_joints).cloned())
+                    .unwrap_or_else(|| rig::JOINTS.iter().map(|j| format!("{root}_{j}")).collect());
+                if scene.timeline.track(&root, TrackProperty::Expression).is_some() {
+                    steps.push(json!({"command": "keyframe.set", "params": {"id": root, "property": "expression", "frame": f}}));
+                }
+                std::iter::once(root.clone()).chain(joints).collect()
             }
             _ => vec![id.clone()],
         };

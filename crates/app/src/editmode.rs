@@ -323,7 +323,7 @@ impl EditorApp {
                 Ok(EntityKind::Mesh { source, .. }) => match source {
                     MeshSource::Primitive { primitive } => primitive.build().ok(),
                     MeshSource::Data { mesh } => Some(mesh.clone()),
-                    MeshSource::Skinned { .. } => None,
+                    MeshSource::Skinned { .. } | MeshSource::Human { .. } => None,
                 },
                 _ => None,
             };

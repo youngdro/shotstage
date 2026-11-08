@@ -15,6 +15,18 @@ pub enum PrefabKind {
     Person,
     Man,
     Woman,
+    HumanMan,
+    HumanWoman,
+    HumanBoy,
+    HumanGirl,
+    HumanOldMan,
+    HumanOldWoman,
+    HumanAthlete,
+    HumanShopper,
+    HumanStaff,
+    HumanCashier,
+    HumanDeli,
+    HumanCasual,
     Table,
     Chair,
     Sofa,
@@ -138,6 +150,68 @@ pub const PREFABS: &[PrefabInfo] = &[
     info!(Man, "man", "man", "Man", People, "Rigged man, 1.76 m, short hair; pose with pose.set, front = +Z"),
     info!(Woman, "woman", "woman", "Woman", People, "Rigged woman, 1.65 m, long hair; pose with pose.set, front = +Z"),
     info!(Person, "person", "person", "Person", People, "Alias of `man`"),
+    info!(
+        HumanMan,
+        "humanMan",
+        "man",
+        "Realistic man",
+        People,
+        "Realistic rigged man (MakeHuman), 1.75 m, with fingers and facial expressions; shape with person.setBody / setOutfit / setExpression"
+    ),
+    info!(
+        HumanWoman,
+        "humanWoman",
+        "woman",
+        "Realistic woman",
+        People,
+        "Realistic rigged woman (MakeHuman), 1.62 m, shoulder-length hair, fingers and facial expressions"
+    ),
+    info!(HumanBoy, "humanBoy", "boy", "Boy", People, "Realistic boy, about 11 years, 1.4 m"),
+    info!(HumanGirl, "humanGirl", "girl", "Girl", People, "Realistic girl, about 11 years, 1.4 m"),
+    info!(
+        HumanOldMan,
+        "humanOldMan", "old_man", "Older man", People, "Realistic man in his seventies, grey hair, long sleeves"
+    ),
+    info!(
+        HumanOldWoman,
+        "humanOldWoman", "old_woman", "Older woman", People, "Realistic woman around seventy, grey hair, long sleeves"
+    ),
+    info!(
+        HumanAthlete,
+        "humanAthlete", "athlete", "Athlete", People, "Realistic muscular man in sportswear (tank top, shorts)"
+    ),
+    info!(
+        HumanShopper,
+        "humanShopper",
+        "shopper",
+        "Shopper",
+        People,
+        "Realistic woman in her late thirties, casual long sleeves: a supermarket customer"
+    ),
+    info!(
+        HumanStaff,
+        "humanStaff",
+        "staff",
+        "Store staff",
+        People,
+        "Realistic man in a light work shirt and green apron: shop assistant"
+    ),
+    info!(
+        HumanCashier,
+        "humanCashier", "cashier", "Cashier", People, "Realistic young woman in a red uniform polo: cashier, promoter"
+    ),
+    info!(
+        HumanDeli,
+        "humanDeli",
+        "deli",
+        "Deli / chef",
+        People,
+        "Realistic man in whites and a white apron: deli counter, butcher, kitchen"
+    ),
+    info!(
+        HumanCasual,
+        "humanCasual", "casual", "Casual", People, "Realistic young man in a yellow tee, chinos and white trainers"
+    ),
     info!(Table, "table", "table", "Table", Furniture, "Dining table 1.2 × 0.8 m, 0.75 m high"),
     info!(Chair, "chair", "chair", "Chair", Furniture, "Dining chair, seat at 0.45 m"),
     info!(Sofa, "sofa", "sofa", "Sofa", Furniture, "Three-seat sofa, 2 m wide"),
@@ -399,6 +473,9 @@ pub fn parts(kind: PrefabKind) -> Vec<Part> {
     match kind {
         Person | Man => crate::rig::person(crate::rig::Body::Man),
         Woman => crate::rig::person(crate::rig::Body::Woman),
+        // realistic people are built by `humans::build`, not from parts
+        HumanMan | HumanWoman | HumanBoy | HumanGirl | HumanOldMan | HumanOldWoman | HumanAthlete | HumanShopper
+        | HumanStaff | HumanCashier | HumanDeli | HumanCasual => vec![],
         Table => {
             let mut v = vec![part("top", cube(1.2, 0.04, 0.8), [0.0, 0.73, 0.0], WOOD)];
             v.extend(legs4(["leg_1", "leg_2", "leg_3", "leg_4"], 1.1, 0.7, 0.71, 0.05, WOOD));
@@ -1116,6 +1193,9 @@ mod tests {
     fn every_prefab_builds() {
         for p in PREFABS {
             let parts = parts(p.kind);
+            if crate::humans::preset_for(p.kind).is_some() {
+                continue;
+            }
             assert!(!parts.is_empty(), "{}", p.key);
             for part in &parts {
                 if let Some(prim) = &part.prim {

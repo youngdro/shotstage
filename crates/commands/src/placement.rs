@@ -459,6 +459,9 @@ fn prefab_create(scene: &mut Scene, p: PrefabParams) -> CmdResult<Value> {
         kind: EntityKind::Empty,
     })?;
     let mut parts = vec![];
+    if let Some(h) = crate::humans::preset_for(p.kind) {
+        parts = crate::humans::build(scene, &id, &h)?;
+    }
     for part in prefabs::parts(p.kind) {
         let pid = format!("{id}_{}", part.name);
         let mut t = Transform { translation: part.pos, scale: part.scale, ..Default::default() };
