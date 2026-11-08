@@ -1146,12 +1146,15 @@ impl EditorApp {
                         }
                     }
                 }
-                self.toast(format!(
-                    "{label}: {} objects, {} shots · press Preview shot to play it",
-                    o.result["entities"], o.result["shots"]
+                self.toast(crate::lf!(
+                    "{}: {} objects, {} shots · press Preview shot to play it",
+                    "{}：{} 个物体，{} 个镜头 · 按“预览镜头”播放",
+                    tr(label),
+                    o.result["entities"],
+                    o.result["shots"]
                 ));
             }
-            Err(e) => self.toast(format!("{label}: {}", e.message)),
+            Err(e) => self.toast(format!("{}: {}", tr(label), e.message)),
         }
     }
 
@@ -1205,7 +1208,7 @@ impl EditorApp {
 
     /// Show a short status message at the bottom of the view.
     fn toast(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), f64::NAN));
+        self.toast = Some((tr(msg.into()), f64::NAN));
     }
 
     /// Import the files that were picked or dropped.
@@ -1240,9 +1243,16 @@ impl EditorApp {
                 match hub::dispatch(&self.hub, req) {
                     Ok(o) => {
                         let warn = o.result["warning"].as_str().map(|w| format!(" ({w})")).unwrap_or_default();
-                        self.toast(format!("{name} is now the sky{warn}. Add a matching sun under Sky ▾."));
+                        self.toast(crate::lf!(
+                            "{name} is now the sky{warn}. Add a matching sun under Sky ▾.",
+                            "{name} 已设为天空{warn}。可在“天空 ▾”里添加匹配的太阳光。"
+                        ));
                     }
-                    Err(e) => self.toast(format!("Could not use {name} as the sky: {}", e.message)),
+                    Err(e) => self.toast(crate::lf!(
+                        "Could not use {name} as the sky: {}",
+                        "无法把 {name} 用作天空：{}",
+                        e.message
+                    )),
                 }
                 continue;
             }
@@ -1251,8 +1261,10 @@ impl EditorApp {
             {
                 let req = json!({"command": "mesh.setMaterial", "params": {"id": mesh, "textureData": encode(&bytes)}});
                 match hub::dispatch(&self.hub, req) {
-                    Ok(_) => self.toast(format!("{name} is now the texture of {mesh}")),
-                    Err(e) => self.toast(format!("Could not use {name}: {}", e.message)),
+                    Ok(_) => {
+                        self.toast(crate::lf!("{name} is now the texture of {mesh}", "{name} 已成为 {mesh} 的贴图"))
+                    }
+                    Err(e) => self.toast(crate::lf!("Could not use {name}: {}", "无法使用 {name}：{}", e.message)),
                 }
                 continue;
             }
@@ -1401,8 +1413,9 @@ impl EditorApp {
             let subject = self.last_subject.clone().filter(|s| scene.contains(s) && *s != target);
             if is_cam {
                 match &subject {
-                    Some(s) => ui.weak(format!(
+                    Some(s) => ui.weak(crate::lf!(
                         "Moves around / looks at: {}",
+                        "围绕 / 看向：{}",
                         scene.get(s).map(|e| e.name.as_str()).unwrap_or(s)
                     )),
                     None => {
@@ -1642,9 +1655,11 @@ impl EditorApp {
                 self.hub.borrow_mut().frame = o.result["start"].as_f64().unwrap_or(0.0) as f32;
                 self.playing = true;
                 let (st, en) = (o.result["start"].as_f64().unwrap_or(0.0), o.result["end"].as_f64().unwrap_or(0.0));
-                self.toast(format!(
+                self.toast(crate::lf!(
                     "{}: frames {st:.0}–{en:.0}, {} keys · drag them on the timeline to retime",
-                    p.label, o.result["keys"]
+                    "{}：第 {st:.0}–{en:.0} 帧，{} 个关键帧 · 在时间轴上拖动可改时间",
+                    tr(p.label),
+                    o.result["keys"]
                 ));
             }
             Err(e) => self.toast(format!("{}: {}", p.label, e.message)),
@@ -2476,13 +2491,6 @@ impl EditorApp {
             ),
         };
         let r = r.on_hover_cursor(CursorIcon::Grab).on_hover_text(tr(b.description()));
-        // start loading a detailed person's file as soon as the pointer is on it
-        if r.hovered()
-            && let Block::Person(a) = b
-            && shotstage_commands::people::bundled(a.key).is_none()
-        {
-            crate::files::person_file(&self.people, a.file, &self.hub);
-        }
         if r.drag_started() && !matches!(b, Block::LightPreset(..)) {
             let key = self.new_key("new");
             self.palette = Some(PaletteDrag { block: b.clone(), spawned: None, key });
@@ -2766,7 +2774,7 @@ impl EditorApp {
                                     ui.menu_button(tr("Hold in hand"), |ui| {
                                         for (pid, pname) in &people {
                                             for (hand, label) in [("right", "right hand"), ("left", "left hand")] {
-                                                if ui.button(format!("{pname} · {label}")).clicked() {
+                                                if ui.button(format!("{pname} · {}", tr(label))).clicked() {
                                                     self.run(
                                                         "entity.attach",
                                                         json!({"id": id, "to": pid, "hand": hand}),
@@ -2913,9 +2921,12 @@ impl EditorApp {
                         }
                     });
                     if let Some(stats) = self.run("mesh.stats", json!({"id": id})) {
-                        ui.weak(format!(
+                        ui.weak(crate::lf!(
                             "{} verts · {} faces · {} tris",
-                            stats["vertices"], stats["faces"], stats["triangles"]
+                            "{} 顶点 · {} 面 · {} 三角面",
+                            stats["vertices"],
+                            stats["faces"],
+                            stats["triangles"]
                         ));
                     }
                     for (i, m) in modifiers.iter().enumerate() {
@@ -2925,10 +2936,20 @@ impl EditorApp {
                                     crate::lf!("Mirror {}", "镜像 {}", ["X", "Y", "Z"][(*axis).min(2) as usize])
                                 }
                                 Modifier::Array { count, offset } => {
-                                    format!("Array ×{count} [{:.2}, {:.2}, {:.2}]", offset[0], offset[1], offset[2])
+                                    format!(
+                                        "{} ×{count} [{:.2}, {:.2}, {:.2}]",
+                                        tr("Array"),
+                                        offset[0],
+                                        offset[1],
+                                        offset[2]
+                                    )
                                 }
                                 Modifier::Subdivide { levels, smooth } => {
-                                    format!("Subdivide {levels}{}", if *smooth { " smooth" } else { "" })
+                                    format!(
+                                        "{} {levels}{}",
+                                        tr("Subdivide"),
+                                        if *smooth { tr(" smooth") } else { String::new() }
+                                    )
                                 }
                             };
                             ui.label(tr(label));
@@ -3337,7 +3358,7 @@ impl EditorApp {
             });
             ui.end_row();
             if n.sky != Sky::Studio {
-                ui.label(if n.sky == Sky::Color { "Colour" } else { "Tint" });
+                ui.label(tr(if n.sky == Sky::Color { "Colour" } else { "Tint" }));
                 ui.horizontal(|ui| {
                     started |= ui.color_edit_button_rgb(&mut n.color).clicked();
                     let presets: &[(&str, [f32; 3])] = if n.sky == Sky::Color {
@@ -3443,7 +3464,7 @@ impl EditorApp {
                 for (axis, label) in [("x", "Align X"), ("z", "Align Z"), ("y", "Align Y")] {
                     ui.label(tr(label));
                     for (to, t) in [("min", "min"), ("center", "centre"), ("max", "max")] {
-                        if ui.small_button(t).clicked() {
+                        if ui.small_button(tr(t)).clicked() {
                             self.run("entity.align", json!({"ids": ids, "axis": axis, "to": to}));
                         }
                     }
@@ -3477,7 +3498,7 @@ impl EditorApp {
 
     fn person_section(&mut self, ui: &mut egui::Ui, scene: &Scene, root: &str, frame: f32) {
         let animated = self.auto_key || rig::JOINTS.iter().any(|j| is_animated(scene, &format!("{root}_{j}")));
-        section(ui, &tr("Pose"), true, |ui| {
+        section(ui, "Pose", true, |ui| {
             ui.weak(tr("Click a body part to select its joint, then drag it (or the rings) to bend it."));
             let apply = |this: &mut Self, name: &str| {
                 let mut req = json!({"id": root, "pose": name, "frame": frame});
@@ -3592,7 +3613,7 @@ impl EditorApp {
                 }
             });
         });
-        section(ui, &tr("Face"), true, |ui| {
+        section(ui, &crate::lf!("Face", "面部"), true, |ui| {
             // with expression keys the face follows the timeline: show and key what is there
             let keyed = scene
                 .timeline
@@ -3653,7 +3674,7 @@ impl EditorApp {
                 }
             });
             let h = shotstage_core::human::rest(&body).height();
-            ui.weak(format!("{:.2} m tall", h));
+            ui.weak(crate::lf!("{:.2} m tall", "身高 {:.2} 米", h));
         });
         section(ui, &tr("Clothes"), true, |ui| {
             let mut o = outfit.clone();
@@ -3661,15 +3682,19 @@ impl EditorApp {
             let mut started = false;
             egui::Grid::new("human_clothes").num_columns(3).show(ui, |ui| {
                 changed |= ui.checkbox(&mut o.top, tr("Top")).changed();
-                let r = ui
-                    .add_enabled(o.top, egui::Slider::new(&mut o.sleeves, 0.0..=2.0).text("sleeves").show_value(false));
+                let r = ui.add_enabled(
+                    o.top,
+                    egui::Slider::new(&mut o.sleeves, 0.0..=2.0).text(tr("sleeves")).show_value(false),
+                );
                 started |= r.drag_started();
                 changed |= r.changed();
                 self.part_color_button(ui, root, "top", part_color("top"));
                 ui.end_row();
                 changed |= ui.checkbox(&mut o.bottom, tr("Bottom")).changed();
-                let r =
-                    ui.add_enabled(o.bottom, egui::Slider::new(&mut o.legs, 0.0..=2.0).text("legs").show_value(false));
+                let r = ui.add_enabled(
+                    o.bottom,
+                    egui::Slider::new(&mut o.legs, 0.0..=2.0).text(tr("legs")).show_value(false),
+                );
                 started |= r.drag_started();
                 changed |= r.changed();
                 self.part_color_button(ui, root, "bottom", part_color("bottom"));
@@ -4469,8 +4494,9 @@ impl EditorApp {
                             ui.close();
                         }
                     });
-                    let resp = resp.on_hover_text(format!(
+                    let resp = resp.on_hover_text(crate::lf!(
                         "{}: frames {}–{} through {cam}. Click to go there, double-click to play it; right-click for more.",
+                        "{}：第 {}–{} 帧，通过 {cam}。单击跳转，双击播放，右键查看更多。",
                         sh.name, sh.start, sh.end
                     ));
                     if resp.clicked() || resp.double_clicked() {
@@ -4498,8 +4524,9 @@ impl EditorApp {
                 let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
                 crate::files::Panel {
                     heading: format!("{} · {}", i + 1, sh.name),
-                    note: format!(
+                    note: crate::lf!(
                         "{cam} · frames {}–{} · {:.1}s",
+                        "{cam} · 第 {}–{} 帧 · {:.1} 秒",
                         sh.start,
                         sh.end,
                         (sh.end + 1 - sh.start) as f32 / fps
@@ -5248,7 +5275,7 @@ impl EditorApp {
             ui.painter().text(
                 full.center(),
                 egui::Align2::CENTER_CENTER,
-                "GPU not available",
+                tr("GPU not available"),
                 egui::FontId::proportional(16.0),
                 Color32::GRAY,
             );
@@ -5448,7 +5475,7 @@ impl EditorApp {
                 painter.text(
                     *sp + Vec2::new(12.0, -12.0),
                     egui::Align2::LEFT_BOTTOM,
-                    "drag to aim",
+                    tr("drag to aim"),
                     egui::FontId::proportional(11.0),
                     col,
                 );
@@ -5768,7 +5795,8 @@ impl EditorApp {
                         ui.menu_button(tr("View ▾"), |ui| {
                             ui.checkbox(&mut self.shadows, tr("Shadows"))
                                 .on_hover_text(tr("Show shadows in the viewport (snapshots follow the scene's shadow settings)"));
-                            ui.checkbox(&mut self.studio_light, tr("Studio light")).on_hover_text(tr("Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)"),
+                            ui.checkbox(&mut self.studio_light, tr("Studio light")).on_hover_text(
+                                tr("Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)"),
                             );
                             ui.checkbox(&mut self.safe_areas, tr("Safe areas in camera view"))
                                 .on_hover_text(tr("Action / title safe frames and a centre cross when looking through a camera"));
@@ -5846,5 +5874,81 @@ mod wheel_tests {
         assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, -100.0), S::Unknown)]), Some(false));
         assert_eq!(wheel_from_trackpad(&[wheel(U::Point, Vec2::new(0.0, 4.0), S::Unknown)]), None);
         assert_eq!(wheel_from_trackpad(&[wheel(U::Line, Vec2::new(0.0, 1.0), S::Unknown)]), Some(false));
+    }
+}
+
+#[cfg(test)]
+mod i18n_tests {
+    use super::*;
+
+    /// Wording that needs no translation: shortcuts, abbreviations, identifiers, names.
+    fn needs_words(s: &str) -> bool {
+        let t = s.trim();
+        let word = !t.contains(' ');
+        t.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2
+            && !t.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+            && !(word && (t.contains('+') || t.contains('.') || t.contains('_')))
+            && !(word && t.chars().all(|c| !c.is_ascii_lowercase()))
+            && !(word && t.starts_with(|c: char| c.is_ascii_lowercase()) && t.chars().any(|c| c.is_ascii_uppercase()))
+            && !["Tab", "Home", "shotstage", "drag", "Cmd/Ctrl+Shift+Z"].contains(&t)
+    }
+
+    /// Every text the interface shows in Chinese: the data tables it lists and every
+    /// `tr("…")` in the sources.
+    #[test]
+    fn interface_is_translated() {
+        let mut texts: Vec<String> = Vec::new();
+        for (title, _, blocks) in palette() {
+            texts.push(title.into());
+            for b in blocks {
+                texts.push(b.label().into());
+                texts.push(b.description().into());
+            }
+        }
+        for p in prefabs::PREFABS {
+            texts.extend([p.label.to_string(), p.description.to_string()]);
+        }
+        for p in rig::POSES {
+            texts.extend([humanize(p.name), p.description.to_string()]);
+        }
+        for h in humans::HAND_SHAPES {
+            texts.extend([humanize(h.name), h.description.to_string()]);
+        }
+        for e in shotstage_core::human::EXPRESSIONS {
+            texts.extend([humanize(e.name), e.description.to_string()]);
+        }
+        for s in rig::HAIR_STYLES {
+            texts.push(humanize(s));
+        }
+        for p in shotstage_commands::motion::PRESETS {
+            texts.extend([p.label.to_string(), p.description.to_string()]);
+        }
+        for (_, key, desc) in shotstage_core::environment::SKIES {
+            let mut c = key.chars();
+            texts.push(c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default());
+            texts.push(desc.to_string());
+        }
+        for (_, label, desc) in shotstage_commands::templates::TEMPLATES {
+            texts.extend([label.to_string(), desc.to_string()]);
+        }
+        for src in [
+            include_str!("ui.rs"),
+            include_str!("editmode.rs"),
+            include_str!("material.rs"),
+            include_str!("uveditor.rs"),
+            include_str!("storyboard.rs"),
+        ] {
+            for part in src.split("tr(\"").skip(1) {
+                let Some(end) = part.find("\")") else { continue };
+                let lit = &part[..end];
+                if !lit.contains('"') {
+                    texts.push(lit.replace("\\n", "\n").replace("\\\"", "\""));
+                }
+            }
+        }
+        let mut missing: Vec<String> = texts.into_iter().filter(|t| needs_words(t) && !crate::i18n::has(t)).collect();
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "{} texts without Chinese:\n{}", missing.len(), missing.join("\n"));
     }
 }

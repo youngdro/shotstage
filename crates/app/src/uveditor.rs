@@ -195,7 +195,7 @@ impl EditorApp {
         let open = self.hub.borrow().uv.as_ref().is_some_and(|u| u.id == id);
         let p = if open { json!({"id": null}) } else { json!({"id": id}) };
         if let Err(e) = hub::dispatch(&self.hub, json!({"command": "editor.uvEditor", "params": p})) {
-            self.toast(format!("UV editor: {}", e.message));
+            self.toast(crate::lf!("UV editor: {}", "UV 编辑器：{}", e.message));
         }
     }
 
@@ -347,7 +347,7 @@ impl EditorApp {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(
                     Color32::from_rgb(240, 200, 90),
-                    "The picture is projected, not laid on by this UV map.",
+                    tr("The picture is projected, not laid on by this UV map."),
                 );
                 use_uv = ui.small_button(tr("Use UV map")).clicked();
             });
@@ -367,8 +367,9 @@ impl EditorApp {
         let (faces, islands) =
             self.uv.cache.as_ref().map(|c| (c.mesh.faces.len(), c.topo.islands.len())).unwrap_or((0, 0));
         let sel = self.hub.borrow().uv.as_ref().map(|u| u.selection.len()).unwrap_or(0);
-        ui.weak(format!(
-            "{faces} faces · {islands} islands · {sel} corners picked · G R S · drag · A all · L island · Home fit"
+        ui.weak(crate::lf!(
+            "{faces} faces · {islands} islands · {sel} corners picked · G R S · drag · A all · L island · Home fit",
+            "{faces} 个面 · {islands} 个孤岛 · 选中 {sel} 个角 · G R S · 拖动 · A 全选 · L 孤岛 · Home 适配"
         ));
     }
 
@@ -381,7 +382,9 @@ impl EditorApp {
                 ("cylinder", "Cylinder", "Bake a cylinder projection (can, bottle)"),
                 ("sphere", "Sphere", "Bake a sphere projection"),
             ] {
-                if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
+                let label =
+                    if method == "smart" { tr(label) } else { super::material::mapping_label(method).to_string() };
+                if ui.button(label).on_hover_text(tr(tip)).clicked() {
                     let mut p = json!({"id": st.id, "method": method});
                     if !faces.is_empty() {
                         p["faces"] = json!(faces);
@@ -411,16 +414,17 @@ impl EditorApp {
         let mut run: Option<(&str, Value)> = None;
         ui.horizontal_wrapped(|ui| {
             let faces = self.uv_picked_faces(st);
-            let scope = if faces.is_empty() { "the whole mesh" } else { "the picked faces" };
+            let scope = tr(if faces.is_empty() { "the whole mesh" } else { "the picked faces" });
             ui.menu_button(tr("Unwrap ▾"), |ui| {
-                ui.weak(format!("Unwrap {scope}"));
+                ui.weak(crate::lf!("Unwrap {scope}", "展开 UV（{scope}）"));
                 self.uv_unwrap_buttons(ui, st, faces.clone());
             });
             if ui
                 .button(tr("Pack"))
-                .on_hover_text(format!(
+                .on_hover_text(crate::lf!(
                     "Lay out {} again inside the picture without overlap",
-                    if faces.is_empty() { "all islands" } else { "the picked faces' islands" }
+                    "把{}在图片内重新排好，互不重叠",
+                    tr(if faces.is_empty() { "all islands" } else { "the picked faces' islands" })
                 ))
                 .clicked()
             {
@@ -432,9 +436,9 @@ impl EditorApp {
                         ("Left", "u", "min"),
                         ("Centre (column)", "u", "center"),
                         ("Right", "u", "max"),
-                        ("Top", "v", "min"),
+                        ("Top edge", "v", "min"),
                         ("Middle (row)", "v", "center"),
-                        ("Bottom", "v", "max"),
+                        ("Bottom edge", "v", "max"),
                     ] {
                         if ui.button(tr(label)).clicked() {
                             run = Some(("mesh.uvAlign", json!({"corners": sel, "axis": axis, "to": to})));
@@ -594,7 +598,7 @@ impl EditorApp {
         let Some(st) = self.hub.borrow().uv.clone() else { return };
         let Some(c) = &self.uv.cache else { return };
         if st.selection.is_empty() || !c.mesh.has_uvs() {
-            self.toast(tr("UV: pick something first"));
+            self.toast(crate::lf!("UV: pick something first", "UV：请先选中元素"));
             return;
         }
         let corners = if st.sticky && matches!(st.mode, UvSelectMode::Vertex | UvSelectMode::Edge) {
@@ -677,14 +681,14 @@ impl EditorApp {
             }
         }
         let info = match m.tool {
-            UvTool::Grab => format!("Move  Δu {:.3}  Δv {:.3}", t[0], t[1]),
-            UvTool::Rotate => format!("Rotate  {r:.1}°"),
-            UvTool::Scale => format!("Scale  {:.3} × {:.3}", s[0], s[1]),
+            UvTool::Grab => crate::lf!("Move  Δu {:.3}  Δv {:.3}", "移动  Δu {:.3}  Δv {:.3}", t[0], t[1]),
+            UvTool::Rotate => crate::lf!("Rotate  {r:.1}°", "旋转  {r:.1}°"),
+            UvTool::Scale => crate::lf!("Scale  {:.3} × {:.3}", "缩放  {:.3} × {:.3}", s[0], s[1]),
         };
         let lock_txt = match m.axis {
-            Some(0) => " · U only",
-            Some(_) => " · V only",
-            None => "",
+            Some(0) => tr(" · U only"),
+            Some(_) => tr(" · V only"),
+            None => String::new(),
         };
         let sig = format!("{t:?}{r}{s:?}");
         let send = sig != m.last;
@@ -1005,7 +1009,11 @@ impl EditorApp {
                     };
                     painter.line_segment([p0, p1], egui::Stroke::new(1.0, col));
                 }
-                let text = format!("{}  ·  X / Y lock · Ctrl snap · Enter applies · Esc cancels", md.info);
+                let text = crate::lf!(
+                    "{}  ·  X / Y lock · Ctrl snap · Enter applies · Esc cancels",
+                    "{}  ·  X / Y 锁定轴 · Ctrl 吸附 · Enter 应用 · Esc 取消",
+                    md.info
+                );
                 let g = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
                 let at = rect.left_top() + egui::vec2(8.0, 8.0);
                 painter.rect_filled(Rect::from_min_size(at, g.size()).expand(4.0), 4.0, Color32::from_black_alpha(170));

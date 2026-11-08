@@ -8,9 +8,9 @@ cd "$(dirname "$0")/../.."
 src="$1"
 chars="$(mktemp)"
 python3 - "$chars" <<'PY'
-import sys
+import glob, sys
 chars = set()
-for f in ["crates/app/src/i18n.rs", "crates/app/src/ui.rs"]:
+for f in glob.glob("crates/app/src/*.rs"):
     chars.update(c for c in open(f, encoding="utf-8").read() if ord(c) > 127)
 for hi in range(0xB0, 0xD8):
     for lo in range(0xA1, 0xFF):

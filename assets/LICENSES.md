@@ -2,9 +2,13 @@
 
 Everything in `assets/` that shotstage did not make itself, where it came from, and its license.
 
-## Realistic people
+## Chinese font: `fonts/NotoSansSC-subset.otf`
 
-The realistic (MakeHuman) people are not in this folder: see `crates/core/assets/README.md`.
+A subset of **Noto Sans SC** Regular (<https://github.com/notofonts/noto-cjk>, by Google and
+Adobe), licensed under the **SIL Open Font License 1.1** (`fonts/NotoSansSC-LICENSE.txt`). Made
+by `tools/fonts/subset.sh`: the characters the interface uses plus the 3,755 most common Chinese
+characters (GB2312 level 1). The subset keeps the font's name, as the OFL allows for Noto,
+which has no Reserved Font Name.
 
 ## Stylized people: `people/stylized_*.glb`
 
@@ -17,10 +21,3 @@ Superhero_Female_FullBody, Hair_SimpleParted, Hair_Buzzed, Hair_Beard, Hair_Long
 ## Palette thumbnails: `people/thumbs/*.png`
 
 Rendered from the GLBs above with the shotstage CLI (`tools/people/thumbs.sh`). Same licenses.
-
-## Chinese font: `fonts/NotoSansSC-subset.otf`
-
-A subset of **Noto Sans SC** Regular (<https://github.com/notofonts/noto-cjk>, by Google and
-Adobe), licensed under the **SIL Open Font License 1.1** (`fonts/NotoSansSC-LICENSE.txt`). Made
-by `tools/fonts/subset.sh`. The subset keeps the font's name, as the OFL allows for Noto,
-which has no Reserved Font Name.

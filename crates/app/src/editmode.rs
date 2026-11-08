@@ -93,8 +93,8 @@ pub(super) enum Tool {
 }
 
 impl Tool {
-    fn name(self) -> &'static str {
-        match self {
+    fn name(self) -> String {
+        tr(match self {
             Tool::Grab => "Move",
             Tool::Rotate => "Rotate",
             Tool::Scale => "Scale",
@@ -104,7 +104,7 @@ impl Tool {
             Tool::LoopCut => "Loop cut",
             Tool::Slide => "Edge slide",
             Tool::Knife => "Knife",
-        }
+        })
     }
 }
 
@@ -305,7 +305,7 @@ impl EditorApp {
         };
         self.also.clear();
         match hub::dispatch(&self.hub, json!({"command": "editor.editMesh", "params": {"id": target}})) {
-            Ok(_) => self.toast(tr("Edit mode · 1 vertex / 2 edge / 3 face · G move · E extrude · Tab to finish")),
+            Ok(_) => self.toast("Edit mode · 1 vertex / 2 edge / 3 face · G move · E extrude · Tab to finish"),
             Err(e) => self.toast(crate::lf!("Cannot edit: {}", "无法编辑：{}", e.message)),
         }
     }
@@ -686,7 +686,7 @@ impl EditorApp {
         let f = self.frame();
         let Some(cage) = self.edit_cage(&scene, &st.id, f, rect, &view, self.edit_xray) else { return };
         if !matches!(tool, Tool::LoopCut | Tool::Knife) && st.selection.is_empty() {
-            self.toast(crate::lf!("{}: select something first", "{}：请先选中一些元素", tr(tool.name())));
+            self.toast(crate::lf!("{}: select something first", "{}：请先选中元素", tool.name()));
             return;
         }
         let center = cage.center.unwrap_or_else(|| cage.world.w_axis.truncate());
@@ -880,7 +880,8 @@ impl EditorApp {
                         let tw = world.transform_point3(Vec3::from_array(m.base.positions[v]));
                         m.snap_to = cage.pts[v];
                         let delta = tw - src;
-                        m.shown = format!("snapped to vertex {v} · {:.3} m", delta.length());
+                        m.shown =
+                            crate::lf!("snapped to vertex {v} · {:.3} m", "吸附到顶点 {v} · {:.3} 米", delta.length());
                         Some((
                             "mesh.transformElements".into(),
                             sel_json(json!({"translate": inv.transform_vector3(delta).to_array()})),
@@ -888,7 +889,7 @@ impl EditorApp {
                     }
                     _ => {
                         m.snap_to = None;
-                        m.shown = "hold over a vertex to snap to it".into();
+                        m.shown = tr("hold over a vertex to snap to it");
                         m.tried.clone()
                     }
                 }
@@ -986,12 +987,16 @@ impl EditorApp {
             Tool::Bevel => {
                 let d0 = (m.start - cs).length();
                 let w = typed.unwrap_or_else(|| ((pointer - cs).length() - d0).abs() * wpp / obj_scale);
-                m.shown = format!(
-                    "{:.3} m · {} segment{} (scroll)",
-                    w * obj_scale,
-                    m.segments,
-                    if m.segments == 1 { "" } else { "s" }
-                );
+                m.shown = if crate::i18n::zh() {
+                    format!("{:.3} 米 · {} 段（滚轮调整）", w * obj_scale, m.segments)
+                } else {
+                    format!(
+                        "{:.3} m · {} segment{} (scroll)",
+                        w * obj_scale,
+                        m.segments,
+                        if m.segments == 1 { "" } else { "s" }
+                    )
+                };
                 (w > 1e-5).then(|| ("mesh.bevel".to_string(), sel_json(json!({"width": w, "segments": m.segments}))))
             }
             Tool::LoopCut => {
@@ -1012,7 +1017,7 @@ impl EditorApp {
                     }
                 }
                 m.shown = if crate::i18n::zh() {
-                    format!("切 {} 刀（滚动增加）", m.segments)
+                    format!("{} 刀（滚轮增加）", m.segments)
                 } else {
                     format!("{} cut{} (scroll for more)", m.segments, if m.segments == 1 { "" } else { "s" })
                 };
@@ -1039,11 +1044,11 @@ impl EditorApp {
             }
             Tool::Knife => {
                 m.shown = match m.knife.len() {
-                    0 => "click where the cut starts".into(),
-                    1 => "click the next point (inside a face to turn a corner)".into(),
+                    0 => tr("click where the cut starts"),
+                    1 => tr("click the next point (inside a face to turn a corner)"),
                     n => crate::lf!(
                         "{} points · click more, Enter or click the last point again to cut",
-                        "{} 个点 · 继续点，回车或再点最后一个点即可切开",
+                        "{} 个点 · 继续点击，按 Enter 或再点最后一个点完成切割",
                         n
                     ),
                 };
@@ -1220,8 +1225,9 @@ impl EditorApp {
             painter.circle_stroke(cp, 4.0, (1.5, Color32::WHITE));
         }
         // header: mode, counts, hint
-        let counts = format!(
+        let counts = crate::lf!(
             "{} / {} verts · {} / {} edges · {} / {} faces",
+            "{} / {} 顶点 · {} / {} 边 · {} / {} 面",
             fl.verts.len(),
             c.mesh.positions.len(),
             fl.edges.len(),
@@ -1231,10 +1237,14 @@ impl EditorApp {
         );
         let hint = match &self.edit_modal {
             Some(m) => {
-                let axis = m.axis.map(|i| format!(" along {}", ["X", "Y", "Z"][i])).unwrap_or_default();
-                let typed = if m.typed.is_empty() { String::new() } else { format!(" · typed {}", m.typed) };
-                let how = if m.release_confirms { "release to apply" } else { "click or Enter to apply" };
-                let extra = match m.tool {
+                let axis = m.axis.map(|i| crate::lf!(" along {}", " 沿 {}", ["X", "Y", "Z"][i])).unwrap_or_default();
+                let typed = if m.typed.is_empty() {
+                    String::new()
+                } else {
+                    crate::lf!(" · typed {}", " · 输入 {}", m.typed)
+                };
+                let how = tr(if m.release_confirms { "release to apply" } else { "click or Enter to apply" });
+                let extra = tr(match m.tool {
                     Tool::Grab | Tool::Rotate | Tool::Scale if self.edit_prop => {
                         " · X Y Z lock an axis · type a number · scroll: proportional radius"
                     }
@@ -1242,8 +1252,13 @@ impl EditorApp {
                     Tool::Rotate | Tool::Scale => " · X Y Z lock an axis · type a number",
                     Tool::Extrude | Tool::Inset | Tool::Bevel | Tool::Slide => " · type a number",
                     Tool::LoopCut | Tool::Knife => "",
-                };
-                format!("{}{axis}: {}{typed} · {how}, Esc / right-click to cancel{extra}", m.tool.name(), m.shown)
+                });
+                crate::lf!(
+                    "{}{axis}: {}{typed} · {how}, Esc / right-click to cancel{extra}",
+                    "{}{axis}：{}{typed} · {how}，Esc / 右键取消{extra}",
+                    m.tool.name(),
+                    m.shown
+                )
             }
             None => counts,
         };
@@ -1279,7 +1294,8 @@ impl EditorApp {
                         ui.separator();
                         ui.toggle_value(&mut self.edit_xray, tr("X-ray"))
                             .on_hover_text(tr("See and pick through the mesh (Alt+Z)"));
-                        ui.toggle_value(&mut self.edit_prop, tr("◎ Proportional")).on_hover_text(tr("Moving, rotating or scaling also pulls nearby vertices, fading out (O; scroll while moving to resize)"),
+                        ui.toggle_value(&mut self.edit_prop, tr("◎ Proportional")).on_hover_text(
+                            tr("Moving, rotating or scaling also pulls nearby vertices, fading out (O; scroll while moving to resize)"),
                         );
                         if ui.button(tr("Done")).on_hover_text(tr("Back to objects (Tab)")).clicked() {
                             leave = true;
@@ -1527,7 +1543,7 @@ impl EditorApp {
             if ui.small_button(tr("All")).on_hover_text(tr("A")).clicked() {
                 self.edit_select_all(true);
             }
-            if ui.small_button(tr("None")).on_hover_text(tr("Alt+A")).clicked() {
+            if ui.small_button(crate::lf!("None", "全不选")).on_hover_text(tr("Alt+A")).clicked() {
                 self.edit_select_all(false);
             }
             if ui
@@ -1576,13 +1592,15 @@ impl EditorApp {
                 run = Some(("mesh.inset", json!({"thickness": a.inset, "depth": a.depth})));
             }
             ui.add(egui::DragValue::new(&mut a.inset).speed(0.005).range(0.0..=100.0).suffix(" m"));
-            ui.add(egui::DragValue::new(&mut a.depth).speed(0.005).range(-100.0..=100.0).prefix("depth ").suffix(" m"));
+            ui.add(
+                egui::DragValue::new(&mut a.depth).speed(0.005).range(-100.0..=100.0).prefix(tr("depth ")).suffix(" m"),
+            );
             ui.end_row();
             if ui.button(tr("Bevel")).on_hover_text(tr("Ctrl+B: round off edges (faces: their edges)")).clicked() {
                 run = Some(("mesh.bevel", json!({"width": a.bevel, "segments": a.segments})));
             }
             ui.add(egui::DragValue::new(&mut a.bevel).speed(0.005).range(0.0001..=100.0).suffix(" m"));
-            ui.add(egui::DragValue::new(&mut a.segments).range(1..=16).suffix(" seg"));
+            ui.add(egui::DragValue::new(&mut a.segments).range(1..=16).suffix(tr(" seg")));
             ui.end_row();
             if ui
                 .button(tr("Loop cut"))
@@ -1591,7 +1609,7 @@ impl EditorApp {
             {
                 start = Some(Tool::LoopCut);
             }
-            ui.add(egui::DragValue::new(&mut a.cuts).range(1..=32).suffix(" cuts"));
+            ui.add(egui::DragValue::new(&mut a.cuts).range(1..=32).suffix(tr(" cuts")));
             ui.label(tr(""));
             ui.end_row();
         });
@@ -1637,7 +1655,7 @@ impl EditorApp {
                 ));
             }
             ui.add(egui::DragValue::new(&mut a.spin_angle).speed(1.0).range(-3600.0..=3600.0).suffix("°"));
-            ui.add(egui::DragValue::new(&mut a.spin_steps).range(1..=256).suffix(" steps"));
+            ui.add(egui::DragValue::new(&mut a.spin_steps).range(1..=256).suffix(tr(" steps")));
             for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
                 ui.selectable_value(&mut a.spin_axis, i, tr(*n));
             }
@@ -1649,7 +1667,7 @@ impl EditorApp {
             ui.add(
                 egui::DragValue::new(&mut a.prop_radius).speed(0.01).range(0.001..=1000.0).prefix("r ").suffix(" m"),
             );
-            egui::ComboBox::from_id_salt("falloff").selected_text(format!("{:?}", a.falloff)).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("falloff").selected_text(tr(format!("{:?}", a.falloff))).show_ui(ui, |ui| {
                 for f in [
                     me::Falloff::Smooth,
                     me::Falloff::Linear,
@@ -1657,7 +1675,7 @@ impl EditorApp {
                     me::Falloff::Sphere,
                     me::Falloff::Constant,
                 ] {
-                    ui.selectable_value(&mut a.falloff, f, format!("{f:?}"));
+                    ui.selectable_value(&mut a.falloff, f, tr(format!("{f:?}")));
                 }
             });
         });
@@ -1682,7 +1700,7 @@ impl EditorApp {
             {
                 match hub::dispatch(&self.hub, json!({"command": "mesh.mergeByDistance", "params": {"id": st.id}})) {
                     Ok(o) => self.toast(crate::lf!("Merged {} vertices", "合并了 {} 个顶点", o.result["removed"])),
-                    Err(e) => self.toast(tr(e.message)),
+                    Err(e) => self.toast(e.message),
                 }
             }
         });
@@ -1693,7 +1711,8 @@ impl EditorApp {
             self.edit_start(t, center, None, false);
         }
         ui.add_space(2.0);
-        ui.weak(tr("Click to pick · Shift+click add · Alt+click loop · Cmd/Ctrl+drag box · drag a selection to move it · G R S move, rotate, scale (X Y Z lock, type a number) · G G edge slide · K knife · double-click or L linked"),
+        ui.weak(
+            tr("Click to pick · Shift+click add · Alt+click loop · Cmd/Ctrl+drag box · drag a selection to move it · G R S move, rotate, scale (X Y Z lock, type a number) · G G edge slide · K knife · double-click or L linked"),
         );
     }
 
@@ -1794,7 +1813,7 @@ impl EditorApp {
             let req = json!({"command": "mesh.boolean", "params": {"id": id, "with": with, "operation": op}});
             match hub::dispatch(&self.hub, req) {
                 Ok(o) => self.toast(crate::lf!("Boolean done: {} faces", "布尔运算完成：{} 个面", o.result["faces"])),
-                Err(e) => self.toast(tr(e.message)),
+                Err(e) => self.toast(e.message),
             }
         }
     }

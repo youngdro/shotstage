@@ -19,6 +19,24 @@ fn mapping_name(m: Mapping) -> &'static str {
     MAPPINGS.iter().find(|(x, ..)| *x == m).map(|(_, n, _)| *n).unwrap_or("box")
 }
 
+/// How a mapping is shown in the panel.
+pub(super) fn mapping_label(name: &str) -> &str {
+    match name {
+        _ if !crate::i18n::zh() => match name {
+            "box" => "Box",
+            "planar" => "Planar",
+            "cylinder" => "Cylinder",
+            "sphere" => "Sphere",
+            _ => "UV",
+        },
+        "box" => "盒状",
+        "planar" => "平面",
+        "cylinder" => "圆柱",
+        "sphere" => "球面",
+        _ => "UV",
+    }
+}
+
 impl EditorApp {
     pub(super) fn material_panel(&mut self, ui: &mut egui::Ui, id: &str, material: Option<&Material>) {
         let scene = self.scene();
@@ -28,7 +46,7 @@ impl EditorApp {
             let current = mat.texture.as_deref().and_then(|k| scene.assets.get(k).map(|a| (k, a)));
             let label = match current {
                 Some((k, a)) => format!("{} ({}×{})", k, a.width, a.height),
-                None => "none".into(),
+                None => tr("none"),
             };
             egui::ComboBox::from_id_salt(("texture", id)).selected_text(label).show_ui(ui, |ui| {
                 for (k, a) in &scene.assets {
@@ -57,7 +75,8 @@ impl EditorApp {
         ui.horizontal_wrapped(|ui| {
             ui.label(tr("Laid on as"));
             for (m, name, tip) in MAPPINGS {
-                if ui.selectable_label(mat.mapping == m, tr(name)).on_hover_text(tr(tip)).clicked() && mat.mapping != m
+                if ui.selectable_label(mat.mapping == m, mapping_label(name)).on_hover_text(tr(tip)).clicked()
+                    && mat.mapping != m
                 {
                     self.run("mesh.setMaterial", json!({"id": id, "mapping": mapping_name(m)}));
                 }
@@ -107,7 +126,7 @@ impl EditorApp {
 
         // UV map
         let picked = self.edit_faces(id).filter(|f| !f.is_empty());
-        let scope = if picked.is_some() { "selected faces" } else { "whole mesh" };
+        let scope = tr(if picked.is_some() { "selected faces" } else { "whole mesh" });
         ui.horizontal_wrapped(|ui| {
             let open = self.uv_is_open(id);
             if ui
@@ -119,13 +138,17 @@ impl EditorApp {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(crate::lf!("Unwrap {scope}", "展开 {scope}"));
-            for (method, label, tip) in [
-                ("smart", "Smart", "Cut into flat pieces and pack them without overlap"),
-                ("box", "Box", "Bake a box projection into the UV map"),
-                ("cylinder", "Cylinder", "Bake a cylinder projection (can, bottle)"),
-                ("sphere", "Sphere", "Bake a sphere projection"),
+            ui.label(crate::lf!("Unwrap {scope}", "展开 UV（{scope}）"));
+            for (method, tip) in [
+                ("smart", "Cut into flat pieces and pack them without overlap"),
+                ("box", "Bake a box projection into the UV map"),
+                ("cylinder", "Bake a cylinder projection (can, bottle)"),
+                ("sphere", "Bake a sphere projection"),
             ] {
+                let label = match method {
+                    "smart" => tr("Smart"),
+                    m => mapping_label(m).to_string(),
+                };
                 if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
                     let mut p = json!({"id": id, "method": method});
                     if let Some(f) = &picked {
@@ -137,7 +160,7 @@ impl EditorApp {
         });
         if mat.mapping == Mapping::Uv {
             ui.horizontal_wrapped(|ui| {
-                ui.label(crate::lf!("UVs of {scope}", "{scope} 的 UV"));
+                ui.label(crate::lf!("UVs of {scope}", "UV（{scope}）"));
                 for (label, tip, p) in [
                     ("⟲ 90°", "Turn the picture on these faces", json!({"rotate": -90})),
                     ("Tile ×2", "Show twice as much of the picture", json!({"scale": [2, 2]})),
