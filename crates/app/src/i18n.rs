@@ -280,6 +280,11 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("People", "人物"),
     ("Fresh retail", "生鲜零售"),
     ("Fresh produce", "生鲜单品"),
+    ("Fresh close-up", "生鲜特写"),
+    (
+        "Salmon on a cutting board with lemon, tomatoes, broccoli and a knife under a big soft light; straight down, then a low push-in on the salmon",
+        "砧板上的三文鱼，配柠檬、番茄、西兰花和厨师刀，大面积柔光；先正上方俯拍，再低角度推近三文鱼",
+    ),
     ("Apple", "苹果（单个）"),
     ("Red apple 8 cm with stem and leaf", "红苹果 8 厘米，带果梗和叶子"),
     ("Pear", "梨"),

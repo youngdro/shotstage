@@ -130,7 +130,7 @@ _changes the scene_ · MCP tool `scene_template`
 
 | Param | Type | |
 | --- | --- | --- |
-| `name` **required** | string | groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout, cafe or studio. |
+| `name` **required** | string | groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout, freshCloseUp, cafe or studio. |
 | `replace` | boolean | Clear the scene first. Default true. |
 
 ### scene.templates
