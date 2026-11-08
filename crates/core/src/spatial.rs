@@ -437,6 +437,20 @@ pub fn subject_extent(b: &Aabb, right: Vec3, aspect: f32) -> f32 {
     s.y.max(across / aspect.max(0.1)).max(0.01)
 }
 
+/// Top of a person's head (people have `<id>_pelvis` and `<id>_head` joints), if `id` is one.
+pub fn head_top(scene: &Scene, id: &str, frame: f32) -> Option<f32> {
+    let head = format!("{id}_head");
+    if !scene.contains(&head) || !scene.contains(&format!("{id}_pelvis")) {
+        return None;
+    }
+    match bounds(scene, &head, frame).ok().flatten() {
+        // the head part (and hair) hangs off the joint
+        Some(h) => Some(h.max.y),
+        // a skinned body: the joint sits at the base of the skull
+        None => Some(world_at(scene, &head, frame).ok()?.w_axis.y + 0.22),
+    }
+}
+
 pub fn frame_subject(
     scene: &Scene,
     subject: &str,
@@ -448,8 +462,12 @@ pub fn frame_subject(
 ) -> Result<Framing> {
     let world = world_at(scene, subject, frame)?;
     let origin = world.w_axis.truncate();
-    let b = bounds(scene, subject, frame)?
+    let mut b = bounds(scene, subject, frame)?
         .unwrap_or(Aabb { min: origin - Vec3::new(0.25, 0.85, 0.25), max: origin + Vec3::new(0.25, 0.85, 0.25) });
+    // A person is framed on the head, not on a hand raised above it (reaching, waving).
+    if let Some(top) = head_top(scene, subject, frame) {
+        b.max.y = b.max.y.min(top).max(b.min.y + 0.3);
+    }
     let frac = size.fraction();
     let front = {
         let f = world.transform_vector3(Vec3::Z);
@@ -531,6 +549,7 @@ mod tests {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size } },
                 modifiers: vec![],
                 color: [0.5; 3],
+                material: None,
             },
         }
     }

@@ -14,6 +14,8 @@ pub enum TrackProperty {
     Transform,
     /// A camera's focal length in mm (zooms).
     FocalLength,
+    /// A realistic person's facial expression (track on the person's root).
+    Expression,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -56,6 +58,27 @@ impl Interp {
 pub enum KeyValue {
     Transform(Transform),
     Scalar(f32),
+    Expression(ExpressionMix),
+}
+
+/// A mix of two named facial expressions (indices into `human::EXPRESSIONS`). A key holds one
+/// expression (`b` = `a`, `bAmount` = 0); between keys the face cross-fades from one to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionMix {
+    pub a: u8,
+    pub a_amount: f32,
+    #[serde(default)]
+    pub b: u8,
+    #[serde(default)]
+    pub b_amount: f32,
+}
+
+impl ExpressionMix {
+    /// One named expression at `amount`.
+    pub fn single(index: u8, amount: f32) -> Self {
+        Self { a: index, a_amount: amount, b: index, b_amount: 0.0 }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -118,6 +141,12 @@ fn blend(a: &KeyValue, b: &KeyValue, t: f32) -> KeyValue {
             x.rotation().slerp(y.rotation(), t),
             x.scale().lerp(y.scale(), t),
         )),
+        (KeyValue::Expression(x), KeyValue::Expression(y)) => KeyValue::Expression(ExpressionMix {
+            a: x.a,
+            a_amount: x.a_amount * (1.0 - t),
+            b: y.a,
+            b_amount: y.a_amount * t,
+        }),
         _ => *a,
     }
 }

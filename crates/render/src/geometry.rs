@@ -3,8 +3,9 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use shotstage_core::eval::{camera_data_at, posed_tris, world_at};
+use shotstage_core::human::HumanPart;
 use shotstage_core::spatial::{self, RayOptions, is_hidden};
-use shotstage_core::{EntityKind, Scene};
+use shotstage_core::{EntityKind, MeshSource, Scene};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -12,7 +13,8 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
-    /// Entity index + 1 (0 = none), for id passes and picking.
+    /// Entity index + 1 (0 = none), for id passes and picking; the top four bits carry the
+    /// surface look (0 matte, 1 skin, 2 hair, 3 eyes).
     pub id: u32,
 }
 
@@ -64,11 +66,36 @@ pub struct ImageQuad {
 
 pub use shotstage_core::image::card_world as image_world;
 
+/// Vertex of a textured mesh: shaded like [`Vertex`], coloured by its texture.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct TexVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    /// Multiplies the texture (mesh colour, selection highlight).
+    pub color: [f32; 3],
+}
+
+/// The triangles of one textured mesh.
+pub struct TexBatch {
+    pub asset: String,
+    pub vertices: Vec<TexVertex>,
+}
+
 #[derive(Default)]
 pub struct Geometry {
     pub triangles: Vec<Vertex>,
     pub lines: Vec<LineVertex>,
     pub images: Vec<ImageQuad>,
+    pub textured: Vec<TexBatch>,
+}
+
+impl Geometry {
+    /// Every shaded triangle corner (plain and textured), for bounds and shadows.
+    pub fn solid_positions(&self) -> impl Iterator<Item = [f32; 3]> + '_ {
+        self.triangles.iter().map(|v| v.pos).chain(self.textured.iter().flat_map(|b| b.vertices.iter().map(|v| v.pos)))
+    }
 }
 
 const SELECT: [f32; 3] = [1.0, 0.62, 0.18];
@@ -84,15 +111,16 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
     for a in &overlay.also_selected {
         selected_set.extend(spatial::subtree(scene, a));
     }
-    // bones of imported skeletons: no marker unless selected (finger tips would clutter hands)
-    let bones: std::collections::HashSet<&str> = scene
+    // joints that skinned meshes follow are not drawn as loose empties
+    let skin_joints: std::collections::HashSet<&str> = scene
         .entities
         .iter()
-        .filter_map(|e| match &e.kind {
-            EntityKind::Mesh { source: shotstage_core::MeshSource::Skinned { skin, .. }, .. } => Some(skin),
-            _ => None,
+        .flat_map(|e| match &e.kind {
+            EntityKind::Mesh { source: shotstage_core::MeshSource::Skinned { skin, .. }, .. } => skin.joints.as_slice(),
+            EntityKind::Mesh { source: shotstage_core::MeshSource::Human { joints, .. }, .. } => joints.as_slice(),
+            _ => &[],
         })
-        .flat_map(|skin| skin.joints.iter().map(String::as_str))
+        .map(String::as_str)
         .collect();
     for (index, e) in scene.entities.iter().enumerate() {
         if is_hidden(scene, &e.id) {
@@ -102,8 +130,18 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         let selected = selected_set.contains(&e.id);
         let hovered = !selected && hovered_set.contains(&e.id);
         match &e.kind {
-            EntityKind::Mesh { color, .. } => {
+            EntityKind::Mesh { color, material, source, .. } => {
                 let Ok(tri) = posed_tris(scene, &e.id, frame) else { continue };
+                let textured = material
+                    .as_ref()
+                    .and_then(|m| m.texture.as_ref().filter(|k| scene.assets.contains_key(*k)).map(|k| (m, k)));
+                // surface look for the shader (top four bits of the id)
+                let look: u32 = match source {
+                    MeshSource::Human { part: HumanPart::Skin, .. } => 1,
+                    MeshSource::Human { part: HumanPart::Hair, .. } => 2,
+                    MeshSource::Human { part: HumanPart::Eyes | HumanPart::Irises, .. } => 3,
+                    _ => 0,
+                };
                 let normal_m = world.inverse().transpose();
                 let c = if selected {
                     mix(*color, SELECT, 0.45)
@@ -112,6 +150,28 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                 } else {
                     *color
                 };
+                if let Some((mat, key)) = textured {
+                    let uvs = shotstage_core::uv::tri_uvs(&tri, mat);
+                    let vertices = tri
+                        .indices
+                        .iter()
+                        .zip(uvs)
+                        .map(|(&i, uv)| {
+                            let i = i as usize;
+                            TexVertex {
+                                pos: world.transform_point3(Vec3::from_array(tri.positions[i])).to_array(),
+                                normal: normal_m
+                                    .transform_vector3(Vec3::from_array(tri.normals[i]))
+                                    .normalize_or_zero()
+                                    .to_array(),
+                                uv,
+                                color: c,
+                            }
+                        })
+                        .collect();
+                    g.textured.push(TexBatch { asset: key.clone(), vertices });
+                    continue;
+                }
                 for &i in &tri.indices {
                     let i = i as usize;
                     g.triangles.push(Vertex {
@@ -121,7 +181,7 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                             .normalize_or_zero()
                             .to_array(),
                         color: c,
-                        id: index as u32 + 1,
+                        id: (index as u32 + 1) | look << 28,
                     });
                 }
             }
@@ -164,7 +224,7 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
             EntityKind::Empty
                 if overlay.cameras
                     && (overlay.selected.as_deref() == Some(e.id.as_str())
-                        || (scene.children(Some(&e.id)).next().is_none() && !bones.contains(e.id.as_str()))) =>
+                        || (scene.children(Some(&e.id)).next().is_none() && !skin_joints.contains(e.id.as_str()))) =>
             {
                 let c = if selected { SELECT } else { [0.8, 0.8, 0.8] };
                 for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
@@ -304,6 +364,7 @@ mod tests {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size: [1.0; 3] } },
                 modifiers: vec![],
                 color: [0.5; 3],
+                material: None,
             },
         })
         .unwrap();

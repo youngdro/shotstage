@@ -4,14 +4,18 @@
 //! logic runs in the web editor (wasm), the CLI and the headless MCP server.
 
 pub mod camera;
+pub mod csg;
 pub mod eval;
+pub mod human;
 pub mod image;
 pub mod light;
 pub mod mesh;
 pub mod meshcache;
+pub mod meshedit;
 pub mod scene;
 pub mod spatial;
 pub mod timeline;
+pub mod uv;
 
 pub use camera::{CameraData, Intrinsics};
 pub use eval::{EvaluatedEntity, EvaluatedScene, evaluate};
@@ -19,7 +23,7 @@ pub use image::{Asset, ImageData};
 pub use light::{LightData, LightKind};
 pub use mesh::{Mesh, MeshSource, Modifier, Primitive, Skin, TriMesh};
 pub use scene::{CameraReference, Entity, EntityKind, Scene, Transform};
-pub use timeline::{Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
+pub use timeline::{ExpressionMix, Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
 
 /// Errors produced by scene operations. Messages are written for agents as well as people.
 #[derive(Debug, thiserror::Error, PartialEq)]

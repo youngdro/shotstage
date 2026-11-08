@@ -61,6 +61,8 @@ impl Transform {
 }
 
 /// What an entity is.
+// (entities live in a Vec of whole entities; boxing a variant would only add a pointer hop)
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum EntityKind {
@@ -71,9 +73,12 @@ pub enum EntityKind {
         source: MeshSource,
         #[serde(default)]
         modifiers: Vec<Modifier>,
-        /// Display colour, linear RGB 0..1.
+        /// Display colour, linear RGB 0..1 (multiplies the texture when there is one).
         #[serde(default = "default_color")]
         color: [f32; 3],
+        /// Texture and how it is laid on (see `mesh.setMaterial`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        material: Option<crate::uv::Material>,
     },
     /// A shot camera.
     Camera(CameraData),

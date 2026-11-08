@@ -10,6 +10,7 @@
 //! the browser, the CLI and MCP.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use glam::{Mat4, Quat, Vec3};
@@ -94,7 +95,11 @@ enum UpAxis {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ImportParams {
-    format: ModelFormat,
+    /// glb, gltf, obj, stl, fbx or blend. Default: from the extension of `path`.
+    format: Option<ModelFormat>,
+    /// File on disk to read (CLI and MCP only; a browser passes `data`). An `.obj` picks up the
+    /// `.mtl` next to it.
+    path: Option<String>,
     /// File contents, base64.
     data: Option<String>,
     /// Or, for text files (`.gltf` with embedded buffers, `.obj`, ASCII `.stl`), the text.
@@ -130,7 +135,13 @@ struct Node {
 
 enum NodeKind {
     Empty,
-    Mesh { mesh: Mesh, color: [f32; 3], skin: Option<NodeSkin> },
+    /// `texture`: the file's image index and its bytes (PNG / JPEG / WebP).
+    Mesh {
+        mesh: Mesh,
+        color: [f32; 3],
+        skin: Option<NodeSkin>,
+        texture: Option<(usize, Arc<Vec<u8>>)>,
+    },
     Light(LightData),
 }
 
@@ -189,6 +200,8 @@ fn parse_gltf(bytes: &[u8]) -> CmdResult<Vec<Node>> {
     let mut stack: Vec<(gltf::Node, Option<usize>)> = scene.nodes().map(|n| (n, None)).collect();
     stack.reverse();
     let mut vertices = 0usize;
+    // image index -> its bytes (None: not a picture shotstage can draw)
+    let mut images: HashMap<usize, Option<Arc<Vec<u8>>>> = HashMap::new();
     while let Some((node, parent)) = stack.pop() {
         let (t, r, s) = node.transform().decomposed();
         let name = node.name().map(str::to_string).unwrap_or_else(|| format!("node_{}", node.index()));
@@ -225,8 +238,47 @@ fn parse_gltf(bytes: &[u8]) -> CmdResult<Vec<Node>> {
                 let faces = idx.as_chunks::<3>().0.iter().map(|t| t.to_vec()).collect();
                 let pbr = prim.material().pbr_metallic_roughness();
                 let f = pbr.base_color_factor();
-                // textures are not drawn: a textured white material shows as light clay
-                let color = if pbr.base_color_texture().is_some() && f[0] > 0.95 && f[1] > 0.95 && f[2] > 0.95 {
+                let info = pbr.base_color_texture();
+                let texture = info.as_ref().and_then(|t| {
+                    let img = t.texture().source();
+                    let i = img.index();
+                    if let Some(b) = images.get(&i) {
+                        return b.clone().map(|b| (i, b));
+                    }
+                    let bytes = match img.source() {
+                        gltf::image::Source::View { view, .. } => buffers
+                            .get(view.buffer().index())
+                            .and_then(|b| b.get(view.offset()..view.offset() + view.length()))
+                            .map(<[u8]>::to_vec),
+                        gltf::image::Source::Uri { uri, .. } => uri
+                            .strip_prefix("data:")
+                            .and_then(|r| decode(r.split_once(',').map(|(_, d)| d).unwrap_or(r)).ok()),
+                    }
+                    // only pictures shotstage can draw (not KTX2 / Basis)
+                    .filter(|b| image::guess_format(b).is_ok())
+                    .map(Arc::new);
+                    images.insert(i, bytes.clone());
+                    bytes.map(|b| (i, b))
+                });
+                let uvs: Vec<Vec<[f32; 2]>> =
+                    match (&texture, reader.read_tex_coords(info.as_ref().map_or(0, |t| t.tex_coord()))) {
+                        (Some(_), Some(tc)) => {
+                            let tc: Vec<[f32; 2]> = tc.into_f32().collect();
+                            if tc.len() == positions.len() {
+                                idx.as_chunks::<3>()
+                                    .0
+                                    .iter()
+                                    .map(|t| t.iter().map(|&v| tc[v as usize]).collect())
+                                    .collect()
+                            } else {
+                                vec![]
+                            }
+                        }
+                        _ => vec![],
+                    };
+                let uvs = if uvs.iter().flatten().all(|u| u[0].is_finite() && u[1].is_finite()) { uvs } else { vec![] };
+                // a texture that cannot be drawn: a textured white material shows as light clay
+                let color = if info.is_some() && texture.is_none() && f[0] > 0.95 && f[1] > 0.95 && f[2] > 0.95 {
                     [0.78, 0.76, 0.72]
                 } else {
                     clamp01([f[0], f[1], f[2]])
@@ -240,7 +292,7 @@ fn parse_gltf(bytes: &[u8]) -> CmdResult<Vec<Node>> {
                     }),
                     _ => None,
                 };
-                let kind = NodeKind::Mesh { mesh: Mesh { positions, faces }, color, skin };
+                let kind = NodeKind::Mesh { mesh: Mesh { positions, faces, uvs }, color, skin, texture };
                 let target = if prims.len() == 1 && matches!(nodes[me].kind, NodeKind::Empty) {
                     nodes[me].kind = kind;
                     me
@@ -377,7 +429,7 @@ fn parse_obj(text: &str, mtl: Option<&str>) -> CmdResult<Vec<Node>> {
             name,
             parent: None,
             transform: Transform::default(),
-            kind: NodeKind::Mesh { mesh: Mesh { positions, faces }, color, skin: None },
+            kind: NodeKind::Mesh { mesh: Mesh { positions, faces, uvs: Vec::new() }, color, skin: None, texture: None },
         });
     }
     Ok(nodes)
@@ -438,7 +490,12 @@ fn parse_stl(bytes: &[u8]) -> CmdResult<Vec<Node>> {
         name: "model".into(),
         parent: None,
         transform: Transform::default(),
-        kind: NodeKind::Mesh { mesh: Mesh { positions, faces }, color: [0.72, 0.70, 0.66], skin: None },
+        kind: NodeKind::Mesh {
+            mesh: Mesh { positions, faces, uvs: Vec::new() },
+            color: [0.72, 0.70, 0.66],
+            skin: None,
+            texture: None,
+        },
     }])
 }
 
@@ -455,20 +512,24 @@ fn sanitize(name: &str) -> String {
 }
 
 fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
+    if p.path.is_some() {
+        return Err(crate::host::needs_files("model.import", "path"));
+    }
+    let format = p.format.ok_or_else(|| bad("give `format` (glb, gltf, obj, stl, fbx or blend)"))?;
     let bytes = match (&p.data, &p.text) {
         (Some(d), None) => decode(d)?,
         (None, Some(t)) => t.as_bytes().to_vec(),
         _ => return Err(bad("give the file as `data` (base64) or `text`")),
     };
     let mut warnings: Vec<String> = vec![];
-    let mut nodes = match p.format {
+    let mut nodes = match format {
         ModelFormat::Glb | ModelFormat::Gltf => parse_gltf(&bytes)?,
         ModelFormat::Obj => {
             parse_obj(std::str::from_utf8(&bytes).map_err(|_| bad("the OBJ is not text"))?, p.mtl.as_deref())?
         }
         ModelFormat::Stl => parse_stl(&bytes)?,
         ModelFormat::Fbx | ModelFormat::Blend => {
-            let glb = blender_convert(&bytes, p.format.extension(), "glb")?;
+            let glb = blender_convert(&bytes, format.extension(), "glb")?;
             warnings.push("converted with the local Blender".into());
             parse_gltf(&glb)?
         }
@@ -477,8 +538,8 @@ fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
         return Err(bad("the file has nothing to import"));
     }
     // file axes and units -> scene (metres, +Y up)
-    let metric = matches!(p.format, ModelFormat::Glb | ModelFormat::Gltf | ModelFormat::Fbx | ModelFormat::Blend);
-    let up = p.up_axis.unwrap_or(if p.format == ModelFormat::Stl { UpAxis::Z } else { UpAxis::Y });
+    let metric = matches!(format, ModelFormat::Glb | ModelFormat::Gltf | ModelFormat::Fbx | ModelFormat::Blend);
+    let up = p.up_axis.unwrap_or(if format == ModelFormat::Stl { UpAxis::Z } else { UpAxis::Y });
     let z_up = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
     if up == UpAxis::Z {
         for n in nodes.iter_mut().filter(|n| n.parent.is_none()) {
@@ -550,12 +611,42 @@ fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
         ids.push(id);
     }
     let mut skins = 0;
+    let mut textures: HashMap<usize, Option<String>> = HashMap::new();
     for (i, n) in nodes.into_iter().enumerate() {
         let kind = match n.kind {
             NodeKind::Empty => EntityKind::Empty,
             NodeKind::Light(l) => EntityKind::Light(l),
-            NodeKind::Mesh { mesh, color, skin } => {
+            NodeKind::Mesh { mesh, color, skin, texture } => {
                 mesh.validate()?;
+                // the file's pictures become scene assets, one per image however many meshes use it
+                let material = match texture {
+                    Some((i, bytes)) => {
+                        let key = match textures.get(&i) {
+                            Some(k) => k.clone(),
+                            None => {
+                                let k = match crate::images::add_asset(scene, &bytes, &format!("{root}_tex{i}")) {
+                                    Ok((k, _)) => Some(k),
+                                    Err(e) => {
+                                        warnings.push(format!("texture {i} skipped: {}", e.message));
+                                        None
+                                    }
+                                };
+                                textures.insert(i, k.clone());
+                                k
+                            }
+                        };
+                        key.map(|k| shotstage_core::uv::Material {
+                            texture: Some(k),
+                            mapping: if mesh.has_uvs() {
+                                shotstage_core::uv::Mapping::Uv
+                            } else {
+                                shotstage_core::uv::Mapping::Box
+                            },
+                            ..Default::default()
+                        })
+                    }
+                    None => None,
+                };
                 let source = match skin {
                     Some(s) if !s.joints.is_empty() => {
                         let skin = Skin {
@@ -570,7 +661,7 @@ fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
                     }
                     _ => MeshSource::Data { mesh },
                 };
-                EntityKind::Mesh { source, modifiers: vec![], color }
+                EntityKind::Mesh { source, modifiers: vec![], color, material }
             }
         };
         scene.insert(Entity {
@@ -623,6 +714,9 @@ struct ExportParams {
     /// glb / gltf / fbx: include the animation (camera moves, object motion, poses) sampled at
     /// every frame of the timeline. Default: when the scene has keyframes.
     animation: Option<bool>,
+    /// Write the file here (CLI and MCP only); `format` defaults to its extension. Without it
+    /// the file comes back in the result (`data` base64, or `text`).
+    path: Option<String>,
 }
 
 struct Baked {
@@ -634,6 +728,9 @@ struct Baked {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
+    /// With a texture: one UV per position, and the picture's asset key.
+    uvs: Vec<[f32; 2]>,
+    texture: Option<String>,
 }
 
 /// Meshes posed at `frame`: in world space, or in each entity's own space when `local` (the
@@ -652,11 +749,50 @@ fn bake(scene: &Scene, ids: &Option<Vec<String>>, frame: f32, local: bool) -> Cm
     };
     let mut out = vec![];
     for e in &scene.entities {
-        let EntityKind::Mesh { color, .. } = &e.kind else { continue };
+        let EntityKind::Mesh { color, material, .. } = &e.kind else { continue };
         if wanted.as_ref().is_some_and(|w| !w.contains(&e.id)) || spatial::is_hidden(scene, &e.id) {
             continue;
         }
         let world = if local { Mat4::IDENTITY } else { world_at(scene, &e.id, frame)? };
+        let textured = material.as_ref().filter(|m| m.texture.as_ref().is_some_and(|k| scene.assets.contains_key(k)));
+        if let Some(mat) = textured {
+            // as drawn: the projection is worked out on the mesh in its own space, then every
+            // triangle corner gets its own vertex (UV seams)
+            let tri = shotstage_core::eval::posed_tris(scene, &e.id, frame)?;
+            if tri.indices.is_empty() {
+                continue;
+            }
+            let uvs = shotstage_core::uv::tri_uvs(&tri, mat);
+            let nm = world.inverse().transpose();
+            let flip = world.determinant() < 0.0;
+            let positions = tri
+                .indices
+                .iter()
+                .map(|&i| world.transform_point3(Vec3::from_array(tri.positions[i as usize])).to_array())
+                .collect();
+            let normals = tri
+                .indices
+                .iter()
+                .map(|&i| {
+                    nm.transform_vector3(Vec3::from_array(tri.normals[i as usize])).normalize_or_zero().to_array()
+                })
+                .collect();
+            let n = tri.indices.len() as u32;
+            let indices = (0..n / 3)
+                .flat_map(|t| if flip { [3 * t, 3 * t + 2, 3 * t + 1] } else { [3 * t, 3 * t + 1, 3 * t + 2] })
+                .collect();
+            out.push(Baked {
+                id: e.id.clone(),
+                name: e.name.clone(),
+                color: *color,
+                positions,
+                normals,
+                indices,
+                uvs,
+                texture: mat.texture.clone(),
+            });
+            continue;
+        }
         let tri = posed_mesh(scene, &e.id, frame)?.transformed(world).triangulate(false);
         if tri.indices.is_empty() {
             continue;
@@ -668,6 +804,8 @@ fn bake(scene: &Scene, ids: &Option<Vec<String>>, frame: f32, local: bool) -> Cm
             positions: tri.positions,
             normals: tri.normals,
             indices: tri.indices,
+            uvs: vec![],
+            texture: None,
         });
     }
     Ok(out)
@@ -689,6 +827,8 @@ fn build_gltf(
     let mut node_ids: Vec<Option<String>> = vec![];
     let mut bin: Vec<u8> = Vec::new();
     let (mut views, mut accessors, mut gmeshes, mut materials, mut nodes) = (vec![], vec![], vec![], vec![], vec![]);
+    // pictures, stored once each however many meshes use them
+    let (mut images, mut textures, mut texture_of) = (vec![], vec![], HashMap::<String, usize>::new());
     let mut push = |bin: &mut Vec<u8>, bytes: &[u8], target: u32| -> usize {
         while !bin.len().is_multiple_of(4) {
             bin.push(0);
@@ -720,8 +860,30 @@ fn build_gltf(
         accessors.push(json!({ "bufferView": vp, "componentType": 5126, "count": m.positions.len(), "type": "VEC3", "min": lo, "max": hi }));
         accessors.push(json!({ "bufferView": vn, "componentType": 5126, "count": m.normals.len(), "type": "VEC3" }));
         accessors.push(json!({ "bufferView": vi, "componentType": 5125, "count": m.indices.len(), "type": "SCALAR" }));
-        materials.push(json!({ "name": m.name, "pbrMetallicRoughness": { "baseColorFactor": [m.color[0], m.color[1], m.color[2], 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.8 } }));
-        gmeshes.push(json!({ "name": m.name, "primitives": [{ "attributes": { "POSITION": a, "NORMAL": a + 1 }, "indices": a + 2, "material": materials.len() - 1 }] }));
+        let mut attributes = json!({ "POSITION": a, "NORMAL": a + 1 });
+        let mut pbr = json!({ "baseColorFactor": [m.color[0], m.color[1], m.color[2], 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.8 });
+        if let Some(key) = &m.texture
+            && let Some(asset) = scene.assets.get(key)
+            && let Ok(pixels) = base64::engine::general_purpose::STANDARD.decode(asset.data.as_bytes())
+        {
+            let uv: Vec<u8> = m.uvs.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+            let vu = push(&mut bin, &uv, 34962);
+            accessors.push(json!({ "bufferView": vu, "componentType": 5126, "count": m.uvs.len(), "type": "VEC2" }));
+            attributes["TEXCOORD_0"] = json!(accessors.len() - 1);
+            let t = match texture_of.get(key) {
+                Some(t) => *t,
+                None => {
+                    let view = push(&mut bin, &pixels, 0);
+                    images.push(json!({ "name": key, "bufferView": view, "mimeType": asset.mime }));
+                    textures.push(json!({ "source": images.len() - 1, "sampler": 0 }));
+                    texture_of.insert(key.clone(), textures.len() - 1);
+                    textures.len() - 1
+                }
+            };
+            pbr["baseColorTexture"] = json!({ "index": t });
+        }
+        materials.push(json!({ "name": m.name, "pbrMetallicRoughness": pbr }));
+        gmeshes.push(json!({ "name": m.name, "primitives": [{ "attributes": attributes, "indices": a + 2, "material": materials.len() - 1 }] }));
         let mut node = json!({ "name": m.name, "mesh": gmeshes.len() - 1 });
         if anim.is_some()
             && let Ok(w) = world_at(scene, &m.id, frame)
@@ -837,6 +999,12 @@ fn build_gltf(
         "bufferViews": views,
         "buffers": [{ "byteLength": bin.len() }],
     });
+    if !images.is_empty() {
+        doc["images"] = json!(images);
+        doc["textures"] = json!(textures);
+        // repeat, smooth filtering with mipmaps
+        doc["samplers"] = json!([{ "magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497 }]);
+    }
     if !cameras.is_empty() {
         doc["cameras"] = json!(cameras);
     }
@@ -874,6 +1042,9 @@ fn glb(doc: &Value, bin: &[u8]) -> Vec<u8> {
 }
 
 fn export(scene: &mut Scene, p: ExportParams) -> CmdResult<Value> {
+    if p.path.is_some() {
+        return Err(crate::host::needs_files("model.export", "path"));
+    }
     let frame = frame_ok(p.frame.unwrap_or(scene.timeline.start as f32))?;
     let format = p.format.unwrap_or(ModelFormat::Glb);
     let animated = matches!(format, ModelFormat::Glb | ModelFormat::Gltf | ModelFormat::Fbx)
@@ -1001,6 +1172,34 @@ mod tests {
         // one undo removes the whole import
         s.dispatch("history.undo", json!({})).unwrap();
         assert!(!s.scene().contains("copy"));
+    }
+
+    #[test]
+    fn textures_survive_a_glb_round_trip() {
+        let mut s = crate::Session::default();
+        s.dispatch("entity.create", json!({"id": "can", "type": "mesh", "primitive": {"shape": "cylinder", "radius": 0.3, "height": 1, "segments": 12}}))
+            .unwrap();
+        let mut img = image::RgbaImage::new(4, 2);
+        img.put_pixel(0, 0, image::Rgba([200, 30, 30, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        s.dispatch(
+            "mesh.setMaterial",
+            json!({"id": "can", "textureData": encode(png.get_ref()), "mapping": "cylinder"}),
+        )
+        .unwrap();
+        let out = s.dispatch("model.export", json!({"format": "glb", "ids": ["can"]})).unwrap().result;
+        let data = out["data"].as_str().unwrap().to_string();
+        let nodes = parse_gltf(&decode(&data).unwrap()).unwrap();
+        let NodeKind::Mesh { mesh, texture, .. } = &nodes[0].kind else { panic!("not a mesh") };
+        assert!(mesh.has_uvs() && texture.is_some());
+        let before = s.scene().assets.len();
+        let r = s.dispatch("model.import", json!({"format": "glb", "data": data, "name": "copy"})).unwrap().result;
+        assert_eq!(s.scene().assets.len(), before + 1, "{r}");
+        let part = s.scene().entities.iter().find(|e| e.parent.as_deref() == r["id"].as_str()).unwrap().id.clone();
+        let d = s.dispatch("mesh.uvData", json!({"id": part})).unwrap().result;
+        assert_eq!(d["hasUvMap"], true);
+        assert_eq!(d["material"]["mapping"], "uv");
     }
 
     #[test]

@@ -9,8 +9,11 @@ pub mod arrange;
 pub mod blender;
 mod builtin;
 pub mod clipboard;
+pub mod host;
+pub mod humans;
 pub mod images;
 pub mod lights;
+pub mod meshedit;
 pub mod model;
 pub mod motion;
 pub mod people;
@@ -19,6 +22,7 @@ pub mod prefabs;
 pub mod rig;
 pub mod snapshot;
 pub mod templates;
+pub mod texture;
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -78,6 +82,10 @@ pub struct CommandInfo {
     pub mutates: bool,
     /// JSON Schema of the `params` object.
     pub params: Value,
+    /// Host commands only: what running it takes (`gpu`, `files`, `view`). Every entry point
+    /// (browser, CLI, MCP) lists the same catalog and runs these with what it has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
 }
 
 /// Parse `params` into a typed struct, mapping serde errors to `invalid_params`.
@@ -135,6 +143,11 @@ const SESSION_COMMANDS: &[(&str, &str, bool)] = &[
     ("history.undo", "Undo the last change (a batch undoes as one step).", true),
     ("history.redo", "Redo the last undone change.", true),
     ("history.info", "How many undo and redo steps are available.", false),
+    (
+        "history.discard",
+        "Undo the last change and forget it (no redo): for previews that are tried and thrown away.",
+        true,
+    ),
 ];
 
 /// An open document: the scene plus undo/redo history.
@@ -175,17 +188,23 @@ impl Session {
                 summary: summary.to_string(),
                 mutates: *mutates,
                 params: empty(),
+                needs: vec![],
             })
             .chain(self.commands.iter().map(|c| CommandInfo {
                 id: c.id.into(),
                 summary: c.summary.into(),
                 mutates: c.mutates,
                 params: (c.schema)(),
+                needs: vec![],
             }))
+            .chain(host::infos())
             .collect()
     }
 
     fn find(&self, id: &str) -> CmdResult<&Command> {
+        if host::is_host_command(id) {
+            return Err(host::unsupported(id));
+        }
         self.commands.iter().find(|c| c.id == id).ok_or_else(|| {
             CommandError::new("unknown_command", format!("no command `{id}`; call command.list for the catalog"))
         })
@@ -223,6 +242,13 @@ impl Session {
                 let cur = std::mem::replace(&mut self.scene, prev);
                 self.redo.push((label.clone(), cur));
                 return Ok(self.outcome(json!({ "undone": label }), true));
+            }
+            "history.discard" => {
+                let (label, prev) =
+                    self.undo.pop().ok_or_else(|| CommandError::new("nothing_to_undo", "nothing to undo"))?;
+                self.scene = prev;
+                self.last_merge = None;
+                return Ok(self.outcome(json!({ "discarded": label }), true));
             }
             "history.redo" => {
                 let (label, next) =

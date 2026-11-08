@@ -18,7 +18,7 @@ use shotstage_commands::{CommandError, Session};
 use wasm_bindgen::prelude::*;
 use web_sys::{Element, HtmlCanvasElement};
 
-use crate::hub::{self, EDITOR_COMMANDS, Hub, SharedHub};
+use crate::hub::{self, Hub, SharedHub};
 
 fn to_js(v: &Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).unwrap_or(JsValue::NULL)
@@ -138,7 +138,7 @@ impl Shotstage {
 
     /// Run `[{command, params}, ...]` as one transaction (one undo step, all or nothing).
     /// Add a detailed rigged person (see `person.catalog`), loading its file from `people/`
-    /// next to the page first: `await shotstage.addPerson("realisticWoman", {position: [1, 0, 0]})`.
+    /// next to the page first: `await shotstage.addPerson("stylizedWoman", {position: [1, 0, 0]})`.
     #[wasm_bindgen(js_name = addPerson)]
     pub fn add_person(&self, variant: String, params: JsValue) -> js_sys::Promise {
         let hub = self.hub.clone();
@@ -167,20 +167,10 @@ impl Shotstage {
         hub::dispatch(&self.hub, json!({ "batch": from_js(&steps)? })).map(|o| to_js(&o.result)).map_err(err_js)
     }
 
-    /// Every command with its parameter JSON Schema (document and editor commands).
+    /// Every command with its parameter JSON Schema: the same catalog as the CLI and the MCP
+    /// server. Host commands (`needs: ["gpu" | "files" | "view"]`) run through `call`.
     pub fn commands(&self) -> JsValue {
-        let mut list = serde_json::to_value(self.hub.borrow().session.list()).unwrap_or(json!([]));
-        if let Some(a) = list.as_array_mut() {
-            if let Some(snap) = a.iter_mut().find(|c| c["id"] == "render.snapshot") {
-                snap["summary"] = json!(
-                    "Render the view through a camera to a PNG. In the browser call `await editor.snapshot(params)`."
-                );
-            }
-            for (id, summary) in EDITOR_COMMANDS {
-                a.push(json!({ "id": id, "summary": summary, "mutates": false, "params": {"type": "object"} }));
-            }
-        }
-        to_js(&list)
+        to_js(&serde_json::to_value(self.hub.borrow().session.list()).unwrap_or(json!([])))
     }
 
     /// The scene document (save it and pass it back as `mount(el, {scene})` or `load`).
@@ -213,49 +203,42 @@ impl Shotstage {
     /// `{camera?, frame?, pass?: "clay"|"depth"|"normal", width?, height?}`). Resolves to
     /// `{mimeType, data (base64 PNG), dataUrl, width, height, camera, frame, pass}`.
     pub fn snapshot(&self, params: JsValue) -> js_sys::Promise {
+        match from_js(&params) {
+            Ok(Value::Null) => snapshot_promise(&self.hub, json!({})),
+            Ok(v) => snapshot_promise(&self.hub, v),
+            Err(e) => js_sys::Promise::reject(&e),
+        }
+    }
+
+    /// Run any command of the catalog and resolve to its result: the same commands, params and
+    /// results as the CLI and the MCP server. Document commands run at once; the host commands
+    /// that render many pictures (`render.storyboard`, `render.sequence`) and `render.snapshot`
+    /// resolve when the GPU is done. Rejects with an `Error` carrying `code`.
+    ///
+    /// ```js
+    /// const board = await editor.call("render.storyboard", { passes: ["clay", "depth"] });
+    /// open(URL.createObjectURL(new Blob([board.html], { type: "text/html" })));
+    /// ```
+    pub fn call(&self, command: String, params: JsValue) -> js_sys::Promise {
+        use shotstage_commands::host::{SEQUENCE_COMMAND, STORYBOARD_COMMAND};
         let params = match from_js(&params) {
             Ok(Value::Null) => json!({}),
             Ok(v) => v,
             Err(e) => return js_sys::Promise::reject(&e),
         };
-        let drawn = self.hub.borrow_mut().draw_snapshot(params);
-        let (plan, rs, rb) = match drawn {
-            Ok(x) => x,
-            Err(e) => return js_sys::Promise::reject(&err_js(e)),
-        };
-        let hub = self.hub.clone();
-        let mut rb = Some(rb);
-        hub.borrow_mut().pending_snapshots += 1;
-        if let Some(ctx) = &hub.borrow().repaint {
-            ctx.request_repaint();
+        match command.as_str() {
+            shotstage_commands::snapshot::SNAPSHOT_COMMAND => snapshot_promise(&self.hub, params),
+            STORYBOARD_COMMAND | SEQUENCE_COMMAND => {
+                let hub = self.hub.clone();
+                wasm_bindgen_futures::future_to_promise(async move {
+                    render_many(&hub, &command, params).await.map(|v| to_js(&v))
+                })
+            }
+            _ => match hub::dispatch(&self.hub, json!({ "command": command, "params": params })) {
+                Ok(o) => js_sys::Promise::resolve(&to_js(&o.result)),
+                Err(e) => js_sys::Promise::reject(&err_js(e)),
+            },
         }
-        js_sys::Promise::new(&mut |resolve, reject| {
-            let (hub, plan) = (hub.clone(), plan.clone());
-            let rb = rb.take().expect("promise executor runs once");
-            let buffer = rb.buffer.clone();
-            let rb2 = rb;
-            let cell = SingleThread((hub, plan, rb2, resolve.clone(), reject.clone()));
-            buffer.map_async(wgpu::MapMode::Read, .., move |r| {
-                let (hub, plan, rb2, resolve, reject) = cell.into_inner();
-                hub.borrow_mut().pending_snapshots -= 1;
-                let out = r.map_err(|e| e.to_string()).and_then(|_| {
-                    let rgba = rb2.rgba()?;
-                    shotstage_render::encode_png(&rgba, rb2.width, rb2.height)
-                });
-                match out {
-                    Ok(png) => {
-                        let b64 = shotstage_render::base64(&png);
-                        let mut v = shotstage_commands::snapshot::result_json(&plan, b64.clone());
-                        v["dataUrl"] = json!(format!("data:image/png;base64,{b64}"));
-                        let _ = resolve.call1(&JsValue::NULL, &to_js(&v));
-                    }
-                    Err(e) => {
-                        let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new(&format!("failed: {e}")).into());
-                    }
-                }
-            });
-            let _ = rs.device.poll(wgpu::PollType::Poll);
-        })
     }
 
     /// Stop the editor and remove its canvas from the container.
@@ -263,4 +246,81 @@ impl Shotstage {
         self.runner.destroy();
         self.canvas.remove();
     }
+}
+
+/// Render one snapshot; resolves to the `render.snapshot` result plus `dataUrl`.
+fn snapshot_promise(hub: &SharedHub, params: Value) -> js_sys::Promise {
+    let drawn = hub.borrow_mut().draw_snapshot(params);
+    let (plan, rs, rb) = match drawn {
+        Ok(x) => x,
+        Err(e) => return js_sys::Promise::reject(&err_js(e)),
+    };
+    let hub = hub.clone();
+    let mut rb = Some(rb);
+    hub.borrow_mut().pending_snapshots += 1;
+    if let Some(ctx) = &hub.borrow().repaint {
+        ctx.request_repaint();
+    }
+    js_sys::Promise::new(&mut |resolve, reject| {
+        let (hub, plan) = (hub.clone(), plan.clone());
+        let rb = rb.take().expect("promise executor runs once");
+        let buffer = rb.buffer.clone();
+        let rb2 = rb;
+        let cell = SingleThread((hub, plan, rb2, resolve.clone(), reject.clone()));
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            let (hub, plan, rb2, resolve, reject) = cell.into_inner();
+            hub.borrow_mut().pending_snapshots -= 1;
+            let out = r.map_err(|e| e.to_string()).and_then(|_| {
+                let rgba = rb2.rgba()?;
+                shotstage_render::encode_png(&rgba, rb2.width, rb2.height)
+            });
+            match out {
+                Ok(png) => {
+                    let b64 = shotstage_render::base64(&png);
+                    let mut v = shotstage_commands::snapshot::result_json(&plan, b64.clone());
+                    v["dataUrl"] = json!(format!("data:image/png;base64,{b64}"));
+                    let _ = resolve.call1(&JsValue::NULL, &to_js(&v));
+                }
+                Err(e) => {
+                    let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new(&format!("failed: {e}")).into());
+                }
+            }
+        });
+        let _ = rs.device.poll(wgpu::PollType::Poll);
+    })
+}
+
+/// One picture as PNG bytes.
+async fn render_png(hub: &SharedHub, params: Value) -> Result<Vec<u8>, JsValue> {
+    use base64::Engine as _;
+    let v = wasm_bindgen_futures::JsFuture::from(snapshot_promise(hub, params)).await?;
+    let v = from_js(&v)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(v["data"].as_str().unwrap_or_default())
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// `render.storyboard` / `render.sequence` in the browser: the shared plan, rendered picture by
+/// picture without blocking the page, finished by the shared code (data URLs, no files).
+async fn render_many(hub: &SharedHub, command: &str, params: Value) -> Result<Value, JsValue> {
+    use shotstage_commands::host::{self, STORYBOARD_COMMAND};
+    let scene = hub.borrow().session.scene().clone();
+    if command == STORYBOARD_COMMAND {
+        let plan = host::storyboard_plan(&scene, params).map_err(err_js)?;
+        if plan.out.is_some() {
+            return Err(err_js(host::needs_files(command, "out")));
+        }
+        let mut pngs = Vec::with_capacity(plan.pictures.len());
+        for p in &plan.pictures {
+            pngs.push(render_png(hub, p.snapshot.clone()).await?);
+        }
+        return host::finish_storyboard(plan, &pngs).map_err(err_js);
+    }
+    let plan = host::sequence_plan(&scene, params, 640).map_err(err_js)?;
+    let mut sink = host::SequenceSink::new(plan).map_err(err_js)?;
+    for (i, pass, snap) in sink.jobs() {
+        let png = render_png(hub, snap).await?;
+        sink.add(i, pass, &png).map_err(err_js)?;
+    }
+    sink.finish().map_err(err_js)
 }

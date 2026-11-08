@@ -12,7 +12,7 @@
 
 ## 从模板开始
 
-场景为空时视口中间会出现模板卡片，顶栏 **Templates** 里也能随时选：生鲜通道、产品拍摄台、白底产品图（主镜头环绕 + 细节推近）、俯拍平铺（flat lay）、双人访谈、街角、咖啡馆、空摄影棚。每个模板都包含人物、道具、灯光、相机、镜头和运镜，全部是普通的可编辑内容，选模板只算一步撤销。命令：`scene.template`、`scene.templates`。
+场景为空时视口中间会出现模板卡片，顶栏 **Templates** 里也能随时选：生鲜通道、产品拍摄台、白底产品图（主镜头环绕 + 细节推近）、俯拍平铺（flat lay）、双人访谈、街角、收银台、咖啡馆、空摄影棚。每个模板都包含人物、道具、灯光、相机、镜头和运镜，全部是普通的可编辑内容，选模板只算一步撤销。命令：`scene.template`、`scene.templates`。
 
 左侧素材都有实时渲染的缩略图。相机属性里可以一键切换画幅（16:9、9:16 竖屏、1:1、4:5、4:3、2.39:1），**Roll** 做荷兰角（倾斜地平线），**Match current view** 把相机放到你当前的视角，**Safe areas** 在镜头视角里显示动作 / 字幕安全框；选中物体时会显示它的尺寸。
 
@@ -66,18 +66,27 @@
 
 对应的命令是 `pose.set`（预设和/或关节角度）、`pose.aim`（让某段肢体指向一个点）、`person.lookAt`（转头看向相机或某处，人物面板里有 **Look at camera**）、`pose.get`、`pose.list`、`person.setHair`。
 
+### 真人模型
+
+**People** 分类里有真人模型：男人、女人、男孩、女孩、老年男性、老年女性、运动员、顾客、店员（系围裙）、收银员（制服 polo 衫）、熟食柜 / 厨师（白衣白围裙）、休闲装年轻人。它们基于 MakeHuman / MPFB 的人体（CC0 素材，见 `crates/core/assets/README.md`），是连续皮肤的真实人体，带 50 多根骨骼（脊柱三节、锁骨、每根手指三节）。
+
+- **Body**：性别、年龄、胖瘦、肌肉、身高滑块，人物原地变形，姿势保持不变。
+- **Clothes**：上衣（袖长可调，0 为背心）、裤子（裤长可调，短裤到长裤）、鞋子、围裙，各自可以换颜色，也能换肤色和瞳色。衣服沿着身体裁出干净的领口、袖口和裤脚。
+- **Hair**：短发、长发、波波头、马尾、丸子头、光头，长度和颜色可调。
+- **Face**：18 种表情（微笑、大笑、惊讶、难过、生气、思考、说话、闭眼、眨眼……），强度可调，也可以直接设置 34 个面部动作单元。表情可以打关键帧：动画模式下（或已有表情关键帧时）点表情就会在当前帧记一帧，两帧之间脸部平滑过渡；**◆ Key** 也会带上表情。人物动作“说话”会让嘴跟着动，“挥手”会微笑，新增的“大笑”动作会笑出声的样子。命令 `person.setExpression` 加 `keyframeAt`，或 `keyframe.set` 用 `property: "expression"`。
+- **Hands**：放松、张开、握拳、握持、捏取、指向、点赞、比耶、OK 等手势，可以只设左手或右手。
+- 姿势库多了 23 个日常 / 零售场景的姿势：叉腰、思考、试吃、喝东西、看手机、自拍、挑选商品、看高处货架、搬箱子、拎袋子、收银、切菜、靠柜台、讲解、耸肩、鼓掌、欢呼、伸懒腰、捂脸、鞠躬、单膝跪、席地而坐、背身走开。面板上先显示常用姿势，其余在 **More poses ▾** 里。积木人偶和真人共用同一套姿势与关节名。
+
+- 真人拿东西（**Hold in hand** / `entity.attach`）时，道具会贴在掌心，手指自动握住（小东西用捏的手势）。
+- 零售互动姿势：递东西、接东西、迎客、推荐商品、扫码收银、付款、装袋、上货、端详商品、排队等候。新增 **Checkout** 模板：收银员扫码聊天，顾客用手机付款。
+
+命令：`person.setBody`、`person.setOutfit`、`person.setExpression`、`person.expressions`、`pose.hand`、`person.get`。
+
 每一次拖动只算一步撤销，背后调用的是 `entity.place`、`entity.moveTo`、`entity.rotate`、`prefab.create`、`camera.frame` 这些命令，agent 可以用完全相同的方式操作。
 
-### 写实人物与风格化人物
+### 风格化人物
 
-素材面板里还有两组更精细的人物，都带完整骨骼（含手指），上面这些姿势、动作预设、拖关节、拿在手里、看向相机都能直接用：
-
-- **写实人物**：年轻女性、年轻男性、年长女性、年长男性。用 MakeHuman 的 Blender 插件 MPFB 生成，衣服、鞋、发型都来自官方 CC0 资源包。
-- **风格化人物**：四个造型（侧分发、寸头加胡子、长发、丸子头），来自 Quaternius 的 Universal Base Characters（CC0）。
-
-每个人物约 2 万个三角面，GLB 文件 0.6–0.9 MB。桌面版、命令行和 MCP 自带这些文件；网页版只在第一次用到某个人物时才通过 HTTP 加载 `people/<文件>.glb`（鼠标移到卡片上就开始预加载），不会增大 wasm。命令：`person.create`（`variant` 见 `person.catalog`）；网页里也可以 `await shotstage.addPerson("realisticWoman", {position: [1, 0, 0]})`。
-
-生成和转换脚本在 `tools/people/`，素材来源和许可见 `assets/LICENSES.md`。
+素材面板的 **风格化人物** 里有四个造型（侧分发、寸头加胡子、长发、丸子头），来自 Quaternius 的 Universal Base Characters（CC0），都带完整骨骼（含手指），姿势、动作预设、拖关节、拿在手里、看向相机都能直接用。每个约 2 万个三角面，GLB 文件 0.7–0.9 MB：桌面版、命令行和 MCP 自带；网页版第一次用到时才通过 HTTP 加载 `people/<文件>.glb`（鼠标移到卡片上就预加载），不会增大 wasm。命令：`person.create`（`variant` 见 `person.catalog`）；网页里也可以 `await shotstage.addPerson("stylizedWoman", {position: [1, 0, 0]})`。转换脚本在 `tools/people/`，许可见 `assets/LICENSES.md`。
 
 ## 导入导出模型
 
@@ -86,6 +95,29 @@
 - OBJ / STL 没有单位：默认按尺寸猜（大于 200 按毫米，大于 20 按厘米），可以用 `unit` 指定；STL 默认 Z 轴朝上。`fitHeight` 可以把模型缩放到指定高度。
 - **导出**：顶栏 **Export** 可以导出 GLB（含相机和灯光）、glTF、OBJ+MTL、STL，以及经 Blender 转换的 FBX。导出的是当前帧摆好的姿势。
 - 命令：`model.import`、`model.export`；CLI：`shotstage import chair.glb -s shot.json --fit-height 0.9`、`shotstage export set.fbx -s shot.json`。
+
+## 编辑网格（类 Blender 编辑模式）
+
+选中一个网格（道具里的某个部件、导入的模型、基础形体都行），按 **Tab** 或在右侧点 **✏ Edit mesh** 进入编辑模式，再按 Tab 或点 **Done** 回到物体模式。视口顶部的条可以切换点 / 边 / 面和 X 光。
+
+- **选择**：`1` / `2` / `3` 切换点、边、面；单击选中，Shift+单击加选或取消，Alt(Option)+单击选整条边环（面模式下是面环），Cmd/Ctrl+拖动框选，双击或 `L` 选鼠标下相连的整块，Ctrl+L 选和当前选择相连的部分，`A` 全选、Alt+A 全不选，Ctrl+= 扩大一圈。背面的元素默认不显示也选不到，打开 X-ray（Alt+Z）可以透视选择。
+- **移动**：直接拖选中的元素就能移动；也可以拖选区中心的红绿蓝箭头沿轴移动。`G` 移动、`R` 旋转、`S` 缩放跟随鼠标，按 `X` / `Y` / `Z` 锁定轴，直接输入数字给精确值，单击或回车确认，Esc 或右键取消。打开 Snap 时按网格步长吸附（按住 Ctrl 自由移动）。
+- **工具**：`E` 挤出（面沿法线，边向外），`I` 内插，Ctrl+B 倒角（滚轮加段数，变圆角），Ctrl+R 或 `C` 环切（浏览器里 Cmd+R 会刷新页面，所以 Mac 上用 Ctrl+R；鼠标悬停在边上预览，滚轮加刀数，单击切下），`F` 补面，`J` 连接两点切开面，`M` 合并顶点，`X` / Delete 删除。右侧面板里有同样的按钮，可以填精确数值，另有细分、翻转法线和 **Clean up**（合并重合顶点，修好导入时被拆开的网格）。
+- **更多工具**：连按两次 `G` 边滑移（选中的边沿相邻边滑动，可输入 -1~1 的比例）；`K` 刀切（在模型表面依次单击多个点，按 Enter 或再点一次最后一个点完成；刀口贴着看得见的表面走，只切到点与点之间，点落在面内时会在那里拐弯；先选了面就只切选中的面）；`O` 开关**衰减编辑**（G / R / S 时周围的顶点按距离渐弱地跟着动，移动中滚轮调范围，面板里可选衰减曲线）；移动（G 或拖动）时按住 Cmd/Ctrl 可**吸附到顶点**；面板里的 **Spin** 把选中的边或面绕物体原点的 X/Y/Z 轴旋转挤出（360° 自动接上）；**Bridge** 桥接两个边界环（选两个面会先删掉它们再连成通道，点数不同的环用三角面连）。
+- **布尔运算**：选中一个网格，在属性面板 **Boolean** 里选另一个网格和运算（差集 / 并集 / 交集），点 Apply。结果写回当前网格，另一个网格被隐藏（和 Blender 应用布尔修改器一样）。两个网格都应是封闭实体。
+- 每次操作都是一步撤销。基础形体第一次被编辑时会变成可编辑网格（尺寸滑块随之消失），修改器（镜像、阵列、细分）保持在上面实时生效；带骨骼的模型不能在这里改网格。
+
+所有工具都是普通命令，网页 JS、CLI 和 MCP 都能调用。元素用索引指定：`vertices: [3, 7]`、`edges: [[3, 7]]`、`faces: [0, 4]`，`mesh.editData` 返回顶点、面和边列表。每个工具都会返回 `selection`，也就是操作之后应该选中的元素（新索引），可以直接接着用：
+
+```json
+{"batch": [
+  {"command": "mesh.extrude", "params": {"id": "box_1", "faces": [4], "distance": 0.3}},
+  {"command": "mesh.inset", "params": {"id": "box_1", "faces": [4], "thickness": 0.05, "depth": -0.02}},
+  {"command": "mesh.loopCut", "params": {"id": "box_1", "edge": [0, 1], "cuts": 2}}
+]}
+```
+
+编辑器的编辑模式状态也开放给脚本：`editor.editMesh`（`{id, mode}` 进入，`{id: null}` 退出）、`editor.editSelect`（设置选择）、`editor.state` 会带上 `edit`。
 
 ## 图片
 
@@ -116,7 +148,7 @@
 - **一键动画（右侧 Animate）**，都从当前帧开始，生成普通的可编辑关键帧，一步撤销：
   - 运镜（选中相机，围绕最近选过的物体）：推 / 拉、推近、拉远揭示、横移、升降、摇、俯仰、左右环绕、摇臂升降、希区柯克变焦、变焦、甩镜、跟拍、手持晃动、无人机飞越、360° 环绕。
   - 物体：转台旋转、弹跳、悬浮、落入、滑入、弹出、摇摆、英雄登场，以及沿路径移动（`points`）。
-  - 人物：走路、挥手、捡东西、左右张望、点头、坐下、站起。
+  - 人物：走路、挥手、捡东西、左右张望、点头、大笑、坐下、站起。
   - 可以调时长和强度，也可以搜索。命令：`motion.apply`、`motion.list`，以及 `keyframe.move`、`keyframe.setInterp`。
 - **时间轴缩放**：在时间轴上双指捏合或 Cmd/Ctrl+滚轮放大（以指针处为中心），左右滑动平移；播放时会跟着播放头翻页；**Fit**（或双击时间尺）回到整条时间轴。
 - **整段调时间**：在时间轴上拖动一行关键帧之间的横条，整段动画一起平移；右键这一行可以 从播放头开始 / 变快 / 变慢。都是一步撤销。命令 `keyframe.retime`（`offset` 平移、`scale` 变速、`from`/`to` 限定范围）。
@@ -135,7 +167,7 @@
 | `crates/commands` | 命令注册表、JSON Schema、撤销/重做、原子批量、拖拽合并撤销 | 否 |
 | `crates/render` | wgpu 渲染器：粘土 / 深度 / 法线 pass，网格、相机视锥、拾取 | GPU |
 | `crates/app` | egui 编辑器；wasm 导出 `mount(container, options)` | GPU / 浏览器 |
-| `crates/cli` | `shotstage` 命令行：`run` / `batch` / `serve` / `mcp` | 否 |
+| `crates/cli` | `shotstage` 命令行：`run` / `batch` / `serve` / `mcp`，实时桥（`--live`） | 否（渲染时用 GPU） |
 
 ## 在网页里嵌入
 
@@ -167,27 +199,33 @@ editor.scene();                    // 场景文档（保存它，下次 mount �
 const sub = editor.on(ev => {});   // { type: "change" | "command", revision, request }
 editor.off(sub);
 const shot = await editor.snapshot({ pass: "depth", width: 1024 }); // 透过镜头截图：{ dataUrl, data(base64), width, height, ... }
+const board = await editor.call("render.storyboard", { passes: ["clay", "depth"] }); // 分镜：每个镜头首/中/尾帧 + 镜头描述 + 相机数据，图片是 data URL，board.html 是独立网页
+const seq = await editor.call("render.sequence", { start: 0, end: 47, passes: ["depth"] }); // 逐帧控制序列（统一深度范围）+ 每帧相机参数
 editor.destroy();                  // 停止渲染并移除 canvas
 ```
 
-失败时 `dispatch` 会抛出 `Error`，`error.code` 取值为 `invalid_params`、`unknown_command`、`failed`、`nothing_to_undo` 等。除了文档命令，网页实例还多了四个编辑器命令：`editor.select`、`editor.setFrame`、`editor.setView`（`pass: clay|depth|normal`、`lookThrough`）和 `editor.state`。
+`editor.call(command, params)` 能调用命令目录里的**任何**命令（包括要渲染的那几个），返回 Promise；`dispatch` 是它的同步版本，适合文档命令。失败时抛出 `Error`，`error.code` 取值为 `invalid_params`、`unknown_command`、`failed`、`unsupported`、`nothing_to_undo` 等。编辑器视图命令 `editor.select`、`editor.setFrame`、`editor.setView`、`editor.state` 也在同一张命令表里，CLI 和 MCP 也能用。
 
 浏览器有 WebGPU 时用 WebGPU，没有时自动回退到 WebGL2（已在 SwiftShader WebGL2 下验证）。
 
 ## 命令行与 MCP
+
+**一张命令表，三个入口**：网页 JS、CLI、MCP 调用的是同一张命令表，参数（JSON Schema）和返回值完全一样。完整参考见 [docs/api.md](docs/api.md)（由 `shotstage commands --markdown` 从命令表生成）。需要场景以外资源的「宿主命令」也在表里，并标明需要什么：`gpu`（渲染）、`files`（读写文件）、`view`（编辑器的选中和播放头）；每个入口都实现了全部宿主命令，测试会检查没有遗漏。
 
 ```sh
 cargo build --release -p shotstage-cli
 shotstage commands --brief                       # 命令目录
 shotstage commands                               # 带 JSON Schema 的完整目录
 shotstage run entity.create '{"type":"mesh","primitive":{"shape":"sphere","radius":0.5,"segments":24,"rings":12}}' -s shot.json
+shotstage run model.import '{"path":"chair.glb","fitHeight":0.9}' -s shot.json   # 有文件系统的入口可以直接给路径
+shotstage run render.storyboard '{"out":"board","passes":["clay","depth"]}' -s shot.json
 shotstage batch steps.json -s shot.json          # [{"command": ..., "params": ...}, ...]
 shotstage serve -s shot.json                     # 常驻会话：stdin/stdout 每行一个 JSON 请求
 shotstage mcp -s shot.json                       # MCP（stdio），改动自动写回 shot.json
 shotstage snapshot -s shot.json -o frame.png --pass depth   # 透过镜头渲染 PNG（需要 GPU 或软件 Vulkan，如 lavapipe）
 ```
 
-`serve` 的每行请求格式为 `{"id": 1, "command": "...", "params": {...}}` 或 `{"id": 2, "batch": [...]}`，回复会带回同一个 `id`。
+`snapshot`、`storyboard`、`render`、`import`、`export` 这些子命令只是 `render.snapshot`、`render.storyboard`、`render.sequence`、`model.import`、`model.export` 的快捷写法。`serve` 的每行请求格式为 `{"id": 1, "command": "...", "params": {...}}` 或 `{"id": 2, "batch": [...]}`，回复会带回同一个 `id`；`serve` 和 `mcp` 里的 `editor.select` / `editor.setFrame` 作用于会话自己的视图，比如设了播放头之后 `render.snapshot` 默认渲染那一帧。
 
 接到 Claude Code：
 
@@ -195,32 +233,62 @@ shotstage snapshot -s shot.json -o frame.png --pass depth   # 透过镜头渲染
 claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json
 ```
 
-MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch`、`scene_save` 四个通用工具。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图。
+MCP 服务把每条命令都发布成一个工具（`entity.create` 对应 `entity_create`，入参就是该命令的 JSON Schema），另外提供 `command_list`、`command_run`、`command_batch` 三个通用工具；工具预算紧的客户端可以加 `--compact`，只发布通用工具和几个常用工具，其余照样能用 `command_run` 调。`render_snapshot` 以 MCP 图片内容返回，模型可以直接看到画面，再根据画面修正构图；`render_storyboard` 把分镜写到场景文件旁边的 `<场景>.storyboard/` 文件夹，同时把各镜头的画面作为图片返回。
+
+### 端到端示例
+
+[examples/fresh-produce-ad.json](examples/fresh-produce-ad.json) 是一串 MCP 工具调用，和 Claude 实际会做的一样：从空场景搭一个生鲜货架、放一位挑水果的顾客（手里挎着篮子）、布光、用景别给两台相机构图、加推镜、切两个镜头，再截图检查、出分镜。用 [examples/run-mcp-example.py](examples/run-mcp-example.py) 回放（只用 Python 标准库）：
+
+```sh
+cargo build -p shotstage-cli
+python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --scene /tmp/ad.shotstage.json
+python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --live    # 在浏览器里看着它搭
+```
+
+### 实时桥：让 Claude 直接操作你打开的编辑器
+
+```sh
+./scripts/build-web.sh
+claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json --live --web /path/to/shotstage/dist
+```
+
+`--live` 让 MCP 服务在 `127.0.0.1:7777`（`--port` 可改）开一个桥，并用 `--web` 指定的网页包提供编辑器。在浏览器里打开 http://127.0.0.1:7777/ ，页面会自己连上（右上角显示「agent connected」）。之后 Claude 的每个操作都在这个页面里执行：你能看着场景一步步搭起来，改动进同一个撤销历史，截图和分镜也由浏览器渲染（服务器不需要 GPU）。工具 `bridge_status` 告诉 Claude 有没有连上、该打开哪个地址。
+
+- 页面里本来有场景时，以页面为准；页面是空的，就把 Claude 手上的场景带过去。
+- 浏览器关掉或断开后，命令自动回到本地副本继续执行（每次改动后都同步过），场景仍会写回 `--scene` 文件；再打开页面会重新连上。
+- 自己的页面也能接：`import { connectBridge } from "./bridge.js"; connectBridge(editor, "ws://127.0.0.1:7777/bridge")`，或者在地址后加 `?bridge=ws://127.0.0.1:7777/bridge`。只接受 localhost 页面连接，其他来源用 `--allow-origin https://你的域名` 放行。
+- `shotstage serve --live` 同样可用，适合用脚本驱动浏览器里的编辑器。
 
 ## 命令目录
+
+完整的参数说明见 [docs/api.md](docs/api.md)。
 
 | 分组 | 命令 |
 | --- | --- |
 | 会话 | `command.list` `history.undo` `history.redo` `history.info` |
 | 模板 | `scene.template` `scene.templates` |
-| 场景 | `scene.inspect` `scene.summary` `scene.new` `scene.load` `scene.evaluate` `scene.raycast` |
+| 场景 | `scene.inspect` `scene.summary` `scene.new` `scene.load` `scene.evaluate` `scene.raycast` `scene.save` `scene.open` |
 | 编组排列 | `entity.group` `entity.ungroup` `entity.align` `entity.distribute` |
-| 积木摆放 | `prefab.create`（`size` 拉伸到指定尺寸） `prefab.list` `entity.place`（`ray` 落到射线击中处 / `on` 放到某物顶上 / `nextTo`+`side`(+`view` 按镜头左右) 并排 / 不带参数时落到正下方）`entity.moveTo` `entity.rotate` `entity.face` `entity.bounds` |
+| 积木摆放 | `prefab.create`（`size` 拉伸到指定尺寸） `prefab.list` `entity.place`（`ray` 落到射线击中处 / `on` 放到某物顶上 / `nextTo`+`side`(+`view` 按镜头左右) 并排 / 不带参数时落到正下方）`entity.moveTo` `entity.rotate` `entity.face` `entity.bounds` `entity.attach` |
 | 实体 | `entity.create` `entity.delete` `entity.duplicate`（连同子物体） `entity.rename` `entity.get` `entity.setTransform` `entity.translate` `entity.setParent` `entity.setVisible` `entity.setLocked` |
 | 网格 | `mesh.setPrimitive` `mesh.setData` `mesh.setColor` `mesh.addModifier` `mesh.removeModifier` `mesh.applyModifiers` `mesh.join` `mesh.setOriginToCenter` `mesh.stats` `mesh.exportObj` |
+| 网格编辑 | `mesh.editData` `mesh.makeEditable` `mesh.select`（loop / ring / faceLoop / linked / more / all） `mesh.transformElements` `mesh.extrude` `mesh.inset` `mesh.bevel` `mesh.loopCut` `mesh.subdivideFaces` `mesh.connect` `mesh.merge` `mesh.mergeByDistance` `mesh.fill` `mesh.flipNormals` `mesh.deleteElements` `mesh.bridge` `mesh.edgeSlide` `mesh.bisect`（平面切割，可删除一侧） `mesh.knife`（沿表面点路径切） `mesh.spin`（旋转挤出） `mesh.transformElements` 的 `proportional` 参数（衰减编辑） `mesh.boolean`（union / difference / intersect） |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
-| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `person.setHair` `person.lookAt` `person.create` `person.catalog` |
-| 模型 | `model.import` `model.export` |
+| 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `pose.hand` `person.setHair` `person.setBody` `person.setOutfit` `person.setExpression` `person.expressions` `person.get` `person.create` `person.catalog` |
+| 模型 | `model.import` `model.export`（都可以用 `path`） |
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
-| 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG；由编辑器、CLI、MCP 执行） |
+| 渲染 | `render.snapshot`（clay / depth / normal，返回 PNG） `render.storyboard`（分镜） `render.sequence`（逐帧序列 + 相机数据，可出 MP4） |
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.cut` `shot.set` `shot.delete` |
 | 复制粘贴 | `entity.copy` `entity.paste` |
+| 编辑器视图 | `editor.select` `editor.setFrame` `editor.setView` `editor.state` `editor.editMesh` `editor.editSelect` |
 
 约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。
 
 参数一律当作不可信输入处理：缺字段、类型错误、越界或未知字段都会返回错误，场景保持不变。
+
+**新增命令时**：在 `crates/commands` 里注册，三个入口自动就有；然后运行 `cargo run -p shotstage-cli -- commands --markdown > docs/api.md` 更新参考文档。
 
 ## 开发
 
@@ -236,7 +304,7 @@ cargo run -p shotstage-app [scene.json]          # 原生编辑器
 - **M1 场景编辑**：glTF/GLB 导入（可以把 Blender 里做的模型带进来）、按名字引用物体、防穿插、IK 摆姿势、更多网格命令
 - **M2 镜头与时间线**：时间线 UI（关键帧拖拽、曲线）、相机支架（轨道 / 摇臂）、更多命名运镜
 - **M3 导出**：离屏逐帧渲染，导出首尾帧、mp4、深度 / 法线 / OpenPose / ID 序列，以及导出包
-- **M4 Agent**：`render_frame` 返回图片、MCP 实时桥（agent 驱动用户打开的网页编辑器）、权限分级
+- **M4 Agent**：~~`render_snapshot` 返回图片~~、~~MCP 实时桥（agent 驱动用户打开的网页编辑器）~~（已完成）；权限分级
 - **二期网格编辑**：点 / 边 / 面编辑模式，挤出、倒角、循环切割、布尔运算、减面
 
 ## License

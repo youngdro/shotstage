@@ -437,6 +437,482 @@ pub const POSES: &[Pose] = &[
             ("neck", [12.0, 0.0, 0.0]),
         ],
     },
+    Pose {
+        name: "relaxed",
+        description: "Weight on one leg, hip shifted (contrapposto)",
+        pelvis_drop: 0.01,
+        joints: &[
+            ("pelvis", [0.0, 0.0, 4.0]),
+            ("spine", [0.0, 0.0, -5.0]),
+            ("hip_l", [0.0, 0.0, -4.0]),
+            ("hip_r", [-8.0, 0.0, 2.0]),
+            ("knee_r", [16.0, 0.0, 0.0]),
+            ("shoulder_l", [3.0, 0.0, 8.0]),
+            ("shoulder_r", [-3.0, 0.0, -7.0]),
+            ("elbow_l", [-10.0, 0.0, 0.0]),
+            ("elbow_r", [-14.0, 0.0, 0.0]),
+            ("head", [0.0, 0.0, 4.0]),
+        ],
+    },
+    Pose {
+        name: "handsOnHips",
+        description: "Hands on the hips, elbows out (confident)",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [8.0, 0.0, 48.0]),
+            ("shoulder_r", [8.0, 0.0, -48.0]),
+            ("elbow_l", [0.0, 0.0, -100.0]),
+            ("elbow_r", [0.0, 0.0, 100.0]),
+        ],
+    },
+    Pose {
+        name: "thinking",
+        description: "Hand on the chin, the other arm across the waist",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_r", [-35.0, 0.0, -8.0]),
+            ("elbow_r", [-140.0, 30.0, 0.0]),
+            ("shoulder_l", [-15.0, 0.0, 8.0]),
+            ("elbow_l", [-90.0, -75.0, 0.0]),
+            ("head", [8.0, 0.0, -6.0]),
+        ],
+    },
+    Pose {
+        name: "taste",
+        description: "Bringing food or a sample to the mouth",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_r", [-40.0, 0.0, -18.0]),
+            ("elbow_r", [-135.0, 40.0, 0.0]),
+            ("shoulder_l", [0.0, 0.0, 6.0]),
+            ("elbow_l", [-10.0, 0.0, 0.0]),
+            ("head", [6.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "drink",
+        description: "Drinking from a cup or bottle",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_r", [-50.0, 0.0, -15.0]),
+            ("elbow_r", [-125.0, 45.0, 0.0]),
+            ("shoulder_l", [0.0, 0.0, 6.0]),
+            ("neck", [-10.0, 0.0, 0.0]),
+            ("head", [-12.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "checkPhone",
+        description: "Looking down at a phone held in both hands",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-20.0, 0.0, 6.0]),
+            ("shoulder_r", [-20.0, 0.0, -6.0]),
+            ("elbow_l", [-85.0, -30.0, 0.0]),
+            ("elbow_r", [-85.0, 30.0, 0.0]),
+            ("neck", [22.0, 0.0, 0.0]),
+            ("head", [15.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "selfie",
+        description: "Taking a selfie with the right hand",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_r", [-115.0, 0.0, -30.0]),
+            ("elbow_r", [-35.0, 0.0, 0.0]),
+            ("shoulder_l", [0.0, 0.0, 6.0]),
+            ("neck", [-6.0, -10.0, 0.0]),
+            ("head", [-8.0, -12.0, 4.0]),
+        ],
+    },
+    Pose {
+        name: "browse",
+        description: "Reaching for a product on a shelf at chest height",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [6.0, -10.0, 0.0]),
+            ("shoulder_r", [-75.0, 0.0, -10.0]),
+            ("elbow_r", [-25.0, 0.0, 0.0]),
+            ("shoulder_l", [0.0, 0.0, 6.0]),
+            ("head", [5.0, -10.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "lookUpShelf",
+        description: "Standing back, looking up at a high shelf",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("neck", [-18.0, 10.0, 0.0]),
+            ("head", [-15.0, 10.0, 0.0]),
+            ("shoulder_l", [0.0, 0.0, 6.0]),
+            ("shoulder_r", [-10.0, 0.0, -10.0]),
+            ("elbow_r", [-80.0, 50.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "carryBox",
+        description: "Carrying a box or crate in front with both arms",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [-6.0, 0.0, 0.0]),
+            ("shoulder_l", [-40.0, 0.0, 14.0]),
+            ("shoulder_r", [-40.0, 0.0, -14.0]),
+            ("elbow_l", [-70.0, 0.0, 0.0]),
+            ("elbow_r", [-70.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "carryBag",
+        description: "Carrying a shopping bag in the right hand",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [0.0, 0.0, 4.0]),
+            ("shoulder_r", [0.0, 0.0, -12.0]),
+            ("elbow_r", [-4.0, 0.0, 0.0]),
+            ("shoulder_l", [6.0, 0.0, 8.0]),
+            ("elbow_l", [-15.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "cashier",
+        description: "At a checkout, scanning an item with the right hand",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [8.0, -15.0, 0.0]),
+            ("shoulder_r", [-45.0, 0.0, -25.0]),
+            ("elbow_r", [-65.0, 20.0, 0.0]),
+            ("shoulder_l", [-30.0, 0.0, 10.0]),
+            ("elbow_l", [-60.0, 0.0, 0.0]),
+            ("neck", [15.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "chop",
+        description: "Working at a counter: both hands forward, looking down (chopping, packing)",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [10.0, 0.0, 0.0]),
+            ("shoulder_l", [-25.0, 0.0, 10.0]),
+            ("shoulder_r", [-25.0, 0.0, -10.0]),
+            ("elbow_l", [-75.0, -20.0, 0.0]),
+            ("elbow_r", [-75.0, 20.0, 0.0]),
+            ("neck", [20.0, 0.0, 0.0]),
+            ("head", [10.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "leanCounter",
+        description: "Leaning forward on a counter on the forearms",
+        pelvis_drop: 0.02,
+        joints: &[
+            ("spine", [30.0, 0.0, 0.0]),
+            ("neck", [-20.0, 0.0, 0.0]),
+            ("shoulder_l", [-55.0, 0.0, 12.0]),
+            ("shoulder_r", [-55.0, 0.0, -12.0]),
+            ("elbow_l", [-65.0, -15.0, 0.0]),
+            ("elbow_r", [-65.0, 15.0, 0.0]),
+            ("hip_l", [-6.0, 0.0, 0.0]),
+            ("hip_r", [4.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "explain",
+        description: "Talking with open hands, explaining",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-25.0, 0.0, 14.0]),
+            ("shoulder_r", [-30.0, 0.0, -14.0]),
+            ("elbow_l", [-70.0, 40.0, 0.0]),
+            ("elbow_r", [-75.0, -40.0, 0.0]),
+            ("head", [0.0, 8.0, 3.0]),
+        ],
+    },
+    Pose {
+        name: "shrug",
+        description: "Shrugging, palms up",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-10.0, 0.0, 18.0]),
+            ("shoulder_r", [-10.0, 0.0, -18.0]),
+            ("elbow_l", [-85.0, 60.0, 0.0]),
+            ("elbow_r", [-85.0, -60.0, 0.0]),
+            ("head", [0.0, 0.0, 10.0]),
+        ],
+    },
+    Pose {
+        name: "clap",
+        description: "Clapping hands in front of the chest",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-35.0, 0.0, 10.0]),
+            ("shoulder_r", [-35.0, 0.0, -10.0]),
+            ("elbow_l", [-85.0, -50.0, 0.0]),
+            ("elbow_r", [-85.0, 50.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "cheer",
+        description: "Both arms up, celebrating",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-10.0, 0.0, 150.0]),
+            ("shoulder_r", [-10.0, 0.0, -150.0]),
+            ("elbow_l", [0.0, 0.0, 20.0]),
+            ("elbow_r", [0.0, 0.0, -20.0]),
+            ("head", [-10.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "stretch",
+        description: "Stretching both arms overhead",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [-5.0, 0.0, 0.0]),
+            ("shoulder_l", [-175.0, 0.0, 8.0]),
+            ("shoulder_r", [-175.0, 0.0, -8.0]),
+            ("head", [-10.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "facepalm",
+        description: "Hand over the face (oops, frustration)",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_r", [-45.0, 0.0, -10.0]),
+            ("elbow_r", [-145.0, 30.0, 0.0]),
+            ("shoulder_l", [0.0, 0.0, 6.0]),
+            ("neck", [15.0, 0.0, 0.0]),
+            ("head", [12.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "bow",
+        description: "Bowing politely",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [35.0, 0.0, 0.0]),
+            ("neck", [10.0, 0.0, 0.0]),
+            ("shoulder_l", [-10.0, 0.0, 4.0]),
+            ("shoulder_r", [-10.0, 0.0, -4.0]),
+            ("hip_l", [-10.0, 0.0, 0.0]),
+            ("hip_r", [-10.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "kneel",
+        description: "Kneeling on the right knee (to a low shelf, to a child)",
+        pelvis_drop: 0.42,
+        joints: &[
+            ("hip_l", [-85.0, 0.0, 4.0]),
+            ("knee_l", [85.0, 0.0, 0.0]),
+            ("hip_r", [5.0, 0.0, -4.0]),
+            ("knee_r", [95.0, 0.0, 0.0]),
+            ("ankle_r", [40.0, 0.0, 0.0]),
+            ("shoulder_l", [-20.0, 0.0, 6.0]),
+            ("elbow_l", [-40.0, 0.0, 0.0]),
+            ("shoulder_r", [0.0, 0.0, -6.0]),
+        ],
+    },
+    Pose {
+        name: "sitFloor",
+        description: "Sitting on the floor, legs out, leaning on the hands",
+        pelvis_drop: 0.84,
+        joints: &[
+            ("spine", [-12.0, 0.0, 0.0]),
+            ("neck", [12.0, 0.0, 0.0]),
+            ("hip_l", [-88.0, 0.0, 5.0]),
+            ("hip_r", [-88.0, 0.0, -5.0]),
+            ("knee_l", [4.0, 0.0, 0.0]),
+            ("knee_r", [12.0, 0.0, 0.0]),
+            ("ankle_l", [-20.0, 0.0, 0.0]),
+            ("ankle_r", [-20.0, 0.0, 0.0]),
+            ("shoulder_l", [30.0, 0.0, 16.0]),
+            ("shoulder_r", [30.0, 0.0, -16.0]),
+        ],
+    },
+    Pose {
+        name: "walkAway",
+        description: "Mid-stride, right leg forward (the other half of the walk cycle)",
+        pelvis_drop: 0.02,
+        joints: &[
+            ("hip_r", [-24.0, 0.0, 0.0]),
+            ("knee_r", [8.0, 0.0, 0.0]),
+            ("hip_l", [16.0, 0.0, 0.0]),
+            ("knee_l", [28.0, 0.0, 0.0]),
+            ("ankle_l", [-12.0, 0.0, 0.0]),
+            ("shoulder_r", [18.0, 0.0, -6.0]),
+            ("shoulder_l", [-20.0, 0.0, 6.0]),
+            ("elbow_r", [-12.0, 0.0, 0.0]),
+            ("elbow_l", [-25.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "handOver",
+        description: "Handing something over with both hands at chest height",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [6.0, 0.0, 0.0]),
+            ("shoulder_l", [-55.0, 0.0, 2.0]),
+            ("shoulder_r", [-55.0, 0.0, -2.0]),
+            ("elbow_l", [-35.0, -20.0, 0.0]),
+            ("elbow_r", [-35.0, 20.0, 0.0]),
+            ("head", [10.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "receive",
+        description: "Reaching out to take something, palms up",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [4.0, 0.0, 0.0]),
+            ("shoulder_l", [-50.0, 0.0, 6.0]),
+            ("shoulder_r", [-50.0, 0.0, -6.0]),
+            ("elbow_l", [-35.0, -10.0, 0.0]),
+            ("elbow_r", [-35.0, 10.0, 0.0]),
+            ("head", [10.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "welcome",
+        description: "Greeting a customer: open hand out, a slight bow",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [8.0, 0.0, 0.0]),
+            ("shoulder_r", [-40.0, 0.0, -20.0]),
+            ("elbow_r", [-70.0, -10.0, 0.0]),
+            ("shoulder_l", [5.0, 0.0, 4.0]),
+            ("head", [6.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "recommend",
+        description: "Showing a product to the side with an open hand",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-35.0, 0.0, 45.0]),
+            ("elbow_l", [-25.0, 30.0, 0.0]),
+            ("neck", [0.0, 10.0, 0.0]),
+            ("head", [0.0, 18.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "scan",
+        description: "Cashier scanning an item over the counter",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [10.0, 0.0, 0.0]),
+            ("chest", [4.0, 0.0, 0.0]),
+            ("shoulder_r", [-45.0, 0.0, -12.0]),
+            ("elbow_r", [-50.0, 20.0, 0.0]),
+            ("shoulder_l", [-35.0, 0.0, 12.0]),
+            ("elbow_l", [-70.0, -30.0, 0.0]),
+            ("head", [22.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "pay",
+        description: "Paying: holding a phone or card out to the reader",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [3.0, 0.0, 0.0]),
+            ("shoulder_r", [-55.0, 0.0, -5.0]),
+            ("elbow_r", [-35.0, 20.0, 0.0]),
+            ("head", [12.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "bagItems",
+        description: "Packing items into a bag on the counter",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("spine", [22.0, 0.0, 0.0]),
+            ("chest", [6.0, 0.0, 0.0]),
+            ("shoulder_l", [-50.0, 0.0, 10.0]),
+            ("shoulder_r", [-50.0, 0.0, -10.0]),
+            ("elbow_l", [-30.0, -20.0, 0.0]),
+            ("elbow_r", [-30.0, 20.0, 0.0]),
+            ("head", [18.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "restock",
+        description: "Placing a product on a shelf at shoulder height",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_r", [-85.0, 0.0, -8.0]),
+            ("elbow_r", [-25.0, 10.0, 0.0]),
+            ("shoulder_l", [-25.0, 0.0, 10.0]),
+            ("elbow_l", [-60.0, -20.0, 0.0]),
+            ("head", [-6.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "inspect",
+        description: "Holding produce up in both hands to look at it",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-22.0, 0.0, 8.0]),
+            ("shoulder_r", [-22.0, 0.0, -8.0]),
+            ("elbow_l", [-80.0, -35.0, 0.0]),
+            ("elbow_r", [-80.0, 35.0, 0.0]),
+            ("head", [20.0, 0.0, 0.0]),
+        ],
+    },
+    Pose {
+        name: "waitInLine",
+        description: "Waiting with hands clasped in front",
+        pelvis_drop: 0.0,
+        joints: &[
+            ("shoulder_l", [-8.0, 0.0, 4.0]),
+            ("shoulder_r", [-8.0, 0.0, -4.0]),
+            ("elbow_l", [-45.0, -50.0, 0.0]),
+            ("elbow_r", [-45.0, 50.0, 0.0]),
+        ],
+    },
+];
+
+/// Hand shape that goes with a named pose on realistic people (others: relaxed).
+pub const POSE_HANDS: &[(&str, &str)] = &[
+    ("tPose", "open"),
+    ("run", "fist"),
+    ("wave", "spread"),
+    ("point", "point"),
+    ("reach", "grip"),
+    ("pickUp", "claw"),
+    ("holdBasket", "grip"),
+    ("pushCart", "grip"),
+    ("phone", "grip"),
+    ("present", "open"),
+    ("relaxed", "relaxed"),
+    ("handsOnHips", "open"),
+    ("thinking", "relaxed"),
+    ("taste", "pinch"),
+    ("drink", "grip"),
+    ("checkPhone", "grip"),
+    ("selfie", "grip"),
+    ("browse", "grip"),
+    ("carryBox", "grip"),
+    ("carryBag", "grip"),
+    ("cashier", "grip"),
+    ("chop", "grip"),
+    ("explain", "open"),
+    ("shrug", "open"),
+    ("clap", "open"),
+    ("cheer", "fist"),
+    ("stretch", "spread"),
+    ("facepalm", "open"),
+    ("sitFloor", "open"),
+    ("handOver", "grip"),
+    ("receive", "open"),
+    ("welcome", "open"),
+    ("recommend", "open"),
+    ("scan", "grip"),
+    ("pay", "grip"),
+    ("bagItems", "grip"),
+    ("restock", "grip"),
+    ("inspect", "grip"),
+    ("waitInLine", "relaxed"),
 ];
 
 /// The root of the group `id` belongs to.
@@ -479,17 +955,18 @@ pub fn joint_of(scene: &Scene, id: &str) -> Option<String> {
     joint_name(scene, &parent).map(|_| parent)
 }
 
-/// Joints of imported skeletons: every entity a skinned mesh follows.
+/// The joints a skinned mesh follows (imported skeletons and realistic people).
+pub fn mesh_joints(e: &Entity) -> Option<&Vec<String>> {
+    match &e.kind {
+        EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } => Some(&skin.joints),
+        EntityKind::Mesh { source: MeshSource::Human { joints, .. }, .. } => Some(joints),
+        _ => None,
+    }
+}
+
+/// Joints of imported skeletons and realistic people: every entity a skinned mesh follows.
 pub fn skin_joints(scene: &Scene) -> std::collections::HashSet<String> {
-    scene
-        .entities
-        .iter()
-        .filter_map(|e| match &e.kind {
-            EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } => Some(skin.joints.iter().cloned()),
-            _ => None,
-        })
-        .flatten()
-        .collect()
+    scene.entities.iter().filter_map(mesh_joints).flatten().cloned().collect()
 }
 
 /// A joint of a person prefab or of an imported skeleton.
@@ -500,14 +977,12 @@ pub fn is_joint(scene: &Scene, id: &str) -> bool {
 /// The joint nearest to a world point on a skinned mesh (measured to each bone, from a joint to
 /// its first child joint).
 pub fn joint_near(scene: &Scene, mesh: &str, point: Vec3, frame: f32) -> Option<String> {
-    let EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } = &scene.get(mesh).ok()?.kind else {
-        return None;
-    };
+    let joints = mesh_joints(scene.get(mesh).ok()?)?;
     let pos = |id: &str| world_at(scene, id, frame).ok().map(|m| m.w_axis.truncate());
     let mut best: Option<(f32, String)> = None;
-    for j in &skin.joints {
+    for j in joints {
         let Some(a) = pos(j) else { continue };
-        let child = scene.children(Some(j)).find(|c| skin.joints.contains(&c.id)).and_then(|c| pos(&c.id));
+        let child = scene.children(Some(j)).find(|c| joints.contains(&c.id)).and_then(|c| pos(&c.id));
         let d = match child {
             Some(b) => {
                 let ab = b - a;
@@ -525,6 +1000,9 @@ pub fn joint_near(scene: &Scene, mesh: &str, point: Vec3, frame: f32) -> Option<
 
 /// Rest height of the pelvis, from the leg chain (works for any body size).
 pub(crate) fn pelvis_rest(scene: &Scene, root: &str) -> CmdResult<f32> {
+    if let Some(y) = crate::humans::pelvis_rest(scene, root) {
+        return Ok(y);
+    }
     let y = |j: &str| -> CmdResult<f32> { Ok(scene.get(&format!("{root}_{j}"))?.transform.translation[1]) };
     let knee = y("knee_l")?;
     let scale = (knee.abs() / 0.43).max(1e-3);
@@ -547,6 +1025,9 @@ struct PoseParams {
     keyframe_at: Option<f32>,
     /// Re-rest the person on the surface below afterwards. Default true.
     drop: Option<bool>,
+    /// Hand shape for realistic people (see `pose.list`), e.g. `fist`, `grip`, `point`.
+    /// Default with a named pose: the pose's own hand shape.
+    hands: Option<String>,
 }
 
 fn pose_set(scene: &mut Scene, p: PoseParams) -> CmdResult<Value> {
@@ -590,6 +1071,26 @@ fn pose_set(scene: &mut Scene, p: PoseParams) -> CmdResult<Value> {
         t.set_euler_degrees(*r);
         crate::placement::store_pose(scene, &id, frame, p.keyframe_at, t)?;
     }
+    let human = crate::humans::human_of(scene, &root).is_some();
+    if human && p.pose.is_some() {
+        // a named pose also straightens the joints only realistic people have
+        for j in ["spine2", "chest", "clavicle_l", "clavicle_r", "toes_l", "toes_r"] {
+            let id = format!("{root}_{j}");
+            if scene.contains(&id) {
+                let mut t = local_at(scene, &id, frame)?;
+                t.rotation = Quat::IDENTITY.to_array();
+                crate::placement::store_pose(scene, &id, frame, p.keyframe_at, t)?;
+            }
+        }
+    }
+    let hands = p.hands.clone().or_else(|| {
+        p.pose
+            .as_deref()
+            .map(|n| POSE_HANDS.iter().find(|(q, _)| *q == n).map(|(_, h)| *h).unwrap_or("relaxed").to_string())
+    });
+    if let (true, Some(h)) = (human, hands) {
+        crate::humans::set_hands(scene, &root, &h, crate::humans::HandSide::Both, frame, p.keyframe_at)?;
+    }
     if p.drop.unwrap_or(true) {
         crate::placement::drop_down(scene, &root, frame, p.keyframe_at)?;
     }
@@ -613,11 +1114,13 @@ fn bone_direction(scene: &Scene, joint: &str) -> Vec3 {
     let kids: Vec<&Entity> = scene.children(Some(joint)).collect();
     let pick = kids
         .iter()
-        .find(|e| matches!(e.kind, EntityKind::Empty))
+        .find(|e| e.name.starts_with("middle_01"))
+        .or_else(|| kids.iter().find(|e| matches!(e.kind, EntityKind::Empty)))
         .or_else(|| kids.iter().find(|e| !e.name.starts_with("hair") && e.name != "nose"))
         .map(|e| e.transform.translation());
     // person limbs hang along -Y; imported (Blender) bones point along their +Y
-    let rest = if joint_name(scene, joint).is_some() { Vec3::NEG_Y } else { Vec3::Y };
+    let human = person_root(scene, joint).is_ok_and(|r| crate::humans::human_of(scene, &r).is_some());
+    let rest = if joint_name(scene, joint).is_some() || human { Vec3::NEG_Y } else { Vec3::Y };
     pick.map(|v| v.normalize_or_zero()).filter(|v| *v != Vec3::ZERO).unwrap_or(rest)
 }
 
@@ -658,6 +1161,9 @@ struct HairParams {
 
 fn set_hair(scene: &mut Scene, p: HairParams) -> CmdResult<Value> {
     let root = person_root(scene, &p.id)?;
+    if crate::humans::human_of(scene, &root).is_some() {
+        return crate::humans::set_human_hair(scene, &root, p.style, p.color);
+    }
     let head = format!("{root}_head");
     let old: Vec<String> =
         scene.children(Some(&head)).filter(|e| e.name.starts_with("hair")).map(|e| e.id.clone()).collect();
@@ -690,6 +1196,7 @@ fn set_hair(scene: &mut Scene, p: HairParams) -> CmdResult<Value> {
                 source: MeshSource::Primitive { primitive: part.prim.expect("hair is geometry") },
                 modifiers: vec![],
                 color,
+                material: None,
             },
         })?;
         ids.push(id);

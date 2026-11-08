@@ -366,7 +366,21 @@ fn attach(scene: &mut Scene, p: AttachParams) -> CmdResult<Value> {
     let w = scene.world_matrix(&p.id)?;
     scene.set_parent(&p.id, Some(&to))?;
     keep_world(scene, &p.id, w)?;
-    if p.snap.unwrap_or(hand) {
+    let human = rig::person_root(scene, &to).ok().filter(|r| crate::humans::human_of(scene, r).is_some());
+    if let (true, Some(root)) = (hand && p.snap.unwrap_or(true), human) {
+        // a realistic hand: rest the prop against the palm and close the fingers round it
+        let side = if to.ends_with("_l") { "l" } else { "r" };
+        let (centre, normal) = crate::humans::palm(scene, &root, side, frame)?;
+        if let Some(b) = spatial::bounds(scene, &p.id, frame)? {
+            let size = b.size();
+            let thin = size.min_element();
+            let reach = (thin * 0.5).clamp(0.008, 0.05);
+            shift(scene, &p.id, centre + normal * reach - b.center())?;
+            let shape = if size.max_element() < 0.05 { "pinch" } else { "grip" };
+            let side = if side == "l" { crate::humans::HandSide::Left } else { crate::humans::HandSide::Right };
+            crate::humans::set_hands(scene, &root, shape, side, frame, None)?;
+        }
+    } else if p.snap.unwrap_or(hand) {
         // put the prop's centre at the palm: the middle of the hand mesh
         let palm = scene
             .children(Some(&to))

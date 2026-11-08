@@ -1,6 +1,6 @@
-//! Detailed rigged people from bundled GLB files: realistic ones generated with MakeHuman /
-//! MPFB and stylized ones from Quaternius' Universal Base Characters (both CC0, see
-//! assets/LICENSES.md). Their skeletons use shotstage's joint names with identity rest
+//! Stylized rigged people from bundled GLB files, made from Quaternius' Universal Base
+//! Characters (CC0, see assets/LICENSES.md). (Realistic people are the MakeHuman humans of
+//! `humans.rs`.) Their skeletons use shotstage's joint names with identity rest
 //! rotations (tools/people/), so poses, motion presets, joint dragging, hold in hand and look
 //! at camera work on them as on the built-in man and woman.
 //!
@@ -20,65 +20,32 @@ pub struct PersonAsset {
     pub description: &'static str,
     /// File name under assets/people (and `people/` next to the web page).
     pub file: &'static str,
-    pub realistic: bool,
 }
 
 pub const PEOPLE: &[PersonAsset] = &[
-    PersonAsset {
-        key: "realisticWoman",
-        label: "Young woman",
-        description: "Realistic woman, about 25, casual clothes, ponytail (MakeHuman, CC0); full skeleton with fingers",
-        file: "realistic_woman.glb",
-        realistic: true,
-    },
-    PersonAsset {
-        key: "realisticMan",
-        label: "Young man",
-        description: "Realistic man, about 25, casual clothes, short hair (MakeHuman, CC0); full skeleton with fingers",
-        file: "realistic_man.glb",
-        realistic: true,
-    },
-    PersonAsset {
-        key: "realisticWomanOlder",
-        label: "Older woman",
-        description: "Realistic woman, about 55, smart clothes, bob (MakeHuman, CC0); full skeleton with fingers",
-        file: "realistic_woman_older.glb",
-        realistic: true,
-    },
-    PersonAsset {
-        key: "realisticManOlder",
-        label: "Older man",
-        description: "Realistic man, about 60, heavier build, work clothes (MakeHuman, CC0); full skeleton with fingers",
-        file: "realistic_man_older.glb",
-        realistic: true,
-    },
     PersonAsset {
         key: "stylizedMan",
         label: "Stylized man",
         description: "Stylized athletic man, side-parted hair (Quaternius, CC0); full skeleton with fingers",
         file: "stylized_man.glb",
-        realistic: false,
     },
     PersonAsset {
         key: "stylizedManBeard",
         label: "Bearded man",
         description: "Stylized athletic man, buzz cut and beard (Quaternius, CC0); full skeleton with fingers",
         file: "stylized_man_beard.glb",
-        realistic: false,
     },
     PersonAsset {
         key: "stylizedWoman",
         label: "Stylized woman",
         description: "Stylized athletic woman, long hair (Quaternius, CC0); full skeleton with fingers",
         file: "stylized_woman.glb",
-        realistic: false,
     },
     PersonAsset {
         key: "stylizedWomanBuns",
         label: "Woman with buns",
         description: "Stylized athletic woman, hair in buns (Quaternius, CC0); full skeleton with fingers",
         file: "stylized_woman_buns.glb",
-        realistic: false,
     },
 ];
 
@@ -91,10 +58,6 @@ pub fn bundled(key: &str) -> Option<&'static [u8]> {
         };
     }
     files!(
-        "realisticWoman" => "realistic_woman.glb",
-        "realisticMan" => "realistic_man.glb",
-        "realisticWomanOlder" => "realistic_woman_older.glb",
-        "realisticManOlder" => "realistic_man_older.glb",
         "stylizedMan" => "stylized_man.glb",
         "stylizedManBeard" => "stylized_man_beard.glb",
         "stylizedWoman" => "stylized_woman.glb",
@@ -158,10 +121,10 @@ fn create(s: &mut Scene, p: CreateParams) -> CmdResult<Value> {
 
 pub fn commands() -> Vec<Command> {
     vec![
-        command!("person.create", "Add a detailed rigged person (realistic or stylized; see person.catalog). Poses, motion presets, hold in hand and look at camera work on them.", mutates: true, CreateParams, create),
-        command!("person.catalog", "The detailed people person.create can add: key, label, style, description and file.", mutates: false, crate::builtin::NoParams,
+        command!("person.create", "Add a stylized rigged person (see person.catalog; realistic people are prefab.create human*). Poses, motion presets, hold in hand and look at camera work on them.", mutates: true, CreateParams, create),
+        command!("person.catalog", "The stylized people person.create can add: key, label, description and file.", mutates: false, crate::builtin::NoParams,
             |_, _| Ok(json!(PEOPLE.iter().map(|a| json!({
-                "variant": a.key, "label": a.label, "style": if a.realistic { "realistic" } else { "stylized" },
+                "variant": a.key, "label": a.label,
                 "description": a.description, "file": format!("people/{}", a.file), "bundled": bundled(a.key).is_some(),
             })).collect::<Vec<_>>()))),
     ]

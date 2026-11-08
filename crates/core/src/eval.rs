@@ -239,6 +239,17 @@ pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
         crate::EntityKind::Image(img) => return Ok(img.card()),
         _ => return Err(CoreError::WrongKind(id.into(), "mesh")),
     };
+    if let crate::MeshSource::Human { body, part, outfit, joints } = source {
+        let body = &body_at(scene, id, body, frame);
+        body.validate()?;
+        outfit.validate()?;
+        let mats = human_matrices(scene, id, body, joints, frame)?;
+        let mut m = crate::human::part_mesh(body, *part, outfit, &mats);
+        for md in modifiers {
+            m = md.apply(&m)?;
+        }
+        return Ok(m);
+    }
     let crate::MeshSource::Skinned { mesh, skin } = source else {
         return crate::mesh::evaluate_mesh(source, modifiers);
     };
@@ -280,10 +291,62 @@ pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
     Ok(m)
 }
 
+/// A human part's body at `frame`: the face follows the person's expression track, if any.
+fn body_at<'a>(
+    scene: &Scene,
+    id: &str,
+    body: &'a crate::human::HumanBody,
+    frame: f32,
+) -> std::borrow::Cow<'a, crate::human::HumanBody> {
+    let root = scene.get(id).ok().and_then(|e| e.parent.as_deref());
+    match root.and_then(|r| scene.timeline.track(r, TrackProperty::Expression)).and_then(|t| t.sample(frame)) {
+        Some(KeyValue::Expression(mix)) => {
+            let mut b = body.clone();
+            b.face = crate::human::mix_face(&mix);
+            std::borrow::Cow::Owned(b)
+        }
+        _ => std::borrow::Cow::Borrowed(body),
+    }
+}
+
+/// Skinning matrices of a human part entity at `frame` (joints that were deleted stay at rest).
+fn human_matrices(
+    scene: &Scene,
+    id: &str,
+    body: &crate::human::HumanBody,
+    joints: &[String],
+    frame: f32,
+) -> Result<Vec<Mat4>> {
+    let rest = crate::human::rest(body);
+    let to_local = world_at(scene, id, frame)?.inverse();
+    // joints missing from the scene stay where the person's root puts them at rest
+    let root = world_at(scene, id, frame)?;
+    let worlds: Vec<Option<Mat4>> = joints
+        .iter()
+        .enumerate()
+        .map(|(i, j)| {
+            Some(
+                world_at(scene, j, frame)
+                    .unwrap_or_else(|_| root * Mat4::from_translation(rest.joints.get(i).copied().unwrap_or_default())),
+            )
+        })
+        .collect();
+    Ok(crate::human::skin_matrices(&rest, to_local, &worlds))
+}
+
 /// An entity's mesh at `frame` triangulated (auto-smoothed normals) in its own space; cached by
 /// content for everything but skinned meshes.
 pub fn posed_tris(scene: &Scene, id: &str, frame: f32) -> Result<std::rc::Rc<crate::TriMesh>> {
     match &scene.get(id)?.kind {
+        crate::EntityKind::Mesh {
+            source: crate::MeshSource::Human { body, part, outfit, joints }, modifiers, ..
+        } if modifiers.is_empty() => {
+            let body = &body_at(scene, id, body, frame);
+            body.validate()?;
+            outfit.validate()?;
+            let mats = human_matrices(scene, id, body, joints, frame)?;
+            Ok(crate::human::part_tris(body, *part, outfit, &mats))
+        }
         crate::EntityKind::Mesh { source, modifiers, .. } if !matches!(source, crate::MeshSource::Skinned { .. }) => {
             crate::meshcache::local_tris(source, modifiers)
         }
@@ -345,6 +408,7 @@ mod tests {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size: [0.5, 1.7, 0.3] } },
                 modifiers: vec![],
                 color: [1.0; 3],
+                material: None,
             },
         })
         .unwrap();
