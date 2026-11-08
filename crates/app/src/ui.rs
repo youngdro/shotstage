@@ -528,6 +528,7 @@ fn palette() -> Vec<(&'static str, bool, Vec<Block>)> {
     vec![
         ("People", true, of(Category::People)),
         ("Fresh retail", true, of(Category::Retail)),
+        ("Fresh produce", true, of(Category::Fresh)),
         ("Product shoot", true, of(Category::Product)),
         ("Furniture & set", false, of(Category::Furniture)),
         (
