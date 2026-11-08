@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use shotstage_commands::host::{
     self, BoardPlan, OpenParams, SEQUENCE_COMMAND, STORYBOARD_COMMAND, SaveParams, ViewState,
 };
+use shotstage_commands::sheet::SHEET_COMMAND;
 use shotstage_commands::snapshot::{SNAPSHOT_COMMAND, SnapshotPass, plan, result_json};
 use shotstage_commands::{Call, CmdResult, CommandError, Outcome, Session, parse};
 use shotstage_core::Scene;
@@ -192,7 +193,7 @@ impl Host {
         let command = req.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
         let params = req.get("params").cloned().unwrap_or(json!({}));
         match command.as_str() {
-            STORYBOARD_COMMAND | SEQUENCE_COMMAND => {
+            STORYBOARD_COMMAND | SEQUENCE_COMMAND | SHEET_COMMAND => {
                 let scene = self.backend.scene()?;
                 let (mut n, sequence) = (0usize, command == SEQUENCE_COMMAND);
                 let mut render = |p: Value| {
@@ -253,6 +254,17 @@ impl Host {
             o.remove("data");
         }
         Ok((meta, png))
+    }
+
+    /// Render the picture of every row of a shot sheet.
+    pub fn shot_sheet(&mut self, params: Value) -> CmdResult<(shotstage_commands::sheet::SheetPlan, Vec<Vec<u8>>)> {
+        let scene = self.backend.scene()?;
+        let plan = shotstage_commands::sheet::sheet_plan(&scene, params)?;
+        let mut pngs = Vec::with_capacity(plan.pictures.len());
+        for p in &plan.pictures {
+            pngs.push(self.snapshot(p.clone())?.1);
+        }
+        Ok((plan, pngs))
     }
 
     /// Render every picture of a storyboard.

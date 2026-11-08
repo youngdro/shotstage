@@ -20,6 +20,7 @@ pub mod motion;
 mod placement;
 pub mod prefabs;
 pub mod rig;
+pub mod sheet;
 pub mod snapshot;
 pub mod templates;
 pub mod texture;

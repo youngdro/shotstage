@@ -365,6 +365,8 @@ struct ShotParams {
     camera: String,
     start: u32,
     end: u32,
+    /// Notes for the crew: action, dialogue, camera move (printed on the shot sheet).
+    notes: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -859,7 +861,7 @@ pub fn registry() -> Vec<Command> {
             if p.end < p.start { return Err(CommandError::invalid("end must be >= start")); }
             let id = match p.id { Some(id) => { validate_id(&id)?; id } None => (1..).map(|n| format!("shot_{n}")).find(|i| !s.timeline.shots.iter().any(|x| &x.id == i)).unwrap_or_default() };
             if s.timeline.shots.iter().any(|x| x.id == id) { return Err(CommandError::invalid(format!("shot `{id}` exists"))); }
-            s.timeline.shots.push(Shot { id: id.clone(), name: p.name.unwrap_or_else(|| id.clone()), camera: p.camera, start: p.start, end: p.end });
+            s.timeline.shots.push(Shot { id: id.clone(), name: p.name.unwrap_or_else(|| id.clone()), camera: p.camera, start: p.start, end: p.end, notes: p.notes.unwrap_or_default() });
             s.timeline.shots.sort_by_key(|x| x.start);
             Ok(json!({ "id": id }))
         }),
@@ -885,5 +887,6 @@ pub fn registry() -> Vec<Command> {
     .chain(crate::clipboard::commands())
     .chain(crate::meshedit::commands())
     .chain(crate::texture::commands())
+    .chain(crate::sheet::commands())
     .collect()
 }

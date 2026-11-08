@@ -201,6 +201,7 @@ pub fn dispatch(hub: &SharedHub, request: Value) -> Result<Outcome, CommandError
 /// The other host commands: files and the rendering ones that take many pictures.
 fn host_command(h: &mut Hub, request: &Value) -> Option<Result<Outcome, CommandError>> {
     use shotstage_commands::host::{self, SEQUENCE_COMMAND, STORYBOARD_COMMAND};
+    use shotstage_commands::sheet::SHEET_COMMAND;
     let cmd = request.get("command")?.as_str()?;
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let rev = h.session.revision();
@@ -244,7 +245,7 @@ fn host_command(h: &mut Hub, request: &Value) -> Option<Result<Outcome, CommandE
             })
         })(),
         #[cfg(not(target_arch = "wasm32"))]
-        STORYBOARD_COMMAND | SEQUENCE_COMMAND => {
+        STORYBOARD_COMMAND | SEQUENCE_COMMAND | SHEET_COMMAND => {
             let scene = h.session.scene().clone();
             let mut render = |p: Value| {
                 let o = snapshot_sync(h, &json!({ "params": p }))?;
@@ -256,7 +257,7 @@ fn host_command(h: &mut Hub, request: &Value) -> Option<Result<Outcome, CommandE
             host::render_with(cmd, &scene, params, &mut render)?.and_then(done)
         }
         #[cfg(target_arch = "wasm32")]
-        STORYBOARD_COMMAND | SEQUENCE_COMMAND => Err(CommandError::new(
+        STORYBOARD_COMMAND | SEQUENCE_COMMAND | SHEET_COMMAND => Err(CommandError::new(
             "unsupported",
             format!("in the browser {cmd} is asynchronous: use `await editor.call(\"{cmd}\", params)`"),
         )),

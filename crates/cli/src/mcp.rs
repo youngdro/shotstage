@@ -41,7 +41,8 @@ camera for you; check it with render_snapshot (you get the image) and camera_des
 6. Motion: motion_apply {preset, target, subject} (motion_list: push-ins, orbits, crane, \
 handheld, product spins, character actions); shot_create / shot_cut lay out the edit.
 7. Deliver: render_storyboard (first / middle / last frame of each shot, images back, files in \
-a folder), render_sequence (every frame as clay / depth / normal + per-frame camera data, MP4 \
+a folder), render_shotSheet (the shot sheet for the crew as a PDF / PNG: picture, shot size, \
+lens, camera move, duration and shot notes from shot_set; lang \"zh\" for Chinese), render_sequence (every frame as clay / depth / normal + per-frame camera data, MP4 \
 with ffmpeg), model_export, scene_save.
 
 Read the scene with scene_summary, entity_bounds and editor_state. Exact control: \
@@ -72,6 +73,7 @@ const ESSENTIALS: &[&str] = &[
     "motion.apply",
     "render.snapshot",
     "render.storyboard",
+    "render.shotSheet",
     "history.undo",
 ];
 
@@ -182,6 +184,37 @@ fn storyboard(host: &mut Host, mut args: Value) -> Result<Value, CommandError> {
     Ok(json!({ "content": content, "isError": false }))
 }
 
+/// A shot sheet for the model: written to a file (default next to the scene), with a preview of
+/// its first page as an image.
+fn shot_sheet(host: &mut Host, mut args: Value) -> Result<Value, CommandError> {
+    use shotstage_commands::sheet::{self, ShotSheetParams};
+    let p = parse::<ShotSheetParams>(args.clone())?;
+    if p.out.is_none() {
+        let ext = if p.format == Some(sheet::SheetFormat::Png) { "png" } else { "pdf" };
+        let f: PathBuf = match &host.scene_path {
+            Some(s) => s.with_extension(format!("shot-sheet.{ext}")),
+            None => std::env::temp_dir().join(format!("shotstage-shot-sheet-{}.{ext}", std::process::id())),
+        };
+        args["out"] = json!(f.display().to_string());
+    }
+    let (plan, pngs) = host.shot_sheet(args)?;
+    let mut doc = sheet::finish_sheet(&plan, &pngs)?;
+    // the rows' translated text repeats the rest; keep the reply short
+    if let Some(shots) = doc["shots"].as_array_mut() {
+        for s in shots {
+            if let Some(o) = s.as_object_mut() {
+                o.remove("text");
+            }
+        }
+    }
+    let preview = sheet::preview_png(&sheet::compose(&plan, &pngs), 0, 1200)?;
+    Ok(json!({ "content": [
+        {"type": "text", "text": serde_json::to_string(&doc).unwrap_or_default()},
+        {"type": "text", "text": "page 1:"},
+        {"type": "image", "data": shotstage_render::base64(&preview), "mimeType": "image/png"},
+    ], "isError": false }))
+}
+
 fn call_tool(host: &mut Host, cfg: Config, name: &str, args: Value) -> Value {
     let list = Session::default().list();
     // unwrap command_run into the command it names
@@ -232,6 +265,7 @@ fn call_tool(host: &mut Host, cfg: Config, name: &str, args: Value) -> Value {
             Err(e) => error_result(&e),
         },
         STORYBOARD_COMMAND => storyboard(host, args).unwrap_or_else(|e| error_result(&e)),
+        shotstage_commands::sheet::SHEET_COMMAND => shot_sheet(host, args).unwrap_or_else(|e| error_result(&e)),
         _ => match host.call(&cmd, args) {
             Ok(o) => {
                 let mut r = json!({"result": o.result, "revision": o.revision, "changed": o.changed});

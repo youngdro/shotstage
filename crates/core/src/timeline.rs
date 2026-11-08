@@ -109,6 +109,9 @@ pub struct Shot {
     pub start: u32,
     /// Last frame (inclusive).
     pub end: u32,
+    /// Notes for the crew: action, dialogue, how the camera moves. Printed on the shot sheet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

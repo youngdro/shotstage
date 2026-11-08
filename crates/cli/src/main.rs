@@ -10,6 +10,7 @@
 //! shotstage import chair.glb --scene shot.json --fit-height 0.9
 //! shotstage export set.fbx --scene shot.json     # glb, gltf, obj, stl; fbx through Blender
 //! shotstage storyboard --scene shot.json -o board/  # first / middle / last frame of every shot
+//! shotstage sheet --scene shot.json -o sheet.pdf --lang zh   # shot sheet for the crew (PDF / PNG)
 //! shotstage render --scene shot.json -o frames/ --pass clay,depth --video   # every frame
 //! shotstage mcp --scene shot.json --live --web dist   # drive the editor open in a browser
 //! ```
@@ -172,6 +173,27 @@ enum Cmd {
         /// Also render the normal pass of every frame.
         #[arg(long)]
         normal: bool,
+    },
+    /// Export a shot sheet for the crew: every shot's picture, shot size, angle, focal length,
+    /// camera move, duration and notes. PDF or PNG, from the file extension.
+    Sheet {
+        #[command(flatten)]
+        scene: SceneArgs,
+        /// Output file (.pdf or .png).
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Layout: table (one row per shot) or grid (storyboard panels).
+        #[arg(long, default_value = "table")]
+        layout: String,
+        /// Panels per row in the grid layout.
+        #[arg(long)]
+        columns: Option<u32>,
+        /// Label language: en or zh.
+        #[arg(long, default_value = "en")]
+        lang: String,
+        /// Title at the top.
+        #[arg(long)]
+        title: Option<String>,
     },
     /// Export the scene (or some entities) to a model file; the format comes from the extension.
     Export {
@@ -381,6 +403,20 @@ fn real_main() -> Result<ExitCode, String> {
                 let r = &o.result;
                 o.result =
                     json!({ "folder": r["folder"], "index": r["index"], "shots": r["shots"].as_array().map(Vec::len) });
+                o
+            });
+            Ok(finish(r))
+        }
+        Cmd::Sheet { scene, out, layout, columns, lang, title } => {
+            let png = out.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("png"));
+            let params = compact(json!({
+                "out": out, "format": if png { "png" } else { "pdf" }, "layout": layout,
+                "columns": columns, "lang": lang, "title": title,
+            }));
+            let r = scene.host()?.call("render.shotSheet", params).map(|mut o| {
+                let r = &o.result;
+                o.result =
+                    json!({ "path": r["path"], "pages": r["pages"], "shots": r["shots"].as_array().map(Vec::len) });
                 o
             });
             Ok(finish(r))

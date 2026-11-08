@@ -27,8 +27,8 @@ Units: metres, degrees, frames; +Y up, the ground is y = 0, object fronts face +
 - **People**: [`pose.set`](#poseset) [`pose.aim`](#poseaim) [`pose.get`](#poseget) [`pose.list`](#poselist) [`person.setHair`](#personsethair) [`person.setBody`](#personsetbody) [`person.setOutfit`](#personsetoutfit) [`person.setExpression`](#personsetexpression) [`person.expressions`](#personexpressions) [`pose.hand`](#posehand) [`person.get`](#personget) [`person.lookAt`](#personlookat)
 - **Lights**: [`light.set`](#lightset) [`light.preset`](#lightpreset) [`light.list`](#lightlist) [`environment.set`](#environmentset) [`environment.import`](#environmentimport) [`environment.list`](#environmentlist) [`light.shadows`](#lightshadows) [`light.fromEnvironment`](#lightfromenvironment)
 - **Animation**: [`keyframe.set`](#keyframeset) [`keyframe.delete`](#keyframedelete) [`keyframe.list`](#keyframelist) [`motion.apply`](#motionapply) [`motion.list`](#motionlist) [`keyframe.move`](#keyframemove) [`keyframe.retime`](#keyframeretime) [`keyframe.setInterp`](#keyframesetinterp)
-- **Timeline and shots**: [`timeline.set`](#timelineset) [`shot.create`](#shotcreate) [`shot.delete`](#shotdelete) [`shot.cut`](#shotcut) [`shot.set`](#shotset)
-- **Rendering**: [`render.snapshot`](#rendersnapshot) [`render.storyboard`](#renderstoryboard) [`render.sequence`](#rendersequence)
+- **Timeline and shots**: [`timeline.set`](#timelineset) [`shot.create`](#shotcreate) [`shot.delete`](#shotdelete) [`shot.cut`](#shotcut) [`shot.set`](#shotset) [`shot.list`](#shotlist)
+- **Rendering**: [`render.snapshot`](#rendersnapshot) [`render.storyboard`](#renderstoryboard) [`render.shotSheet`](#rendershotsheet) [`render.sequence`](#rendersequence)
 - **Editor view**: [`editor.select`](#editorselect) [`editor.setFrame`](#editorsetframe) [`editor.setView`](#editorsetview) [`editor.editMesh`](#editoreditmesh) [`editor.editSelect`](#editoreditselect) [`editor.uvEditor`](#editoruveditor) [`editor.uvSelect`](#editoruvselect) [`editor.state`](#editorstate)
 
 ## Session
@@ -1512,6 +1512,7 @@ _changes the scene_ · MCP tool `shot_create`
 | `end` **required** | integer |  |
 | `id` | string |  |
 | `name` | string |  |
+| `notes` | string | Notes for the crew: action, dialogue, camera move (printed on the shot sheet). |
 | `start` **required** | integer |  |
 
 ### shot.delete
@@ -1536,7 +1537,7 @@ _changes the scene_ · MCP tool `shot_cut`
 
 ### shot.set
 
-Change a shot: its name, camera, first and last frame (retime it).  
+Change a shot: its name, camera, first and last frame (retime it), notes for the crew.  
 _changes the scene_ · MCP tool `shot_set`
 
 | Param | Type | |
@@ -1545,7 +1546,18 @@ _changes the scene_ · MCP tool `shot_set`
 | `end` | integer | Last frame. |
 | `id` **required** | string | Shot id. |
 | `name` | string |  |
+| `notes` | string | Notes for the crew (action, dialogue, camera move); "" clears them. |
 | `start` | integer | First frame. |
+
+### shot.list
+
+Every shot as a crew reads it: number, name, camera, frames and seconds, shot size (and how it changes), angle, focal length, lens, the camera move worked out from the animation (push in, pan, arc, zoom, handheld, static...) and the shot's notes. The rows of render.shotSheet, without pictures.  
+_query_ · MCP tool `shot_list`
+
+| Param | Type | |
+| --- | --- | --- |
+| `lang` | `en` \| `zh` | Language of `movement`, `shotSizeText`...: "en" (default) or "zh". |
+| `shots` | array | Only these shots (0-based indices). Default every shot. |
 
 
 ## Rendering
@@ -1577,6 +1589,21 @@ _query · needs gpu_ · MCP tool `render_storyboard`
 | `shots` | array | Only these shots (0-based indices). Default every shot; with no shots, the whole timeline through the active camera. |
 | `title` | string | Page title. Default "Storyboard". |
 | `width` | integer | Picture width in pixels (16..=4096). Default 960. |
+
+### render.shotSheet
+
+Export a shot sheet for the crew: every shot's picture with its number, name, camera, shot size and angle, focal length, camera move (worked out from the animation), duration and notes. A table or storyboard grid, as a PDF (A4 landscape) or one PNG, labels in English or Chinese. With `out` writes the file; otherwise returns it as base64 `data` with `fileName` and `mimeType`. The analysed rows come back as `shots`.  
+_query · needs gpu_ · MCP tool `render_shotSheet`
+
+| Param | Type | |
+| --- | --- | --- |
+| `columns` | integer | Panels per row in the grid layout (2..=5). Default 3. |
+| `format` | `pdf` \| `png` | "pdf" (A4 landscape pages, default) or "png" (one image). |
+| `lang` | `en` \| `zh` | Language of the labels and film terms: "en" (default) or "zh". |
+| `layout` | `table` \| `grid` | "table" (one row per shot, default) or "grid" (storyboard panels). |
+| `out` | string | File to write (CLI / MCP; a folder gets shot-sheet.pdf / .png). Without it the file comes back as base64 `data`. MCP defaults to `<scene file>.shot-sheet.pdf`. |
+| `shots` | array | Only these shots (0-based indices). Default every shot; with no shots, the whole timeline through the active camera. |
+| `title` | string | Title at the top. Default "Shot sheet" / "分镜表". |
 
 ### render.sequence
 
