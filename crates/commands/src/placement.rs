@@ -469,6 +469,7 @@ fn prefab_create(scene: &mut Scene, p: PrefabParams) -> CmdResult<Value> {
                 source: MeshSource::Primitive { primitive: prim },
                 modifiers: part.modifiers,
                 color: color(part.color)?,
+                material: None,
             },
             (None, None) => EntityKind::Empty,
         };

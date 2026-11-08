@@ -345,6 +345,7 @@ mod tests {
                 source: MeshSource::Primitive { primitive: Primitive::Cube { size: [0.5, 1.7, 0.3] } },
                 modifiers: vec![],
                 color: [1.0; 3],
+                material: None,
             },
         })
         .unwrap();

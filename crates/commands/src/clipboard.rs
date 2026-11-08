@@ -282,6 +282,7 @@ mod tests {
             },
             modifiers: vec![],
             color: [0.5; 3],
+            material: None,
         };
         let mut scene = s.scene().clone();
         scene.insert(e).unwrap();
