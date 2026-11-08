@@ -10,6 +10,14 @@
 
 > 状态：M0 + 积木式搭景。场景、网格与修改器、相机、时间线关键帧、命令系统、CLI、MCP、可嵌入的网页编辑器、拖拽摆放、真实尺寸预制件（含生鲜零售、产品拍摄素材）、带骨骼可摆姿势的人物、按景别构图、截图已经可用；离屏导出（mp4 / 控制图序列）、glTF 导入在后续里程碑。
 
+## 在线使用
+
+打开 **https://youngdro.github.io/shotstage/** 就能用，不用安装。main 每次更新后由 GitHub Actions（`.github/workflows/pages.yml`）自动构建并发布到 GitHub Pages。
+
+- **分享链接**：顶栏 **复制分享链接** 把整个场景压缩后放进链接的 `#scene=…` 部分，发给别人，对方打开就是同一个场景的副本（之后各改各的，不会同步）。场景只在链接里，不经过任何服务器。导入的模型、贴图、HDRI 会一起打包进链接，链接可能很长，有些聊天软件会截断，这时改发 **文件 → 保存** 存下的 `.json`。
+- **自动保存**：场景自动存在这台浏览器里，刷新不会丢。打开别人的分享链接时，你自己的场景会先备份，提示条里可以一键换回来。
+- 需要支持 WebGPU 或 WebGL2 的浏览器（新版 Chrome、Edge、Safari、Firefox）。
+
 ## 中文 / English
 
 界面支持 **中文** 和 **English**，顶栏右侧一键切换，选择会被记住；第一次打开时跟随系统（桌面版）或浏览器（网页版）的语言。素材、面板、菜单、编辑模式、贴图、真人模型、预设、模板、提示和帮助都已翻译，搜索框用中文或英文都能搜到。中文字体是内嵌的 Noto Sans SC 子集（界面用到的字加 3755 个常用字，约 0.8 MB，SIL OFL，见 `assets/LICENSES.md`）；桌面版另外会用系统里的中文字体显示其他字。命令名和 API 保持英文。
@@ -213,6 +221,8 @@ import init, { mount } from "./pkg/shotstage_app.js";
 await init();
 
 const editor = await mount("#stage", { scene: savedSceneJson }); // 元素或 CSS 选择器；scene 可选
+// toolbar 可选：在编辑器顶栏加自己的按钮，点击时 editor.on 收到 { type: "toolbar", id }
+// mount("#stage", { toolbar: [{ id: "share", label: "Share link", labelZh: "分享链接", tooltip: "…", tooltipZh: "…" }] })
 window.shotstage = editor;                                        // 可选：挂到全局给 agent / 控制台用
 
 editor.dispatch("entity.create", { type: "mesh", primitive: { shape: "cube", size: [1, 1, 1] } });

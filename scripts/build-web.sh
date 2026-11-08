@@ -9,6 +9,6 @@ cargo build -p shotstage-app --lib --target wasm32-unknown-unknown --profile "$p
 rm -rf dist && mkdir -p dist/pkg
 wasm-bindgen --target web --no-typescript --out-dir dist/pkg \
   "target/wasm32-unknown-unknown/$profile/shotstage_app.wasm"
-cp web/index.html web/bridge.js dist/
+cp web/index.html web/bridge.js web/share.js dist/
 ls -lh dist/pkg
 echo "serve dist/ with any static server, e.g. python3 -m http.server -d dist 8080"

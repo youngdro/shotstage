@@ -60,6 +60,8 @@ pub struct Shotstage {
 
 /// Create an editor inside `container` (an `Element` or a CSS selector string). The editor fills
 /// the container and follows its size. `options.scene` opens a saved scene document.
+/// `options.toolbar` adds buttons to the top bar: `[{ id, label, labelZh?, tooltip?, tooltipZh? }]`;
+/// a click sends `{ type: "toolbar", id }` to `editor.on` listeners.
 #[wasm_bindgen]
 pub async fn mount(container: JsValue, options: JsValue) -> Result<Shotstage, JsValue> {
     let _ = console_log_init();
@@ -84,6 +86,10 @@ pub async fn mount(container: JsValue, options: JsValue) -> Result<Shotstage, Js
     container.append_child(&canvas)?;
 
     let hub = Hub::new(session);
+    if let Some(buttons) = opts.get("toolbar").filter(|b| !b.is_null()) {
+        hub.borrow_mut().host_buttons =
+            serde_json::from_value(buttons.clone()).map_err(|e| JsValue::from_str(&format!("options.toolbar: {e}")))?;
+    }
     let runner = eframe::WebRunner::new();
     let app_hub = hub.clone();
     runner

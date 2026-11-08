@@ -2296,7 +2296,19 @@ impl EditorApp {
                     crate::i18n::set_zh(false);
                 }
                 ui.separator();
-                ui.weak(tr("3D previs for AI images and video"));
+                let buttons = self.hub.borrow().host_buttons.clone();
+                if buttons.is_empty() {
+                    ui.weak(tr("3D previs for AI images and video"));
+                }
+                for b in buttons.iter().rev() {
+                    let mut r = ui.button(b.label());
+                    if let Some(tip) = b.tooltip() {
+                        r = r.on_hover_text(tip);
+                    }
+                    if r.clicked() {
+                        hub::emit(&self.hub, &json!({ "type": "toolbar", "id": b.id }));
+                    }
+                }
             });
         });
     }
