@@ -3105,19 +3105,21 @@ impl EditorApp {
         let mut started = false;
         egui::Grid::new("world_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
             ui.label("Sky");
-            ui.horizontal_wrapped(|ui| {
-                for (sky, key, desc) in SKIES {
+            let name = |sky: Sky| {
+                SKIES.iter().find(|(s, ..)| *s == sky).map_or(String::new(), |(_, key, _)| match sky {
+                    Sky::Hdri => "HDRI".to_string(),
+                    _ => {
+                        let mut c = key.chars();
+                        c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+                    }
+                })
+            };
+            egui::ComboBox::from_id_salt("sky_kind").selected_text(name(n.sky)).width(150.0).show_ui(ui, |ui| {
+                for (sky, _, desc) in SKIES {
                     if *sky == Sky::Hdri && n.hdri.is_none() {
                         continue;
                     }
-                    let label = match sky {
-                        Sky::Hdri => "HDRI".to_string(),
-                        _ => {
-                            let mut c = key.chars();
-                            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
-                        }
-                    };
-                    ui.selectable_value(&mut n.sky, *sky, label).on_hover_text(*desc);
+                    ui.selectable_value(&mut n.sky, *sky, name(*sky)).on_hover_text(*desc);
                 }
             });
             ui.end_row();
