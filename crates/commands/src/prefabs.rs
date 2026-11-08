@@ -354,6 +354,12 @@ pub const PREFABS: &[PrefabInfo] = &[
     info!(DecorSpheres, "decorSpheres", "spheres", "Spheres", Product, "Three decor spheres of different sizes"),
 ];
 
+/// Whether the prefab `key` is a realistic person, built from the people asset
+/// (`shotstage_core::human`), which the browser build downloads separately.
+pub fn uses_human_asset(key: &str) -> bool {
+    PREFABS.iter().find(|p| p.key == key).is_some_and(|p| crate::humans::preset_for(p.kind).is_some())
+}
+
 pub fn info(kind: PrefabKind) -> &'static PrefabInfo {
     PREFABS.iter().find(|p| p.kind == kind).expect("every kind is listed")
 }

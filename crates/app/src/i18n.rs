@@ -122,17 +122,63 @@ fn system_locale() -> Option<String> {
     web_sys::window()?.navigator().language()
 }
 
+/// The Chinese font: built into the desktop app; the browser build downloads it next to the
+/// program (it is 0.8 MB) and hands it over with [`provide_cjk_font`].
+#[cfg(not(target_arch = "wasm32"))]
+fn cjk_font() -> Option<std::sync::Arc<egui::FontData>> {
+    Some(std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+        "../../../assets/fonts/NotoSansSC-subset.otf"
+    ))))
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WEB_CJK_FONT: std::cell::RefCell<Option<std::sync::Arc<egui::FontData>>> = const { std::cell::RefCell::new(None) };
+    /// Every editor started on this page, to refresh when a downloaded asset arrives.
+    static CONTEXTS: std::cell::RefCell<Vec<egui::Context>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn cjk_font() -> Option<std::sync::Arc<egui::FontData>> {
+    WEB_CJK_FONT.with(|f| f.borrow().clone())
+}
+
+/// Install the downloaded Chinese font in every editor on the page (and the ones started later).
+#[cfg(target_arch = "wasm32")]
+pub fn provide_cjk_font(bytes: Vec<u8>) -> Result<(), String> {
+    if bytes.len() < 1024 || !(bytes.starts_with(b"OTTO") || bytes.starts_with(&[0, 1, 0, 0])) {
+        return Err("not an OpenType font".into());
+    }
+    WEB_CJK_FONT.with(|f| *f.borrow_mut() = Some(std::sync::Arc::new(egui::FontData::from_owned(bytes))));
+    for ctx in CONTEXTS.with(|c| c.borrow().clone()) {
+        set_fonts(&ctx);
+        ctx.request_repaint();
+    }
+    Ok(())
+}
+
+/// Redraw every editor on the page (after a downloaded asset arrived).
+#[cfg(target_arch = "wasm32")]
+pub fn repaint_all() {
+    CONTEXTS.with(|c| c.borrow().iter().for_each(|ctx| ctx.request_repaint()));
+}
+
 /// Chinese glyphs: a subset of Noto Sans SC (SIL OFL) with the characters the interface uses
 /// plus the most common ones, added after the default fonts so Latin text keeps its look. On
 /// the desktop a system Chinese font, when there is one, covers everything else people type.
 pub fn install_fonts(ctx: &egui::Context) {
+    #[cfg(target_arch = "wasm32")]
+    CONTEXTS.with(|c| c.borrow_mut().push(ctx.clone()));
+    set_fonts(ctx);
+}
+
+fn set_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "noto_sc".into(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../../assets/fonts/NotoSansSC-subset.otf"))),
-    );
-    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-    let mut extra = Vec::from(["noto_sc".to_string()]);
+    let mut extra = Vec::new();
+    if let Some(font) = cjk_font() {
+        fonts.font_data.insert("noto_sc".into(), font);
+        extra.push("noto_sc".to_string());
+    }
     #[cfg(not(target_arch = "wasm32"))]
     for (path, index) in [
         ("/System/Library/Fonts/PingFang.ttc", 0),

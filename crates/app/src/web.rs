@@ -12,6 +12,19 @@
 //! ```
 //!
 //! Several editors can be mounted on one page; each has its own scene and history.
+//!
+//! Two large assets are not inside the program, so it starts sooner: the realistic-people data
+//! (`human.bin`, 2 MB) and the Chinese font (`NotoSansSC-subset.otf`, 0.8 MB). Fetch them
+//! alongside `init()` and hand them over when they arrive:
+//!
+//! ```js
+//! fetch("assets/NotoSansSC-subset.otf").then(r => r.arrayBuffer()).then(b => provideFont(new Uint8Array(b)));
+//! fetch("assets/human.bin").then(r => r.arrayBuffer()).then(b => provideHumanData(new Uint8Array(b)));
+//! ```
+//!
+//! Until the font arrives Chinese text shows as boxes. Anything that needs a realistic person
+//! before `provideHumanData` loads `setAssetUrls({ human })` (default `assets/human.bin`)
+//! synchronously, so it still works, only with a pause.
 
 use serde_json::{Value, json};
 use shotstage_commands::{CommandError, Session};
@@ -50,6 +63,65 @@ impl<T> SingleThread<T> {
     }
 }
 
+thread_local! {
+    static HUMAN_URL: std::cell::RefCell<String> = std::cell::RefCell::new("assets/human.bin".into());
+}
+
+/// Where the editor fetches assets nobody provided yet: `{ human: "assets/human.bin" }`.
+#[wasm_bindgen(js_name = setAssetUrls)]
+pub fn set_asset_urls(urls: JsValue) -> Result<(), JsValue> {
+    if let Some(url) = from_js(&urls)?.get("human").and_then(Value::as_str) {
+        HUMAN_URL.with(|u| *u.borrow_mut() = url.to_string());
+    }
+    Ok(())
+}
+
+/// Hand over the realistic-people data (`human.bin`). Throws if it is not the file this build
+/// expects (see `assetInfo`).
+#[wasm_bindgen(js_name = provideHumanData)]
+pub fn provide_human_data(bytes: &[u8]) -> Result<(), JsValue> {
+    shotstage_core::human::provide_data(bytes).map_err(|e| JsValue::from(js_sys::Error::new(&e.to_string())))?;
+    crate::i18n::repaint_all();
+    Ok(())
+}
+
+/// Whether the realistic-people data is loaded.
+#[wasm_bindgen(js_name = humanDataLoaded)]
+pub fn human_data_loaded() -> bool {
+    shotstage_core::human::data_loaded()
+}
+
+/// Hand over the Chinese interface font (`NotoSansSC-subset.otf`).
+#[wasm_bindgen(js_name = provideFont)]
+pub fn provide_font(bytes: Vec<u8>) -> Result<(), JsValue> {
+    crate::i18n::provide_cjk_font(bytes).map_err(|e| JsValue::from(js_sys::Error::new(&e)))
+}
+
+/// What the separately downloaded files must be: `{ human: { bytes, fnv1a64 } }`.
+#[wasm_bindgen(js_name = assetInfo)]
+pub fn asset_info() -> JsValue {
+    use shotstage_core::human::{DATA_HASH, DATA_LEN};
+    to_js(&json!({ "human": { "bytes": DATA_LEN, "fnv1a64": DATA_HASH } }))
+}
+
+/// Last resort for people needed before `provideHumanData`: a synchronous request (the page
+/// pauses until it is done; normally the file is already in the browser cache by then).
+fn load_human_sync() -> Option<Vec<u8>> {
+    let url = HUMAN_URL.with(|u| u.borrow().clone());
+    log::info!("people asset needed before it was provided; loading {url}");
+    let xhr = web_sys::XmlHttpRequest::new().ok()?;
+    xhr.open_with_async("GET", &url, false).ok()?;
+    // A synchronous request can't ask for an ArrayBuffer; this charset maps each byte to one
+    // character (0x00..0x7F as is, 0x80..0xFF to U+F780..U+F7FF).
+    xhr.override_mime_type("text/plain; charset=x-user-defined").ok()?;
+    xhr.send().ok()?;
+    if xhr.status().ok()? != 200 {
+        return None;
+    }
+    let text = xhr.response_text().ok()??;
+    Some(text.chars().map(|c| c as u32 as u8).collect())
+}
+
 /// One mounted editor.
 #[wasm_bindgen]
 pub struct Shotstage {
@@ -65,6 +137,7 @@ pub struct Shotstage {
 #[wasm_bindgen]
 pub async fn mount(container: JsValue, options: JsValue) -> Result<Shotstage, JsValue> {
     let _ = console_log_init();
+    shotstage_core::human::set_loader(load_human_sync);
     let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let container: Element = if let Some(sel) = container.as_string() {
         document.query_selector(&sel)?.ok_or_else(|| JsValue::from_str(&format!("no element matches `{sel}`")))?

@@ -22,6 +22,9 @@ pub struct Thumbs {
     slots: HashMap<String, u32>,
     /// still to render: (key, what to create)
     todo: Vec<(String, serde_json::Value)>,
+    /// realistic people, held back until the people asset has arrived (the browser downloads
+    /// it after the editor starts), so a thumbnail never makes the editor wait for it
+    waiting: Vec<(String, serde_json::Value)>,
     next_slot: u32,
 }
 
@@ -30,7 +33,14 @@ impl Thumbs {
     pub fn new(device: &wgpu::Device, items: Vec<(String, serde_json::Value)>) -> Self {
         let mut todo = items;
         todo.reverse();
-        Self { renderer: Renderer::new(device), atlas: None, slots: HashMap::new(), todo, next_slot: 0 }
+        Self {
+            renderer: Renderer::new(device),
+            atlas: None,
+            slots: HashMap::new(),
+            todo,
+            waiting: vec![],
+            next_slot: 0,
+        }
     }
 
     /// The atlas texture and the UV rectangle of `key`, once it is ready.
@@ -44,11 +54,14 @@ impl Thumbs {
     }
 
     fn rows(&self) -> u32 {
-        (self.slots.len() as u32 + self.todo.len() as u32).div_ceil(COLS).max(1)
+        ((self.slots.len() + self.todo.len() + self.waiting.len()) as u32).div_ceil(COLS).max(1)
     }
 
     /// Render up to `n` thumbnails. Returns true while there is more to do.
     pub fn step(&mut self, rs: &RenderState, n: usize) -> bool {
+        if !self.waiting.is_empty() && shotstage_core::human::data_loaded() {
+            self.todo.append(&mut self.waiting);
+        }
         if self.todo.is_empty() {
             return false;
         }
@@ -70,6 +83,12 @@ impl Thumbs {
         }
         for _ in 0..n {
             let Some((key, create)) = self.todo.pop() else { break };
+            if !shotstage_core::human::data_loaded()
+                && create["params"]["kind"].as_str().is_some_and(shotstage_commands::prefabs::uses_human_asset)
+            {
+                self.waiting.push((key, create));
+                continue;
+            }
             let Some(scene) = stage(&create) else { continue };
             let Some(view) = camera_view(&scene) else { continue };
             let mut overlay = shotstage_render::clean_overlay("thumb_cam");

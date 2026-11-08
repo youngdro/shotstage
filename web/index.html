@@ -13,19 +13,57 @@
     #stage { position: relative; height: 100%; }
     #overlay { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: #999; line-height: 1.7; padding: 16px; }
     #overlay.error { color: #e88; }
+    #progress { width: min(320px, 70vw); height: 4px; margin: 12px auto 0; background: #2a2a2a; border-radius: 2px; overflow: hidden; }
+    #progress > div { height: 100%; width: 0; background: #6a9fd8; transition: width .15s linear; }
+    #progress-text { margin-top: 6px; font-size: 12px; color: #777; font-variant-numeric: tabular-nums; min-height: 1.4em; }
+    #status { position: fixed; left: 12px; bottom: 8px; color: #888; pointer-events: none; z-index: 5; }
     #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px 14px; box-shadow: 0 6px 24px #0008; display: none; z-index: 10; }
     #toast.show { display: flex; gap: 12px; align-items: center; }
     #toast button { font: inherit; color: #9cf; background: none; border: 0; cursor: pointer; padding: 0; white-space: nowrap; }
   </style>
 </head>
 <body>
-  <div id="stage"><div id="overlay" data-zh="正在加载编辑器…" data-en="Loading the editor…"></div></div>
+  <div id="stage"><div id="overlay"><div><div data-zh="正在加载编辑器…" data-en="Loading the editor…"></div><div id="progress"><div></div></div><div id="progress-text"></div></div></div></div>
   <span id="bridge"></span>
+  <span id="status"></span>
   <div id="toast"><span id="toast-text"></span><button id="toast-action" hidden></button></div>
   <script type="module">
-    import init, { mount } from "./pkg/shotstage_app.js";
-    import { connectBridge, findBridge } from "./bridge.js";
-    import { sceneToLink, sceneFromLocation, clearSceneFromLocation } from "./share.js";
+    // scripts/build-web.sh fills in the __...__ fingerprints, so a new release never mixes with
+    // files a browser cached from the previous one.
+    import init, { mount, provideFont, provideHumanData, setAssetUrls } from "./pkg/shotstage_app.js?v=__PKG_HASH__";
+    import { connectBridge, findBridge } from "./bridge.js?v=__BRIDGE_HASH__";
+    import { sceneToLink, sceneFromLocation, clearSceneFromLocation } from "./share.js?v=__SHARE_HASH__";
+
+    // ---- Downloads. The program comes first; the Chinese font (0.8 MB) and the realistic
+    // people (2 MB) are separate files, fetched beside it or once the editor is up. ----
+    const WASM_URL = "./pkg/shotstage_app_bg.wasm?v=__PKG_HASH__";
+    const WASM_BYTES = Number("__WASM_BYTES__") || 0;   // uncompressed size, for the progress bar
+    const FONT_URL = "./assets/NotoSansSC-subset.otf?v=__FONT_HASH__";
+    const HUMAN_URL = new URL("./assets/human.bin?v=__HUMAN_HASH__", location.href).href;
+    const fetchBytes = (url, priority) => fetch(url, { priority }).then(r => {
+      if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+      return r.arrayBuffer();
+    }).then(b => new Uint8Array(b));
+    let wasmDone, wasmReceived = 0;
+    const wasmDownloaded = new Promise(r => { wasmDone = r; });
+    /** The program as a streaming Response that counts bytes for the progress bar. */
+    async function wasmResponse() {
+      const res = await fetch(WASM_URL, { priority: "high" });
+      if (!res.ok) throw new Error(`${WASM_URL}: HTTP ${res.status}`);
+      if (!res.body || !WASM_BYTES) { wasmDone(); return res; }
+      const reader = res.body.getReader();
+      const counted = new ReadableStream({
+        async pull(ctl) {
+          const { done, value } = await reader.read();
+          if (done) { wasmDone(); ctl.close(); return; }
+          wasmReceived += value.byteLength;
+          showProgress();
+          ctl.enqueue(value);
+        },
+        cancel(reason) { reader.cancel(reason); },
+      });
+      return new Response(counted, { headers: { "Content-Type": "application/wasm" } });
+    }
 
     // ---- Interface language: follow the editor's own choice (it remembers it in localStorage). ----
     const store = {
@@ -55,9 +93,42 @@
 
     // ---- Start the editor. ----
     const overlay = document.getElementById("overlay");
+    function showProgress() {
+      if (!overlay.isConnected || !WASM_BYTES) return;
+      const f = Math.min(1, wasmReceived / WASM_BYTES);
+      overlay.querySelector("#progress > div").style.width = `${(f * 100).toFixed(1)}%`;
+      overlay.querySelector("#progress-text").textContent = f < 1
+        ? `${Math.round(f * 100)}%`
+        : t("正在启动…", "Starting…");
+    }
+    // Chinese readers need the font for the first frame, so it downloads beside the program;
+    // everyone else gets it once the editor is up (for Chinese names in a shared scene).
+    const fontBytes = zh() ? fetchBytes(FONT_URL, "high") : wasmDownloaded.then(() => fetchBytes(FONT_URL, "low"));
+    // People are only needed for a scene with realistic people, and the editor can start without
+    // them: fetch them once the program is down, or at once when the opening scene has people.
+    let startedOk, humans = null;
+    const started = new Promise(r => { startedOk = r; });
+    function loadHumans() {
+      humans ??= Promise.all([fetchBytes(HUMAN_URL, "low"), started]).then(([b]) => provideHumanData(b));
+      return humans;
+    }
+    wasmDownloaded.then(loadHumans).catch(e => console.warn("people asset unavailable", e));
+    const statusLine = document.getElementById("status");
+    /** Before opening a scene with realistic people, wait for the people asset. */
+    async function peopleFor(sceneJson) {
+      if (!sceneJson.includes('"from":"human"')) return;
+      statusLine.textContent = t("正在加载人物模型…", "Loading people…");
+      try { await loadHumans(); } catch (e) { console.warn(e); } finally { statusLine.textContent = ""; }
+    }
     let editor;
     try {
-      await init();
+      await init({ module_or_path: wasmResponse() });
+      setAssetUrls({ human: HUMAN_URL });
+      startedOk();
+      const fontReady = fontBytes.then(provideFont);
+      fontReady.catch(e => console.warn("Chinese font unavailable", e));
+      // Don't hold the editor more than a moment for the font: boxes beat a long wait.
+      if (zh()) await Promise.race([fontReady.catch(() => {}), new Promise(r => setTimeout(r, 4000))]);
       editor = await mount("#stage", {
         toolbar: [{
           id: "share", label: "🔗 Share link", labelZh: "🔗 分享链接",
@@ -129,6 +200,7 @@
       }
       if (!shared) return false;
       const mine = editor.revision() > 0 ? JSON.stringify(editor.scene()) : store.get(AUTOSAVE);
+      await peopleFor(JSON.stringify(shared));
       try {
         editor.load(shared);
       } catch (e) {
@@ -141,8 +213,10 @@
       if (mine) {
         // Opening someone's link must not cost you your own work: keep it one step back.
         store.set(PREVIOUS, mine);
-        toast(t("已打开分享的场景。", "Opened the shared scene."), t("换回我之前的场景", "Back to my previous scene"), () => {
-          editor.load(JSON.parse(store.get(PREVIOUS)));
+        toast(t("已打开分享的场景。", "Opened the shared scene."), t("换回我之前的场景", "Back to my previous scene"), async () => {
+          const previous = store.get(PREVIOUS);
+          await peopleFor(previous);
+          editor.load(JSON.parse(previous));
         }, 10000);
       }
       return true;
@@ -153,6 +227,7 @@
     const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
     const bridgeUrl = new URLSearchParams(location.search).get("bridge") ?? (local ? await findBridge() : null);
     if (bridgeUrl) {
+      loadHumans().catch(e => console.warn("people asset unavailable", e));   // an agent may ask for people at once
       // Opened by `shotstage mcp --live --web dist` (or with ?bridge=ws://...): an agent drives
       // this editor, so start empty and let it bring its scene.
       const badge = document.getElementById("bridge");
@@ -168,6 +243,7 @@
         let restored = false;
         const saved = store.get(AUTOSAVE);
         if (saved) {
+          await peopleFor(saved);
           try { editor.load(JSON.parse(saved)); restored = true; } catch (e) { console.warn("autosave unreadable", e); }
         }
         if (!restored) loadExample();

@@ -210,15 +210,19 @@ UV 编辑的命令都以「面角」`[面, 面内序号]` 指定点，也可以�
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130   # 与 Cargo.lock 中的 wasm-bindgen 版本一致
-./scripts/build-web.sh                             # 产出 dist/pkg/shotstage_app.js + _bg.wasm
+./scripts/build-web.sh                             # 产出 dist/：index.html、pkg/（程序）、assets/（人体数据、中文字体）
 python3 -m http.server -d dist 8080                # 打开 http://localhost:8080
 ```
 
 编辑器挂到任意 DOM 容器里，并填满这个容器，跟随它的尺寸变化。同一页面可以挂多个实例，每个实例的场景和历史互相独立：
 
 ```js
-import init, { mount } from "./pkg/shotstage_app.js";
+import init, { mount, provideFont, provideHumanData } from "./pkg/shotstage_app.js";
 await init();
+// 人体数据（2 MB）和中文字体（0.8 MB）不在程序里，单独下载后交给编辑器，首次打开快得多。
+// 字体到之前中文显示成方框；没交人体数据时，第一次用到真人会同步下载 assets/human.bin（可用 setAssetUrls 改地址）。
+fetch("assets/NotoSansSC-subset.otf").then(r => r.arrayBuffer()).then(b => provideFont(new Uint8Array(b)));
+fetch("assets/human.bin").then(r => r.arrayBuffer()).then(b => provideHumanData(new Uint8Array(b)));
 
 const editor = await mount("#stage", { scene: savedSceneJson }); // 元素或 CSS 选择器；scene 可选
 // toolbar 可选：在编辑器顶栏加自己的按钮，点击时 editor.on 收到 { type: "toolbar", id }

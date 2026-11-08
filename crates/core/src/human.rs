@@ -23,7 +23,69 @@ use serde::{Deserialize, Serialize};
 use crate::mesh::{Mesh, TriMesh};
 use crate::{CoreError, Result};
 
-static DATA: &[u8] = include_bytes!("../assets/human.bin");
+/// Native builds carry the asset inside the binary. The browser build leaves it out (it is 2 MB
+/// of the download) and gets it with [`provide_data`] or the [`set_loader`] fallback.
+#[cfg(not(target_arch = "wasm32"))]
+static EMBEDDED: &[u8] = include_bytes!("../assets/human.bin");
+
+/// Size in bytes of the asset this build expects.
+pub const DATA_LEN: usize = parse_usize(env!("SHOTSTAGE_HUMAN_LEN"));
+/// FNV-1a 64 of the asset this build expects, as 16 hex digits (`build.rs`).
+pub const DATA_HASH: &str = env!("SHOTSTAGE_HUMAN_HASH");
+
+const fn parse_usize(s: &str) -> usize {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    while i < b.len() {
+        n = n * 10 + (b[i] - b'0') as usize;
+        i += 1;
+    }
+    n
+}
+
+fn fnv1a(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+static ASSET: OnceLock<Asset> = OnceLock::new();
+static LOADER: OnceLock<fn() -> Option<Vec<u8>>> = OnceLock::new();
+
+/// Hand over the asset file (`human.bin`) when the build doesn't embed it. Checked against the
+/// fingerprint this build was made with; providing it again once loaded does nothing.
+pub fn provide_data(bytes: &[u8]) -> Result<()> {
+    if ASSET.get().is_some() {
+        return Ok(());
+    }
+    check(bytes)?;
+    let _ = ASSET.set(parse(bytes));
+    Ok(())
+}
+
+fn check(bytes: &[u8]) -> Result<()> {
+    if bytes.len() != DATA_LEN || fnv1a(bytes) != DATA_HASH {
+        return Err(CoreError::Invalid(format!(
+            "human asset mismatch: got {} bytes, expected {DATA_LEN} with fingerprint {DATA_HASH}",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Whether the people asset is ready (always on native builds).
+pub fn data_loaded() -> bool {
+    cfg!(not(target_arch = "wasm32")) || ASSET.get().is_some()
+}
+
+/// Last resort when something needs people before [`provide_data`] was called: a function that
+/// fetches the file synchronously (the browser build registers one).
+pub fn set_loader(f: fn() -> Option<Vec<u8>>) {
+    let _ = LOADER.set(f);
+}
 
 /// Body shape and facial expression.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -531,9 +593,24 @@ impl Reader<'_> {
 }
 
 fn asset() -> &'static Asset {
-    static A: OnceLock<Asset> = OnceLock::new();
-    A.get_or_init(|| {
-        let mut r = Reader { b: DATA, o: 0 };
+    ASSET.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = std::borrow::Cow::Borrowed(EMBEDDED);
+        #[cfg(target_arch = "wasm32")]
+        let bytes = std::borrow::Cow::<[u8]>::Owned(
+            LOADER
+                .get()
+                .and_then(|f| f())
+                .filter(|b| check(b).is_ok())
+                .expect("the people asset (human.bin) could not be loaded"),
+        );
+        parse(&bytes)
+    })
+}
+
+fn parse(data: &[u8]) -> Asset {
+    {
+        let mut r = Reader { b: data, o: 0 };
         assert_eq!(r.take(4), b"SSHM", "human asset magic");
         assert_eq!(r.u32(), 3, "human asset version");
         let (verts, quads, bones, morphs) = (r.u32() as usize, r.u32() as usize, r.u32() as usize, r.u32() as usize);
@@ -584,7 +661,7 @@ fn asset() -> &'static Asset {
             };
             morph_map.insert(name.to_string(), Morph { unit, data });
         }
-        assert_eq!(r.o, DATA.len(), "human asset length");
+        assert_eq!(r.o, data.len(), "human asset length");
         Asset {
             verts,
             quads: quad_list,
@@ -597,7 +674,7 @@ fn asset() -> &'static Asset {
             skin_weights,
             morphs: morph_map,
         }
-    })
+    }
 }
 
 impl Morph {

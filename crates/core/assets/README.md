@@ -11,6 +11,10 @@ These assets are released by the MakeHuman team under **CC0 1.0** (public domain
 MPFB's `LICENSE.ASSETS.md`). No MPFB program code (GPL) is included in shotstage: the bake script
 only reads the data files.
 
+The desktop app and the CLI embed this file. The browser build leaves it out (it is a third of
+the download) and receives it from the page (`provideHumanData`), so the editor opens sooner;
+`build.rs` fingerprints it so the page can't hand over a different version.
+
 To rebuild:
 
     git clone --depth 1 https://github.com/makehumancommunity/mpfb2
