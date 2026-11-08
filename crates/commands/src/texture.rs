@@ -13,6 +13,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shotstage_core::uv::{self, Mapping, Material, UnwrapMethod};
+use shotstage_core::uvedit::{self, AlignTo, Corner};
 use shotstage_core::{EntityKind, MeshSource, Scene};
 
 use crate::builtin::color;
@@ -160,32 +161,228 @@ fn unwrap(s: &mut Scene, p: UnwrapParams) -> CmdResult<Value> {
     Ok(json!({ "faces": n, "mapping": "uv" }))
 }
 
+/// Which corners of the UV map a command works on.
+#[derive(Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+struct UvPick {
+    /// Faces: all their corners. With no `corners` either: the whole mesh.
+    #[serde(default)]
+    faces: Vec<u32>,
+    /// Face corners `[face, index in the face]` (what the UV editor selects).
+    #[serde(default)]
+    corners: Vec<Corner>,
+    /// Also take every corner at the same spot of the same vertex (Blender's sticky
+    /// selection), so neighbouring faces stay joined. Default false.
+    #[serde(default)]
+    sticky: bool,
+    /// Grow to whole islands (the flat pieces the corners are in). Default false.
+    #[serde(default)]
+    islands: bool,
+}
+
+impl UvPick {
+    fn resolve(&self, m: &shotstage_core::Mesh) -> CmdResult<Vec<Corner>> {
+        let mut c = uvedit::pick(m, &self.faces, &self.corners)?;
+        if self.islands || self.sticky {
+            let topo = uvedit::UvTopology::new(m);
+            if self.islands {
+                let faces: Vec<u32> = c.iter().map(|k| k[0]).collect();
+                c = uvedit::face_corners(m, &topo.island_faces(&faces));
+            }
+            if self.sticky {
+                c = topo.sticky(&c);
+            }
+        }
+        Ok(c)
+    }
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UvTransformParams {
     id: String,
-    /// Faces whose UVs move. Default: all.
-    #[serde(default)]
-    faces: Vec<u32>,
-    /// Move by `[du, dv]` (1 = the whole picture).
+    #[serde(flatten)]
+    pick: UvPick,
+    /// Move by `[du, dv]` (1 = the whole picture; v runs down the picture).
     translate: Option<[f32; 2]>,
-    /// Turn, degrees.
+    /// Turn, degrees, counter-clockwise as seen in the UV editor (the picture on the surface
+    /// turns the other way).
     rotate: Option<f32>,
-    /// Scale `[su, sv]` about the faces' UV centre.
+    /// Scale `[su, sv]` (negative mirrors).
     scale: Option<[f32; 2]>,
+    /// Point to turn and scale about. Default: the mean of the corners.
+    pivot: Option<[f32; 2]>,
 }
 
 fn uv_transform(s: &mut Scene, p: UvTransformParams) -> CmdResult<Value> {
     let m = edit_mesh(s, &p.id)?;
-    let out = uv::transform_uvs(
+    let corners = p.pick.resolve(&m)?;
+    let out = uvedit::transform_corners(
         &m,
-        &p.faces,
+        &corners,
         p.translate.unwrap_or([0.0; 2]),
         p.rotate.unwrap_or(0.0),
         p.scale.unwrap_or([1.0; 2]),
+        p.pivot,
     )?;
     store_uvs(s, &p.id, out)?;
-    Ok(json!({ "faces": if p.faces.is_empty() { m.faces.len() } else { p.faces.len() } }))
+    Ok(json!({ "corners": corners.len() }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UvSetParams {
+    id: String,
+    /// Face corners `[face, index in the face]`.
+    corners: Vec<Corner>,
+    /// New coordinate `[u, v]` of each corner, in the same order.
+    uvs: Vec<[f32; 2]>,
+}
+
+fn uv_set(s: &mut Scene, p: UvSetParams) -> CmdResult<Value> {
+    let m = edit_mesh(s, &p.id)?;
+    uvedit::pick(&m, &[], &p.corners)?;
+    let out = uvedit::set_corners(&m, &p.corners, &p.uvs)?;
+    store_uvs(s, &p.id, out)?;
+    Ok(json!({ "corners": p.corners.len() }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UvAlignParams {
+    id: String,
+    #[serde(flatten)]
+    pick: UvPick,
+    /// `u`: line them up in a column (same u); `v`: in a row (same v).
+    axis: UvAxis,
+    /// `min` (left / top), `center` (default) or `max` (right / bottom).
+    to: Option<AlignTo>,
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum UvAxis {
+    U,
+    V,
+}
+
+fn uv_align(s: &mut Scene, p: UvAlignParams) -> CmdResult<Value> {
+    let m = edit_mesh(s, &p.id)?;
+    let corners = p.pick.resolve(&m)?;
+    let out = uvedit::align(&m, &corners, p.axis as usize, p.to.unwrap_or_default())?;
+    store_uvs(s, &p.id, out)?;
+    Ok(json!({ "corners": corners.len() }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UvWeldParams {
+    id: String,
+    #[serde(flatten)]
+    pick: UvPick,
+    /// `center` (default): all the corners to one point. `stitch`: the corners of each mesh
+    /// vertex to their own middle, joining pieces that were cut apart along a seam.
+    mode: Option<WeldMode>,
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum WeldMode {
+    #[default]
+    Center,
+    Stitch,
+}
+
+fn uv_weld(s: &mut Scene, p: UvWeldParams) -> CmdResult<Value> {
+    let m = edit_mesh(s, &p.id)?;
+    let corners = p.pick.resolve(&m)?;
+    let out = uvedit::weld(&m, &corners, p.mode.unwrap_or_default() == WeldMode::Stitch)?;
+    let islands = uvedit::UvTopology::new(&out).islands.len();
+    store_uvs(s, &p.id, out)?;
+    Ok(json!({ "corners": corners.len(), "islands": islands }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UvPackParams {
+    id: String,
+    /// Pack only the islands these faces are in. Default: all.
+    #[serde(default)]
+    faces: Vec<u32>,
+    /// Gap between islands, as a fraction of the square. Default 0.01.
+    margin: Option<f32>,
+    /// Turn tall islands to lie flat (packs tighter). Default true.
+    rotate: Option<bool>,
+}
+
+fn uv_pack(s: &mut Scene, p: UvPackParams) -> CmdResult<Value> {
+    let m = edit_mesh(s, &p.id)?;
+    let out = uvedit::pack_islands(&m, &p.faces, p.margin.unwrap_or(0.01), p.rotate.unwrap_or(true))?;
+    let islands = uvedit::UvTopology::new(&out).islands.len();
+    store_uvs(s, &p.id, out)?;
+    Ok(json!({ "islands": islands }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UvSelectParams {
+    id: String,
+    #[serde(flatten)]
+    pick: UvPick,
+    /// Instead: every corner whose coordinate lies in this box `[[u0, v0], [u1, v1]]`.
+    rect: Option<[[f32; 2]; 2]>,
+}
+
+fn uv_select(s: &mut Scene, p: UvSelectParams) -> CmdResult<Value> {
+    let m = edit_mesh(s, &p.id)?;
+    let corners = match p.rect {
+        Some([a, b]) => {
+            let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
+            let all = uvedit::pick(&m, &[], &[])?;
+            let inside: Vec<Corner> = all
+                .into_iter()
+                .filter(|c| {
+                    let u = m.uvs[c[0] as usize][c[1] as usize];
+                    (lo[0]..=hi[0]).contains(&u[0]) && (lo[1]..=hi[1]).contains(&u[1])
+                })
+                .collect();
+            UvPick { corners: inside, ..p.pick }.resolve_nonempty(&m)?
+        }
+        None => p.pick.resolve(&m)?,
+    };
+    let topo = uvedit::UvTopology::new(&m);
+    // faces whose every corner is picked
+    let set: std::collections::BTreeSet<Corner> = corners.iter().copied().collect();
+    let faces: Vec<u32> = (0..m.faces.len() as u32)
+        .filter(|&f| (0..m.faces[f as usize].len() as u32).all(|k| set.contains(&[f, k])))
+        .collect();
+    let islands: std::collections::BTreeSet<u32> = corners.iter().map(|c| topo.island[c[0] as usize]).collect();
+    Ok(json!({ "corners": corners, "faces": faces, "islands": islands }))
+}
+
+impl UvPick {
+    /// Like [`UvPick::resolve`] but an empty `corners` list stays empty (a box around nothing).
+    fn resolve_nonempty(&self, m: &shotstage_core::Mesh) -> CmdResult<Vec<Corner>> {
+        if self.corners.is_empty() && self.faces.is_empty() {
+            uvedit::pick(m, &[], &[])?;
+            return Ok(Vec::new());
+        }
+        self.resolve(m)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UvIslandsParams {
+    id: String,
+}
+
+fn uv_islands(s: &mut Scene, p: UvIslandsParams) -> CmdResult<Value> {
+    let m = edit_mesh(s, &p.id)?;
+    if !m.has_uvs() {
+        return Err(CommandError::new("failed", "the mesh has no UV map yet: unwrap it first"));
+    }
+    Ok(json!({ "islands": uvedit::island_info(&m) }))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -213,7 +410,13 @@ pub fn commands() -> Vec<Command> {
     vec![
         command!("mesh.setMaterial", "Paint a picture on a mesh and say how it is laid on: box, planar, cylinder or sphere projection, or the mesh's UV map; repeat, offset, rotation. Give `textureData` (base64 image) or `texture` (an asset key); `clear` removes it.", mutates: true, MaterialParams, set_material),
         command!("mesh.unwrap", "Make a UV map for a mesh (all faces or some): smart (flat pieces packed without overlap) or a baked box / planar / cylinder / sphere projection. The texture then follows the UV map.", mutates: true, UnwrapParams, unwrap),
-        command!("mesh.uvTransform", "Move, turn or scale the UVs of some faces (all by default), e.g. to fit a label onto the front.", mutates: true, UvTransformParams, uv_transform),
+        command!("mesh.uvTransform", "Move, turn or scale part of the UV map: faces, face corners (`[face, index]`), optionally sticky (shared corners follow) or whole islands; all by default. E.g. fit a label onto the front.", mutates: true, UvTransformParams, uv_transform),
+        command!("mesh.uvSet", "Put face corners of the UV map at exact coordinates (what dragging in the UV editor does).", mutates: true, UvSetParams, uv_set),
+        command!("mesh.uvAlign", "Line UV corners up in a column (same u) or a row (same v): at their left / top, middle or right / bottom.", mutates: true, UvAlignParams, uv_align),
+        command!("mesh.uvWeld", "Bring UV corners together: all to one point, or `stitch` each vertex's corners to their middle to join pieces cut apart along a seam.", mutates: true, UvWeldParams, uv_weld),
+        command!("mesh.uvPack", "Lay the UV islands (all, or those of some faces) out again inside the picture square without overlap, keeping their relative sizes.", mutates: true, UvPackParams, uv_pack),
+        command!("mesh.uvSelect", "Resolve a UV selection without changing anything: faces / corners / a box in UV space, grown sticky or to whole islands. Returns the corners, the faces fully inside and the islands touched.", mutates: false, UvSelectParams, uv_select),
+        command!("mesh.uvIslands", "The UV map's islands (flat pieces): their faces, bounding box and area in UV space.", mutates: false, UvIslandsParams, uv_islands),
         command!("mesh.uvData", "A mesh's UV map (per face corner, if it has one), its material, and the final texture coordinates of every face corner.", mutates: false, UvDataParams, uv_data),
     ]
 }
@@ -279,5 +482,54 @@ mod tests {
         assert!(s.dispatch("mesh.setMaterial", json!({"id": "box", "repeat": [0, 1]})).is_err());
         assert!(s.dispatch("mesh.uvTransform", json!({"id": "box", "scale": [2, 2]})).is_err());
         assert_eq!(&before, s.scene());
+    }
+
+    #[test]
+    fn uv_editor_commands() {
+        let mut s = Session::default();
+        s.dispatch(
+            "entity.create",
+            json!({"id": "box", "type": "mesh", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        assert!(s.dispatch("mesh.uvIslands", json!({"id": "box"})).is_err());
+        s.dispatch("mesh.unwrap", json!({"id": "box"})).unwrap();
+        let isl = s.dispatch("mesh.uvIslands", json!({"id": "box"})).unwrap().result;
+        assert_eq!(isl["islands"].as_array().unwrap().len(), 6);
+        // drag one corner: sticky has nothing to share in separate pieces
+        s.dispatch("mesh.uvSet", json!({"id": "box", "corners": [[0, 0]], "uvs": [[0.9, 0.9]]})).unwrap();
+        let d = s.dispatch("mesh.uvData", json!({"id": "box"})).unwrap().result;
+        assert!((d["uvMap"][0][0][0].as_f64().unwrap() - 0.9).abs() < 1e-6);
+        // unknown fields are still refused, flattened or not
+        assert!(s.dispatch("mesh.uvTransform", json!({"id": "box", "turn": 4})).is_err());
+        // move a corner's whole island
+        let r = s
+            .dispatch(
+                "mesh.uvTransform",
+                json!({"id": "box", "corners": [[1, 0]], "islands": true, "translate": [0.5, 0]}),
+            )
+            .unwrap()
+            .result;
+        assert_eq!(r["corners"], 4);
+        // select by box, align, stitch, pack
+        let sel = s.dispatch("mesh.uvSelect", json!({"id": "box", "rect": [[-10, -10], [10, 10]]})).unwrap().result;
+        assert_eq!(sel["corners"].as_array().unwrap().len(), 24);
+        assert_eq!(sel["faces"].as_array().unwrap().len(), 6);
+        s.dispatch("mesh.uvAlign", json!({"id": "box", "faces": [2], "axis": "u", "to": "min"})).unwrap();
+        let w = s
+            .dispatch("mesh.uvWeld", json!({"id": "box", "faces": [0, 1, 2, 3, 4, 5], "mode": "stitch"}))
+            .unwrap()
+            .result;
+        assert!(w["islands"].as_u64().unwrap() < 6);
+        s.dispatch("mesh.uvPack", json!({"id": "box", "margin": 0.02})).unwrap();
+        let d = s.dispatch("mesh.uvData", json!({"id": "box"})).unwrap().result;
+        for f in d["uvMap"].as_array().unwrap() {
+            for c in f.as_array().unwrap() {
+                let (u, v) = (c[0].as_f64().unwrap(), c[1].as_f64().unwrap());
+                assert!((-1e-3..=1.001).contains(&u) && (-1e-3..=1.001).contains(&v));
+            }
+        }
+        // each step is one undo
+        s.dispatch("history.undo", json!({})).unwrap();
     }
 }

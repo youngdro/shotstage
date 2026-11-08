@@ -95,6 +95,18 @@ pub fn host_commands() -> Vec<HostCommand> {
             schema: schema_of::<EditSelectParams>,
         },
         HostCommand {
+            id: "editor.uvEditor",
+            summary: "Open the UV editor on a mesh (null closes it): its UV map over its picture, to pick and drag UV vertices, edges, faces or islands. Optional select mode and sticky selection.",
+            needs: &[VIEW],
+            schema: schema_of::<UvEditorParams>,
+        },
+        HostCommand {
+            id: "editor.uvSelect",
+            summary: "Set the UV editor's selection: face corners `[face, index]` and / or whole faces (mesh.uvSelect resolves boxes, sticky and islands).",
+            needs: &[VIEW],
+            schema: schema_of::<UvEditorSelectParams>,
+        },
+        HostCommand {
             id: "editor.state",
             summary: "The editor's selection, playhead frame and viewport options.",
             needs: &[VIEW],
@@ -199,7 +211,56 @@ pub struct EditSelectParams {
     pub mode: Option<SelectMode>,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UvEditorParams {
+    /// Mesh whose UV map to show, or null to close the UV editor.
+    pub id: Option<String>,
+    /// What clicks pick. Default vertex.
+    pub mode: Option<UvSelectMode>,
+    /// Picking a UV vertex also picks the corners of neighbouring faces at the same spot.
+    pub sticky: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UvEditorSelectParams {
+    /// Face corners `[face, index in the face]`.
+    pub corners: Option<Vec<[u32; 2]>>,
+    /// Whole faces (all their corners).
+    pub faces: Option<Vec<u32>>,
+    pub mode: Option<UvSelectMode>,
+}
+
 // ---------------------------------------------------------------- view state
+
+/// Which elements clicks pick in the UV editor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum UvSelectMode {
+    #[default]
+    Vertex,
+    Edge,
+    Face,
+    /// Whole flat pieces.
+    Island,
+}
+
+/// The UV editor: the mesh shown and the selected face corners.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UvState {
+    pub id: String,
+    pub mode: UvSelectMode,
+    pub sticky: bool,
+    /// Selected face corners `[face, index]`, sorted.
+    pub selection: Vec<[u32; 2]>,
+}
+
+impl UvState {
+    pub fn json(&self) -> Value {
+        json!({ "id": self.id, "mode": self.mode, "sticky": self.sticky, "selection": self.selection })
+    }
+}
 
 /// Which elements clicks pick in mesh edit mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -223,6 +284,12 @@ impl EditState {
     pub fn json(&self) -> Value {
         json!({ "id": self.id, "mode": self.mode, "selection": self.selection })
     }
+}
+
+/// Corner count of each face of a mesh (for checking UV selections).
+fn uv_mesh_faces(scene: &Scene, id: &str) -> CmdResult<Vec<usize>> {
+    let m = crate::meshedit::edit_mesh(scene, id)?;
+    Ok(m.faces.iter().map(Vec::len).collect())
 }
 
 /// Can `id` be edited in edit mode? (a mesh that is not rigged)
@@ -250,6 +317,8 @@ pub struct ViewState {
     pub look_through: bool,
     /// Mesh edit mode, if on.
     pub edit: Option<EditState>,
+    /// The UV editor, if open.
+    pub uv: Option<UvState>,
 }
 
 /// Run an `editor.*` command against a view. `None` when `id` is not one.
@@ -306,8 +375,49 @@ pub fn view_command(view: &mut ViewState, scene: &Scene, id: &str, params: Value
             .normalized();
             Ok(edit.json())
         }),
+        "editor.uvEditor" => parse::<UvEditorParams>(params).and_then(|p| {
+            match p.id {
+                None => view.uv = None,
+                Some(id) => {
+                    editable(scene, &id)?;
+                    let keep = view.uv.take().filter(|u| u.id == id);
+                    view.uv = Some(UvState {
+                        mode: p.mode.or(keep.as_ref().map(|u| u.mode)).unwrap_or_default(),
+                        sticky: p.sticky.or(keep.as_ref().map(|u| u.sticky)).unwrap_or(true),
+                        selection: keep.map(|u| u.selection).unwrap_or_default(),
+                        id,
+                    });
+                }
+            }
+            Ok(view.uv.as_ref().map(UvState::json).unwrap_or(Value::Null))
+        }),
+        "editor.uvSelect" => parse::<UvEditorSelectParams>(params).and_then(|p| {
+            let uv = view
+                .uv
+                .as_mut()
+                .ok_or_else(|| CommandError::new("failed", "the UV editor is closed: call editor.uvEditor first"))?;
+            let faces = uv_mesh_faces(scene, &uv.id)?;
+            let mut sel: std::collections::BTreeSet<[u32; 2]> = Default::default();
+            for c in p.corners.unwrap_or_default() {
+                if faces.get(c[0] as usize).is_none_or(|&n| c[1] as usize >= n) {
+                    return Err(CommandError::invalid(format!("corner {c:?} does not exist")));
+                }
+                sel.insert(c);
+            }
+            for f in p.faces.unwrap_or_default() {
+                let n =
+                    *faces.get(f as usize).ok_or_else(|| CommandError::invalid(format!("face {f} does not exist")))?;
+                sel.extend((0..n as u32).map(|k| [f, k]));
+            }
+            if let Some(m) = p.mode {
+                uv.mode = m;
+            }
+            uv.selection = sel.into_iter().collect();
+            Ok(uv.json())
+        }),
         "editor.state" => parse::<NoParams>(params).map(|_| {
             json!({
+                "uv": view.uv.as_ref().map(UvState::json),
                 "edit": view.edit.as_ref().map(EditState::json),
                 "selected": view.selected,
                 "frame": view.frame.unwrap_or(scene.timeline.start as f32),
@@ -1097,6 +1207,31 @@ mod tests {
         assert_eq!(st["frame"], 12.0);
         assert_eq!(st["pass"], "depth");
         assert!(view_command(&mut v, s.scene(), "entity.create", json!({})).is_none());
+    }
+
+    #[test]
+    fn uv_editor_view() {
+        let mut s = Session::default();
+        s.dispatch(
+            "entity.create",
+            json!({"id": "box", "type": "mesh", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        let mut v = ViewState::default();
+        assert!(view_command(&mut v, s.scene(), "editor.uvSelect", json!({"faces": [0]})).unwrap().is_err());
+        let r =
+            view_command(&mut v, s.scene(), "editor.uvEditor", json!({"id": "box", "mode": "face"})).unwrap().unwrap();
+        assert_eq!(r["mode"], "face");
+        assert_eq!(r["sticky"], true);
+        let r = view_command(&mut v, s.scene(), "editor.uvSelect", json!({"faces": [1], "corners": [[0, 2]]}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r["selection"].as_array().unwrap().len(), 5);
+        assert!(view_command(&mut v, s.scene(), "editor.uvSelect", json!({"corners": [[0, 7]]})).unwrap().is_err());
+        let st = view_command(&mut v, s.scene(), "editor.state", json!({})).unwrap().unwrap();
+        assert_eq!(st["uv"]["id"], "box");
+        view_command(&mut v, s.scene(), "editor.uvEditor", json!({"id": null})).unwrap().unwrap();
+        assert!(v.uv.is_none());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
