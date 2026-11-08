@@ -17,6 +17,8 @@ use crate::hub::{self, SharedHub};
 mod editmode;
 #[path = "material.rs"]
 mod material;
+#[path = "uveditor.rs"]
+mod uveditor;
 
 /// Something in the block palette.
 #[derive(Clone)]
@@ -869,6 +871,8 @@ pub struct EditorApp {
     incoming: crate::files::Inbox,
     /// Mesh edit mode: the edited mesh's geometry, the running tool, view options.
     edit_cache: Option<editmode::EditCache>,
+    /// The UV editor panel's view, cache and gesture.
+    uv: uveditor::UvEditor,
     edit_modal: Option<editmode::Modal>,
     edit_xray: bool,
     edit_amounts: editmode::EditAmounts,
@@ -967,6 +971,7 @@ impl EditorApp {
             toast: None,
             incoming: Default::default(),
             edit_cache: None,
+            uv: Default::default(),
             edit_modal: None,
             edit_xray: false,
             edit_amounts: Default::default(),
@@ -2039,6 +2044,17 @@ impl eframe::App for EditorApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.properties(ui));
             },
         );
+        if self.hub.borrow().uv.is_some() {
+            egui::Panel::right("uv_editor")
+                .resizable(true)
+                .default_size(440.0)
+                .min_size(280.0)
+                .max_size(1400.0)
+                .show(ui, |ui| self.uv_panel(ui));
+        } else {
+            self.uv.hovered = false;
+            self.uv.gesture = Default::default();
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, frame));
         {
             let mut h = self.hub.borrow_mut();
@@ -2059,6 +2075,9 @@ impl EditorApp {
             ui.ctx().request_repaint();
         }
         if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        if (self.uv.hovered || matches!(self.uv.gesture, uveditor::UvGesture::Modal(_))) && self.uv_shortcuts(ui) {
             return;
         }
         if self.edit_shortcuts(ui) {
@@ -3235,7 +3254,7 @@ impl EditorApp {
                 }
             });
             ui.end_row();
-            ui.label("");
+            ui.label(tr(""));
             ui.horizontal(|ui| {
                 if ui
                     .button(tr("Import HDRI…"))
@@ -3604,19 +3623,19 @@ impl EditorApp {
                 self.part_color_button(ui, root, "bottom", part_color("bottom"));
                 ui.end_row();
                 changed |= ui.checkbox(&mut o.shoes, tr("Shoes")).changed();
-                ui.label("");
+                ui.label(tr(""));
                 self.part_color_button(ui, root, "shoes", part_color("shoes"));
                 ui.end_row();
                 changed |= ui.checkbox(&mut o.apron, tr("Apron")).changed();
-                ui.label("");
+                ui.label(tr(""));
                 self.part_color_button(ui, root, "apron", part_color("apron"));
                 ui.end_row();
                 ui.label(tr("Skin"));
-                ui.label("");
+                ui.label(tr(""));
                 self.part_color_button(ui, root, "skin", part_color("skin"));
                 ui.end_row();
                 ui.label(tr("Eyes"));
-                ui.label("");
+                ui.label(tr(""));
                 self.part_color_button(ui, root, "eyes", part_color("irises"));
                 ui.end_row();
             });
@@ -3657,7 +3676,7 @@ impl EditorApp {
     /// A colour button for one part of a realistic person (`person.setOutfit` colours).
     fn part_color_button(&mut self, ui: &mut egui::Ui, root: &str, key: &str, current: Option<[f32; 3]>) {
         let Some(c) = current else {
-            ui.label("");
+            ui.label(tr(""));
             return;
         };
         let mut c2 = c;
@@ -5839,6 +5858,7 @@ mod i18n_tests {
             include_str!("ui.rs"),
             include_str!("editmode.rs"),
             include_str!("material.rs"),
+            include_str!("uveditor.rs"),
             include_str!("storyboard.rs"),
         ] {
             for part in src.split("tr(\"").skip(1) {

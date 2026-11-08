@@ -19,7 +19,7 @@ fn mapping_name(m: Mapping) -> &'static str {
 }
 
 /// How a mapping is shown in the panel.
-fn mapping_label(name: &str) -> &str {
+pub(super) fn mapping_label(name: &str) -> &str {
     match name {
         _ if !crate::i18n::zh() => match name {
             "box" => "Box",
@@ -127,6 +127,16 @@ impl EditorApp {
         let picked = self.edit_faces(id).filter(|f| !f.is_empty());
         let scope = tr(if picked.is_some() { "selected faces" } else { "whole mesh" });
         ui.horizontal_wrapped(|ui| {
+            let open = self.uv_is_open(id);
+            if ui
+                .selectable_label(open, tr("UV editor"))
+                .on_hover_text(tr("Open the UV map beside the view: see it over the picture and drag its vertices, edges, faces and islands"))
+                .clicked()
+            {
+                self.uv_toggle(id);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
             ui.label(crate::lf!("Unwrap {scope}", "展开 UV（{scope}）"));
             for (method, tip) in [
                 ("smart", "Cut into flat pieces and pack them without overlap"),
@@ -138,7 +148,7 @@ impl EditorApp {
                     "smart" => tr("Smart"),
                     m => mapping_label(m).to_string(),
                 };
-                if ui.button(label).on_hover_text(tr(tip)).clicked() {
+                if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
                     let mut p = json!({"id": id, "method": method});
                     if let Some(f) = &picked {
                         p["faces"] = json!(f);
@@ -151,7 +161,7 @@ impl EditorApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(crate::lf!("UVs of {scope}", "UV（{scope}）"));
                 for (label, tip, p) in [
-                    ("⟲ 90°", "Turn the picture on these faces", json!({"rotate": 90})),
+                    ("⟲ 90°", "Turn the picture on these faces", json!({"rotate": -90})),
                     ("Tile ×2", "Show twice as much of the picture", json!({"scale": [2, 2]})),
                     ("Zoom ×2", "Zoom into the picture", json!({"scale": [0.5, 0.5]})),
                     ("Mirror", "Mirror the picture left-right", json!({"scale": [-1, 1]})),

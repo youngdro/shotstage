@@ -390,32 +390,8 @@ pub fn unwrap(
         pieces.push(Piece { faces: chart, uvs, size: (hi - lo).max(Vec2::splat(1e-6)) });
     }
     pieces.sort_by(|a, b| b.size.y.total_cmp(&a.size.y));
-    let area: f32 = pieces.iter().map(|p| p.size.x * p.size.y).sum();
-    let widest = pieces.iter().map(|p| p.size.x).fold(0.0f32, f32::max);
-    let gap_of = |side: f32| margin * side;
-    // try wider rows until everything fits in a square
-    let mut side = area.sqrt().max(widest);
-    let mut placed: Vec<Vec2> = Vec::new();
-    for _ in 0..64 {
-        placed.clear();
-        let gap = gap_of(side);
-        let (mut x, mut y, mut row) = (gap, gap, 0.0f32);
-        for p in &pieces {
-            if x + p.size.x + gap > side && x > gap {
-                x = gap;
-                y += row + gap;
-                row = 0.0;
-            }
-            placed.push(Vec2::new(x, y));
-            x += p.size.x + gap;
-            row = row.max(p.size.y);
-        }
-        if y + row + gap <= side * 1.0001 {
-            break;
-        }
-        side *= 1.08;
-    }
-    let side = side.max(1e-6);
+    let sizes: Vec<Vec2> = pieces.iter().map(|p| p.size).collect();
+    let (placed, side) = pack_rects(&sizes, margin);
     for (p, at) in pieces.iter().zip(&placed) {
         for (k, &f) in p.faces.iter().enumerate() {
             out.uvs[f as usize] = p.uvs[k].iter().map(|q| [(q.x + at.x) / side, (q.y + at.y) / side]).collect();
@@ -424,31 +400,42 @@ pub fn unwrap(
     Ok(out)
 }
 
+/// Shelf-pack rectangles (best sorted tallest first) into the smallest square found: their
+/// corners and the square's side, both in the rectangles' units. `margin`: gap between them
+/// as a fraction of the side.
+pub fn pack_rects(sizes: &[Vec2], margin: f32) -> (Vec<Vec2>, f32) {
+    let area: f32 = sizes.iter().map(|s| s.x * s.y).sum();
+    let widest = sizes.iter().map(|s| s.x).fold(0.0f32, f32::max);
+    let tallest = sizes.iter().map(|s| s.y).fold(0.0f32, f32::max);
+    // try wider rows until everything fits in a square
+    let mut side = area.sqrt().max(widest).max(tallest).max(1e-6);
+    let mut placed: Vec<Vec2> = Vec::new();
+    for _ in 0..64 {
+        placed.clear();
+        let gap = margin * side;
+        let (mut x, mut y, mut row) = (gap, gap, 0.0f32);
+        for s in sizes {
+            if x + s.x + gap > side && x > gap {
+                x = gap;
+                y += row + gap;
+                row = 0.0;
+            }
+            placed.push(Vec2::new(x, y));
+            x += s.x + gap;
+            row = row.max(s.y);
+        }
+        if y + row + gap <= side * 1.0001 && sizes.iter().zip(&placed).all(|(s, p)| p.x + s.x + gap <= side * 1.0001) {
+            break;
+        }
+        side *= 1.08;
+    }
+    (placed, side.max(1e-6))
+}
+
 /// Move, turn (degrees) and scale the UVs of some faces (all when empty) about their centre.
 pub fn transform_uvs(m: &Mesh, faces: &[u32], translate: [f32; 2], rotate: f32, scale: [f32; 2]) -> Result<Mesh> {
-    if !m.has_uvs() {
-        return Err(CoreError::Invalid("the mesh has no UV map yet: unwrap it first".into()));
-    }
-    let nf = m.faces.len() as u32;
-    if faces.iter().any(|&f| f >= nf) {
-        return Err(CoreError::Invalid("a face does not exist".into()));
-    }
-    if !(translate.iter().chain(&scale).all(|v| v.is_finite()) && rotate.is_finite()) {
-        return Err(CoreError::Invalid("translate, rotate and scale must be finite".into()));
-    }
-    let picked: Vec<u32> = if faces.is_empty() { (0..nf).collect() } else { faces.to_vec() };
-    let all: Vec<Vec2> = picked.iter().flat_map(|&f| m.uvs[f as usize].iter().map(|u| Vec2::from_array(*u))).collect();
-    let c = all.iter().copied().sum::<Vec2>() / all.len().max(1) as f32;
-    let (s, co) = rotate.to_radians().sin_cos();
-    let mut out = m.clone();
-    for &f in &picked {
-        for u in &mut out.uvs[f as usize] {
-            let d = (Vec2::from_array(*u) - c) * Vec2::from_array(scale);
-            let r = Vec2::new(d.x * co - d.y * s, d.x * s + d.y * co);
-            *u = (c + r + Vec2::from_array(translate)).to_array();
-        }
-    }
-    Ok(out)
+    let corners = crate::uvedit::pick(m, faces, &[])?;
+    crate::uvedit::transform_corners(m, &corners, translate, rotate, scale, None)
 }
 
 #[cfg(test)]

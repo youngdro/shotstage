@@ -1551,6 +1551,83 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("Soft cloudy sky light, no sun", "柔和的阴天天光，没有太阳"),
     ("Moonlight under a night sky", "夜空下的月光"),
     ("Remove all lights and the sky: back to the flat studio light", "移除所有灯光和天空：回到平面摄影棚光"),
+    // mesh edit mode
+    // boolean
+    // mesh, modifiers
+    // texture and UVs
+    // realistic people
+    // other
+    // poses
+    // hand shapes
+    // expressions
+    // hair
+    // people presets
+    // motion presets
+    // templates
+    // sky, shadows and lighting presets
+    // UV editor
+    ("UV editor", "UV 编辑器"),
+    ("Close the UV editor", "关闭 UV 编辑器"),
+    (
+        "Open the UV map beside the view: see it over the picture and drag its vertices, edges, faces and islands",
+        "在视图旁打开 UV：叠在图片上查看，拖动它的顶点、边、面和孤岛",
+    ),
+    (
+        "Show the UV map beside the view: drag UV vertices, edges, faces and islands over the picture",
+        "在视图旁显示 UV：在图片上拖动 UV 顶点、边、面和孤岛",
+    ),
+    ("Island", "孤岛"),
+    ("Align ▾", "对齐 ▾"),
+    ("Frame everything (Home)", "全部显示（Home）"),
+    ("Weld", "焊接"),
+    ("Move the picked corners to one point", "把选中的角移到同一点"),
+    ("Stitch", "缝合"),
+    (
+        "Join each vertex's picked corners at their middle: sews pieces back together along a seam",
+        "把每个顶点选中的角合到中点：沿接缝把碎块缝回去",
+    ),
+    ("Only picked", "只看选中"),
+    ("Show only the faces picked in the 3D view (when some are)", "只显示 3D 视图里选中的面（有选中时）"),
+    ("Pack", "排列"),
+    ("all islands", "所有孤岛"),
+    ("the picked faces' islands", "选中面所在的孤岛"),
+    ("Sticky", "联动"),
+    (
+        "Picking a UV vertex or edge also picks the neighbouring faces' corners at the same spot, so the map stays joined",
+        "选 UV 顶点或边时，也选中相邻面在同一位置的角，让 UV 保持相连",
+    ),
+    (
+        "Smart cuts it into flat pieces and packs them; Box / Cylinder / Sphere bake that projection.",
+        "“智能”会切成平展的小块并排好；盒状 / 圆柱 / 球面会烘焙对应的投影。",
+    ),
+    ("Snap moves to the picture's pixels (or hold Ctrl)", "移动时吸附到图片像素（或按住 Ctrl）"),
+    (
+        "This mesh has no UV map yet. Unwrap it to lay its faces flat on the picture:",
+        "这个网格还没有 UV。展开它，把面平铺到图片上：",
+    ),
+    (
+        "This mesh has no editable UV map (rigged people are not unwrapped here).",
+        "这个网格没有可编辑的 UV（带骨骼的人物不在这里展开）。",
+    ),
+    ("Unwrap ▾", "展开 UV ▾"),
+    ("Use UV map", "改用 UV 贴法"),
+    ("The picture is projected, not laid on by this UV map.", "图片现在是投影上去的，没有按这个 UV 贴。"),
+    ("Bake a box projection", "烘焙盒状投影"),
+    ("Bake a projection from the front", "从正面烘焙投影"),
+    ("the whole mesh", "整个网格"),
+    ("the picked faces", "选中的面"),
+    ("Left", "左"),
+    ("Centre (column)", "居中（列）"),
+    ("Right", "右"),
+    ("Top edge", "上边"),
+    ("Middle (row)", "居中（行）"),
+    ("Bottom edge", "下边"),
+    ("Turn 90° counter-clockwise", "逆时针转 90°"),
+    ("Turn 90° clockwise", "顺时针转 90°"),
+    ("Mirror left-right", "左右镜像"),
+    ("Mirror top-bottom", "上下镜像"),
+    (" · U only", " · 只动 U"),
+    (" · V only", " · 只动 V"),
 ];
 
 #[cfg(test)]
