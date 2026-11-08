@@ -37,6 +37,48 @@ pub struct Hub {
     pub edit: Option<EditState>,
     /// The UV editor window: the mesh shown and its selected face corners.
     pub uv: Option<UvState>,
+    /// Buttons the host page put in the top bar (`mount(el, { toolbar: [...] })`).
+    pub host_buttons: Vec<HostButton>,
+}
+
+/// A button the host page adds to the editor's top bar. Clicking it sends listeners
+/// `{ "type": "toolbar", "id": ... }`; the page decides what it does (e.g. copy a share link).
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostButton {
+    pub id: String,
+    pub label: String,
+    /// The label in the Chinese interface (defaults to `label`).
+    #[serde(default)]
+    pub label_zh: Option<String>,
+    #[serde(default)]
+    pub tooltip: Option<String>,
+    #[serde(default)]
+    pub tooltip_zh: Option<String>,
+}
+
+impl HostButton {
+    pub fn label(&self) -> &str {
+        match &self.label_zh {
+            Some(zh) if crate::i18n::zh() => zh,
+            _ => &self.label,
+        }
+    }
+
+    pub fn tooltip(&self) -> Option<&str> {
+        match &self.tooltip_zh {
+            Some(zh) if crate::i18n::zh() => Some(zh),
+            _ => self.tooltip.as_deref(),
+        }
+    }
+}
+
+/// Send `event` to every listener (outside the borrow, so listeners may call back in).
+pub fn emit(hub: &SharedHub, event: &Value) {
+    let listeners: Vec<Listener> = hub.borrow().listeners.iter().map(|(_, f)| f.clone()).collect();
+    for l in listeners {
+        l(event);
+    }
 }
 
 pub use shotstage_commands::host::{EditState, SelectMode, UvSelectMode, UvState, editable};

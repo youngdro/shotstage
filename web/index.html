@@ -1,67 +1,207 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>shotstage</title>
+  <title>shotstage · 在线 3D 导播台</title>
+  <meta name="description" content="Block out scenes, people, cameras and moves in the browser; share a scene as a link.">
   <style>
-    html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 13px system-ui, sans-serif; }
-    #app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
-    header { padding: 6px 12px; border-bottom: 1px solid #333; }
-    /* The editor fills whatever container you mount it in. */
-    #stage { position: relative; min-height: 0; }
-    #bridge { float: right; color: #888; }
+    html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 13px system-ui, sans-serif; overflow: hidden; }
+    #bridge { position: fixed; right: 12px; bottom: 8px; color: #888; pointer-events: none; z-index: 5; }
     #bridge.connected { color: #6c6; }
+    /* The editor fills whatever container you mount it in. */
+    #stage { position: relative; height: 100%; }
+    #overlay { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: #999; line-height: 1.7; padding: 16px; }
+    #overlay.error { color: #e88; }
+    #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px 14px; box-shadow: 0 6px 24px #0008; display: none; z-index: 10; }
+    #toast.show { display: flex; gap: 12px; align-items: center; }
+    #toast button { font: inherit; color: #9cf; background: none; border: 0; cursor: pointer; padding: 0; white-space: nowrap; }
   </style>
 </head>
 <body>
-  <div id="app">
-    <header><span id="bridge"></span>shotstage demo host page · the editor below is mounted into <code>#stage</code>; try <code>shotstage.dispatch(...)</code> or <code>await shotstage.snapshot()</code> in the console</header>
-    <div id="stage"></div>
-  </div>
+  <div id="stage"><div id="overlay" data-zh="正在加载编辑器…" data-en="Loading the editor…"></div></div>
+  <span id="bridge"></span>
+  <div id="toast"><span id="toast-text"></span><button id="toast-action" hidden></button></div>
   <script type="module">
     import init, { mount } from "./pkg/shotstage_app.js";
     import { connectBridge, findBridge } from "./bridge.js";
-    await init();
-    const editor = await mount("#stage", {});
+    import { sceneToLink, sceneFromLocation, clearSceneFromLocation } from "./share.js";
+
+    // ---- Interface language: follow the editor's own choice (it remembers it in localStorage). ----
+    const store = {
+      get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+      set(k, v) { try { localStorage.setItem(k, v); return true; } catch { return false; } },
+      remove(k) { try { localStorage.removeItem(k); } catch {} },
+    };
+    const zh = () => { const l = store.get("shotstage.lang"); return l ? l === "zh" : navigator.language.toLowerCase().startsWith("zh"); };
+    const t = (zhText, enText) => (zh() ? zhText : enText);
+    const relabel = () => {
+      document.documentElement.lang = zh() ? "zh-CN" : "en";
+      for (const el of document.querySelectorAll("[data-zh]")) el.textContent = t(el.dataset.zh, el.dataset.en);
+    };
+    relabel();
+
+    let toastTimer = 0;
+    function toast(text, action, onAction, ms = 5000) {
+      const box = document.getElementById("toast"), btn = document.getElementById("toast-action");
+      document.getElementById("toast-text").textContent = text;
+      btn.hidden = !action;
+      btn.textContent = action ?? "";
+      btn.onclick = () => { box.classList.remove("show"); onAction?.(); };
+      box.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => box.classList.remove("show"), ms);
+    }
+
+    // ---- Start the editor. ----
+    const overlay = document.getElementById("overlay");
+    let editor;
+    try {
+      await init();
+      editor = await mount("#stage", {
+        toolbar: [{
+          id: "share", label: "🔗 Share link", labelZh: "🔗 分享链接",
+          tooltip: "Copy a link that opens a copy of this scene", tooltipZh: "复制一个链接，打开就是这个场景的副本",
+        }],
+      });
+      overlay.remove();
+    } catch (e) {
+      console.error(e);
+      overlay.classList.add("error");
+      overlay.textContent = t(
+        `编辑器没能启动：${e?.message ?? e}。需要支持 WebGPU 或 WebGL2 的浏览器（新版 Chrome、Edge、Safari、Firefox）。`,
+        `The editor could not start: ${e?.message ?? e}. It needs a browser with WebGPU or WebGL2 (a recent Chrome, Edge, Safari or Firefox).`);
+      throw e;
+    }
     window.shotstage = editor;   // optional global for agents and the devtools console
 
-    // Opened by `shotstage mcp --live --web dist` (or with ?bridge=ws://...): an agent drives
-    // this editor, so start empty and let it bring its scene.
-    const bridgeUrl = await findBridge();
+    // A small starter scene, built through the same API agents use: real-size blocks that
+    // rest on each other, and a camera framed by shot size instead of coordinates.
+    const EMPTY = editor.scene();
+    function loadExample() {
+      editor.batch([   // one step: undo returns to the scene you had
+        { command: "scene.load", params: { scene: EMPTY } },
+        // A fresh-food aisle, built through the same API agents use.
+        { command: "entity.create", params: { type: "mesh", id: "floor", primitive: { shape: "plane", size: [14, 14] }, color: [0.62, 0.62, 0.6], locked: true } },
+        { command: "prefab.create", params: { kind: "produceStand", id: "produce", position: [0, 0, -0.6] } },
+        { command: "prefab.create", params: { kind: "watermelonBin", id: "melons", position: [-2.0, 0, -0.4] } },
+        { command: "prefab.create", params: { kind: "openChiller", id: "chiller", position: [0.2, 0, -3.2] } },
+        { command: "prefab.create", params: { kind: "openChiller", id: "chiller_2", position: [1.5, 0, -3.2] } },
+        { command: "prefab.create", params: { kind: "gondolaShelf", id: "shelf", position: [-1.6, 0, -3.2] } },
+        { command: "prefab.create", params: { kind: "priceSign", id: "sign", position: [1.5, 0, -1.5] } },
+        { command: "prefab.create", params: { kind: "woman", id: "shopper", name: "Shopper", position: [0.3, 0, 1.0], rotationY: 180 } },
+        { command: "pose.set", params: { id: "shopper", pose: "reach", joints: { shoulder_r: [-70, 0, -6], elbow_r: [-20, 0, 0] } } },
+        { command: "prefab.create", params: { kind: "basket", id: "basket", position: [0.65, 0, 1.0] } },
+        { command: "prefab.create", params: { kind: "man", id: "clerk", name: "Clerk", position: [-2.0, 0, 0.6], rotationY: 200 } },
+        { command: "pose.set", params: { id: "clerk", pose: "crouch" } },
+        { command: "prefab.create", params: { kind: "cart", id: "cart", position: [2.2, 0, 1.2], rotationY: 200 } },
+        { command: "entity.create", params: { type: "camera", id: "cam_a", name: "Cam A" } },
+        { command: "camera.frame", params: { camera: "cam_a", subject: "shopper", size: "full", side: "frontRight", focalLengthMm: 35 } },
+        { command: "camera.dollyMove", params: { id: "cam_a", distance: 1.0, start: 0, end: 72 } },
+        { command: "camera.orbitMove", params: { id: "cam_a", target: "shopper", degrees: 30, start: 72, end: 119 } },
+        { command: "shot.create", params: { camera: "cam_a", start: 0, end: 119, name: "push-in" } },
+      ]);
+    }
+
+    // ---- Autosave: the scene survives a reload (kept in this browser only). ----
+    const AUTOSAVE = "shotstage.autosave", PREVIOUS = "shotstage.autosave.previous";
+    let saveTimer = 0, warnedFull = false;
+    function autosave() {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        if (!store.set(AUTOSAVE, JSON.stringify(editor.scene())) && !warnedFull) {
+          warnedFull = true;
+          toast(t("场景太大，浏览器存不下自动保存；请用 文件 → 保存 存成 .json。", "The scene is too big for the browser's autosave; use File → Save to keep a .json."));
+        }
+      }, 800);
+    }
+
+    /** Open the scene carried by the URL, if any; true when one was opened. */
+    async function openSharedLink() {
+      let shared;
+      try {
+        shared = await sceneFromLocation();
+      } catch (e) {
+        console.error(e);
+        clearSceneFromLocation();
+        toast(t("分享链接不完整，打不开（可能被聊天软件截断了）。", "This share link is damaged and can't be opened (a chat app may have cut it short)."), null, null, 8000);
+        return false;
+      }
+      if (!shared) return false;
+      const mine = editor.revision() > 0 ? JSON.stringify(editor.scene()) : store.get(AUTOSAVE);
+      try {
+        editor.load(shared);
+      } catch (e) {
+        console.error(e);
+        clearSceneFromLocation();
+        toast(t(`分享的场景打不开：${e?.message ?? e}`, `Couldn't open the shared scene: ${e?.message ?? e}`), null, null, 8000);
+        return false;
+      }
+      clearSceneFromLocation();
+      if (mine) {
+        // Opening someone's link must not cost you your own work: keep it one step back.
+        store.set(PREVIOUS, mine);
+        toast(t("已打开分享的场景。", "Opened the shared scene."), t("换回我之前的场景", "Back to my previous scene"), () => {
+          editor.load(JSON.parse(store.get(PREVIOUS)));
+        }, 10000);
+      }
+      return true;
+    }
+
+    // ---- Which scene to open: agent bridge > shared link > autosave > example. ----
+    // Only a page served from this machine (`shotstage mcp --live --web`) can have a bridge.
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+    const bridgeUrl = new URLSearchParams(location.search).get("bridge") ?? (local ? await findBridge() : null);
     if (bridgeUrl) {
+      // Opened by `shotstage mcp --live --web dist` (or with ?bridge=ws://...): an agent drives
+      // this editor, so start empty and let it bring its scene.
       const badge = document.getElementById("bridge");
       window.shotstageBridge = connectBridge(editor, bridgeUrl, {
         onStatus: (s) => {
-          badge.textContent = s === "connected" ? "● agent connected" : s === "connecting" ? "○ connecting to agent…" : "○ agent disconnected";
+          badge.textContent = s === "connected" ? t("● 已连接 agent", "● agent connected") : s === "connecting" ? t("○ 正在连接 agent…", "○ connecting to agent…") : t("○ agent 已断开", "○ agent disconnected");
           badge.className = s;
         },
       });
     } else {
-    // A small starter scene, built through the same API agents use: real-size blocks that
-    // rest on each other, and a camera framed by shot size instead of coordinates.
-    editor.batch([
-      // A fresh-food aisle, built through the same API agents use.
-      { command: "entity.create", params: { type: "mesh", id: "floor", primitive: { shape: "plane", size: [14, 14] }, color: [0.62, 0.62, 0.6], locked: true } },
-      { command: "prefab.create", params: { kind: "produceStand", id: "produce", position: [0, 0, -0.6] } },
-      { command: "prefab.create", params: { kind: "watermelonBin", id: "melons", position: [-2.0, 0, -0.4] } },
-      { command: "prefab.create", params: { kind: "openChiller", id: "chiller", position: [0.2, 0, -3.2] } },
-      { command: "prefab.create", params: { kind: "openChiller", id: "chiller_2", position: [1.5, 0, -3.2] } },
-      { command: "prefab.create", params: { kind: "gondolaShelf", id: "shelf", position: [-1.6, 0, -3.2] } },
-      { command: "prefab.create", params: { kind: "priceSign", id: "sign", position: [1.5, 0, -1.5] } },
-      { command: "prefab.create", params: { kind: "woman", id: "shopper", name: "Shopper", position: [0.3, 0, 1.0], rotationY: 180 } },
-      { command: "pose.set", params: { id: "shopper", pose: "reach", joints: { shoulder_r: [-70, 0, -6], elbow_r: [-20, 0, 0] } } },
-      { command: "prefab.create", params: { kind: "basket", id: "basket", position: [0.65, 0, 1.0] } },
-      { command: "prefab.create", params: { kind: "man", id: "clerk", name: "Clerk", position: [-2.0, 0, 0.6], rotationY: 200 } },
-      { command: "pose.set", params: { id: "clerk", pose: "crouch" } },
-      { command: "prefab.create", params: { kind: "cart", id: "cart", position: [2.2, 0, 1.2], rotationY: 200 } },
-      { command: "entity.create", params: { type: "camera", id: "cam_a", name: "Cam A" } },
-      { command: "camera.frame", params: { camera: "cam_a", subject: "shopper", size: "full", side: "frontRight", focalLengthMm: 35 } },
-      { command: "camera.dollyMove", params: { id: "cam_a", distance: 1.0, start: 0, end: 72 } },
-      { command: "camera.orbitMove", params: { id: "cam_a", target: "shopper", degrees: 30, start: 72, end: 119 } },
-      { command: "shot.create", params: { camera: "cam_a", start: 0, end: 119, name: "push-in" } },
-    ]);
+      const opened = await openSharedLink();
+      if (!opened) {
+        let restored = false;
+        const saved = store.get(AUTOSAVE);
+        if (saved) {
+          try { editor.load(JSON.parse(saved)); restored = true; } catch (e) { console.warn("autosave unreadable", e); }
+        }
+        if (!restored) loadExample();
+      }
+      // A share link pasted into this tab's address bar only changes the fragment.
+      addEventListener("hashchange", () => { openSharedLink(); });
+      editor.on(ev => { if (ev.type === "change") autosave(); });
+      autosave();
     }
+
+    // ---- Share. ----
+    async function share() {
+      const pending = sceneToLink(editor.scene());
+      let copied = false;
+      try {
+        // Safari only allows the copy inside the click, so hand it the link still being made.
+        const item = new ClipboardItem({ "text/plain": pending.then(u => new Blob([u], { type: "text/plain" })) });
+        await navigator.clipboard.write([item]);
+        copied = true;
+      } catch {
+        try { await navigator.clipboard.writeText(await pending); copied = true; } catch {}
+      }
+      const url = await pending;
+      const kb = Math.round(url.length / 1024);
+      const long = url.length > 60000
+        ? t(`链接较长（${kb} KB，模型、贴图或 HDRI 都打包在里面），有些聊天软件会截断；可改发 文件 → 保存 的 .json。`, `The link is long (${kb} KB: models, textures and HDRIs travel inside it); some chat apps cut long links, so you may want to send File → Save's .json instead.`)
+        : "";
+      if (copied) {
+        toast(t("分享链接已复制。打开它的人看到的是现在这个场景的一份副本。", "Share link copied. Whoever opens it gets a copy of this scene as it is now.") + (long ? " " + long : ""), null, null, long ? 12000 : 5000);
+      } else {
+        window.prompt(t("复制这个链接：", "Copy this link:"), url);
+      }
+    }
+    editor.on(ev => { if (ev.type === "toolbar" && ev.id === "share") share(); });
     editor.on(ev => { if (ev.type === "change") console.debug("shotstage change", ev.revision); });
   </script>
 </body>
