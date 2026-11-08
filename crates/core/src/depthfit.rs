@@ -286,7 +286,7 @@ pub fn scene_tris(scene: &Scene, frame: f32) -> Vec<(u32, [Vec3; 3])> {
         match &e.kind {
             EntityKind::Mesh { .. } => {
                 let Ok(t) = posed_tris(scene, &e.id, frame) else { continue };
-                for c in t.indices.chunks_exact(3) {
+                for c in t.indices.as_chunks::<3>().0 {
                     let p = |j: u32| world.transform_point3(Vec3::from_array(t.positions[j as usize]));
                     out.push((k, [p(c[0]), p(c[1]), p(c[2])]));
                 }

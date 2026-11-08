@@ -106,13 +106,15 @@ impl Geometry {
         let p = |a: [f32; 3]| Vec3::from_array(a);
         let plain = self
             .triangles
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(move |t| (t[0].id & 0x0fff_ffff, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]));
         let tex = self.textured.iter().flat_map(move |b| {
-            b.vertices.chunks_exact(3).map(move |t| (b.id, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]))
+            b.vertices.as_chunks::<3>().0.iter().map(move |t| (b.id, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]))
         });
         let img = self.images.iter().flat_map(move |q| {
-            q.vertices.chunks_exact(3).map(move |t| (q.id, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]))
+            q.vertices.as_chunks::<3>().0.iter().map(move |t| (q.id, [p(t[0].pos), p(t[1].pos), p(t[2].pos)]))
         });
         plain.chain(tex).chain(img)
     }
