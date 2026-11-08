@@ -16,6 +16,7 @@ pub mod scene;
 pub mod spatial;
 pub mod timeline;
 pub mod uv;
+pub mod uvedit;
 
 pub use camera::{CameraData, Intrinsics};
 pub use eval::{EvaluatedEntity, EvaluatedScene, evaluate};

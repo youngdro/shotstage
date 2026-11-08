@@ -16,6 +16,8 @@ use crate::hub::{self, SharedHub};
 mod editmode;
 #[path = "material.rs"]
 mod material;
+#[path = "uveditor.rs"]
+mod uveditor;
 
 /// Something in the block palette.
 #[derive(Clone)]
@@ -836,6 +838,8 @@ pub struct EditorApp {
     incoming: crate::files::Inbox,
     /// Mesh edit mode: the edited mesh's geometry, the running tool, view options.
     edit_cache: Option<editmode::EditCache>,
+    /// The UV editor panel's view, cache and gesture.
+    uv: uveditor::UvEditor,
     edit_modal: Option<editmode::Modal>,
     edit_xray: bool,
     edit_amounts: editmode::EditAmounts,
@@ -931,6 +935,7 @@ impl EditorApp {
             toast: None,
             incoming: Default::default(),
             edit_cache: None,
+            uv: Default::default(),
             edit_modal: None,
             edit_xray: false,
             edit_amounts: Default::default(),
@@ -1937,6 +1942,17 @@ impl eframe::App for EditorApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.properties(ui));
             },
         );
+        if self.hub.borrow().uv.is_some() {
+            egui::Panel::right("uv_editor")
+                .resizable(true)
+                .default_size(440.0)
+                .min_size(280.0)
+                .max_size(1400.0)
+                .show(ui, |ui| self.uv_panel(ui));
+        } else {
+            self.uv.hovered = false;
+            self.uv.gesture = Default::default();
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, frame));
         {
             let mut h = self.hub.borrow_mut();
@@ -1957,6 +1973,9 @@ impl EditorApp {
             ui.ctx().request_repaint();
         }
         if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        if (self.uv.hovered || matches!(self.uv.gesture, uveditor::UvGesture::Modal(_))) && self.uv_shortcuts(ui) {
             return;
         }
         if self.edit_shortcuts(ui) {

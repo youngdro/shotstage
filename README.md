@@ -111,6 +111,34 @@
 
 编辑器的编辑模式状态也开放给脚本：`editor.editMesh`（`{id, mode}` 进入，`{id: null}` 退出）、`editor.editSelect`（设置选择）、`editor.state` 会带上 `edit`。
 
+## 贴图与 UV 编辑器
+
+选中网格，在属性面板 **Texture** 里 **Load…** 一张图片（或复用场景里已有的图），选贴法：box / planar / cylinder / sphere 投影，或者按网格自己的 UV（uv）贴；Repeat / Offset / Turn 实时调。**Unwrap** 展开 UV：Smart（按折角切块、铺平、不重叠打包）或把 Box / Planar / Cylinder / Sphere 投影烘焙进 UV。
+
+点 **UV editor**（Texture 面板或编辑模式面板里都有）在视口右边打开 UV 编辑器，和 Blender 的 UV 编辑器一样：
+
+![UV 编辑器：框选 UV 顶点后按 S、X 沿 u 方向缩放](docs/images/uv-editor.png)
+
+- **看**：UV 网格画在贴图上面，0–1 方框之外的部分是贴图的平铺（暗一些），底图按材质的 Repeat / Offset / Turn 放好，和模型表面上看到的完全一致；没有贴图时显示棋盘格。右下角显示鼠标处的 u / v 和像素坐标。滚轮缩放（以鼠标为中心）、触控板双指平移 / 捏合缩放、中键或右键拖动平移，**Home** 或 **Fit** 看全部，**F** 看选中部分。
+- **选**：`1` / `2` / `3` / `4` 切换 UV 顶点 / 边 / 面 / 岛（展开后的一整块）；单击选中，Shift+单击加选或取消，在空白处拖动框选，双击或 `L` 选鼠标下的整块岛，Ctrl+L 选和当前选择相连的整块，`A` 全选、Alt+A 全不选。**Sticky**（默认开）：选一个 UV 顶点会连同相邻面在同一位置的角一起选，网格不会被扯开。编辑模式里在 3D 视图选了面时，UV 编辑器只显示这些面（**Only picked** 可关）。
+- **改**：直接拖动选中的部分；或 `G` 移动、`R` 旋转、`S` 缩放跟随鼠标，`X` / `Y` 锁定 u / v 方向，按住 Ctrl（或打开 **Snap**）吸附到贴图像素（旋转按 15°、缩放按 0.1），单击或回车确认，Esc 或右键取消。工具条上有 **Align**（左 / 中 / 右 / 上 / 中 / 下对齐成一列或一行）、**Weld**（合到一点）、**Stitch**（把沿接缝切开的两块缝回去）、旋转 90°、左右 / 上下镜像、**Pack**（所有岛或选中的岛重新不重叠地排进方框，保持相对大小，竖长的会转平）、**Unwrap**（只展开选中的面）。
+- 每次拖动或操作都是一步撤销，都是普通命令：拖动发的是 `mesh.uvSet`。
+
+UV 编辑的命令都以「面角」`[面, 面内序号]` 指定点，也可以给 `faces`，加 `sticky: true` 连带同位置的角，加 `islands: true` 扩到整块岛：
+
+```json
+{"batch": [
+  {"command": "mesh.unwrap", "params": {"id": "box_1", "method": "smart"}},
+  {"command": "mesh.uvIslands", "params": {"id": "box_1"}},
+  {"command": "mesh.uvTransform", "params": {"id": "box_1", "faces": [2], "islands": true, "rotate": 90, "scale": [1.5, 1.5]}},
+  {"command": "mesh.uvAlign", "params": {"id": "box_1", "corners": [[2, 0], [2, 3]], "axis": "u", "to": "min"}},
+  {"command": "mesh.uvWeld", "params": {"id": "box_1", "faces": [0, 1], "mode": "stitch"}},
+  {"command": "mesh.uvPack", "params": {"id": "box_1", "margin": 0.02}}
+]}
+```
+
+`mesh.uvSelect` 把面 / 角 / UV 空间里的框解析成角列表（不改任何东西），`mesh.uvData` 返回 UV 坐标和最终贴图坐标。编辑器里的 UV 编辑器状态也开放：`editor.uvEditor`（`{id, mode, sticky}` 打开，`{id: null}` 关闭）、`editor.uvSelect`（设置选择），`editor.state` 会带上 `uv`。
+
 ## 图片
 
 把 PNG / JPEG / WebP 拖进视口，或者在左侧 **Images** 里选一种用法，图片会按原比例变成场景里的一张卡片：
@@ -267,6 +295,7 @@ claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json -
 | 网格编辑 | `mesh.editData` `mesh.makeEditable` `mesh.select`（loop / ring / faceLoop / linked / more / all） `mesh.transformElements` `mesh.extrude` `mesh.inset` `mesh.bevel` `mesh.loopCut` `mesh.subdivideFaces` `mesh.connect` `mesh.merge` `mesh.mergeByDistance` `mesh.fill` `mesh.flipNormals` `mesh.deleteElements` `mesh.bridge` `mesh.edgeSlide` `mesh.bisect`（平面切割，可删除一侧） `mesh.knife`（沿表面点路径切） `mesh.spin`（旋转挤出） `mesh.transformElements` 的 `proportional` 参数（衰减编辑） `mesh.boolean`（union / difference / intersect） |
 | 相机 | `camera.frame`（景别 + 角度 + 方位自动构图） `camera.setLens` `camera.lookAt` `camera.setActive` `camera.describe` `camera.trajectory` `camera.orbitMove` `camera.dollyMove` |
 | 人物 | `pose.set` `pose.aim` `pose.get` `pose.list` `pose.hand` `person.setHair` `person.setBody` `person.setOutfit` `person.setExpression` `person.expressions` `person.get` |
+| 贴图与 UV | `mesh.setMaterial` `mesh.unwrap` `mesh.uvData` `mesh.uvTransform` `mesh.uvSet` `mesh.uvAlign` `mesh.uvWeld`（center / stitch） `mesh.uvPack` `mesh.uvSelect` `mesh.uvIslands` |
 | 模型 | `model.import` `model.export`（都可以用 `path`） |
 | 图片 | `image.import` `image.set` `image.get` `camera.setReference` |
 | 灯光 | `light.set` `light.preset` `light.list`（创建用 `entity.create` 的 `type: "light"`） |
@@ -274,7 +303,7 @@ claude mcp add shotstage -- /path/to/shotstage mcp --scene /abs/path/shot.json -
 | 动画 | `motion.apply` `motion.list` `keyframe.move` `keyframe.retime` `keyframe.setInterp` |
 | 时间线 | `timeline.set` `keyframe.set` `keyframe.delete` `keyframe.list` `shot.create` `shot.cut` `shot.set` `shot.delete` |
 | 复制粘贴 | `entity.copy` `entity.paste` |
-| 编辑器视图 | `editor.select` `editor.setFrame` `editor.setView` `editor.state` `editor.editMesh` `editor.editSelect` |
+| 编辑器视图 | `editor.select` `editor.setFrame` `editor.setView` `editor.state` `editor.editMesh` `editor.editSelect` `editor.uvEditor` `editor.uvSelect` |
 
 约定：长度单位是米，角度单位是度，时间单位是帧；+Y 朝上，地面是 y = 0，物体正面朝 +Z，相机朝 -Z 看。`camera.frame` 生成的镜头再用 `camera.describe` 描述时，得到的是同一个景别。`camera.trajectory` 输出的是 OpenCV 坐标轴下的逐帧内参和 3×4 世界到相机矩阵（RealEstate10K 风格），可以直接喂给相机控制类视频模型。`camera.describe` 用影视术语描述镜头，例如 `medium shot, low angle, 35mm normal lens`。
 
