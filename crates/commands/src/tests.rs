@@ -353,7 +353,41 @@ fn lights_and_presets() {
     run(&mut s, "prefab.create", json!({"kind": "softbox", "position": [2, 0, 2]}));
     assert_eq!(shotstage_core::eval::lights_at(s.scene(), 0.0).len(), 1);
     let list = run(&mut s, "light.list", json!({}));
-    assert!(list["presets"].as_array().unwrap().len() >= 6);
+    assert!(list["presets"].as_array().unwrap().len() >= 18);
+    // colour temperature and shadow casting
+    let id = run(&mut s, "entity.create", json!({"type": "light"}))["id"].as_str().unwrap().to_string();
+    let r = run(&mut s, "light.set", json!({"id": id, "temperature": 3200, "castShadows": false}));
+    assert!(r["color"][0].as_f64().unwrap() > r["color"][2].as_f64().unwrap());
+    assert_eq!(r["castShadows"], false);
+    assert!(s.dispatch("light.set", json!({"id": id, "temperature": 50})).is_err());
+}
+
+#[test]
+fn every_lighting_preset_works_and_brings_its_sky() {
+    let mut s = Session::default();
+    run(&mut s, "prefab.create", json!({"kind": "woman", "id": "w"}));
+    run(&mut s, "entity.create", json!({"type": "camera", "id": "cam", "position": [0, 1.5, 4]}));
+    run(&mut s, "camera.lookAt", json!({"id": "cam", "target": "w"}));
+    for (key, _) in crate::lights::PRESETS {
+        let r = run(&mut s, "light.preset", json!({"preset": key, "subject": "w"}));
+        assert!(r.is_object(), "{key}: {r}");
+    }
+    // a preset with a sky turns it so the sky's sun sits where the sun light is
+    let r = run(&mut s, "light.preset", json!({"preset": "goldenHour", "subject": "w"}));
+    assert_eq!(s.scene().environment.sky, shotstage_core::Sky::Sunset);
+    let sun = r["lights"][0].as_str().unwrap();
+    let pos = glam::Vec3::from_array(s.scene().get(sun).unwrap().transform.translation);
+    let w = glam::Vec3::from_array(
+        shotstage_core::spatial::bounds(s.scene(), "w", 0.0).unwrap().unwrap().center().to_array(),
+    );
+    let to_sun = (pos - w).with_y(0.0).normalize();
+    let rot = shotstage_core::environment::env_to_world(s.scene().environment.rotation);
+    assert!((rot * glam::Vec3::NEG_Z).angle_between(to_sun) < 0.05);
+    // sky: false leaves the sky alone; clear goes back to the studio
+    run(&mut s, "light.preset", json!({"preset": "highKey", "subject": "w", "sky": false}));
+    assert_eq!(s.scene().environment.sky, shotstage_core::Sky::Sunset);
+    run(&mut s, "light.preset", json!({"preset": "clear"}));
+    assert_eq!(s.scene().environment.sky, shotstage_core::Sky::Studio);
 }
 
 #[test]

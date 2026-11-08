@@ -1235,7 +1235,7 @@ static ZH_TABLE: &[(&str, &str)] = &[
     // mesh edit mode
     ("Face", "面"),
     ("Proportional", "衰减编辑"),
-    ("None", "全不选"),
+    ("None", "无"),
     ("Spin", "旋转挤出"),
     ("Fill", "填充"),
     (" steps", " 步"),
@@ -1448,6 +1448,109 @@ static ZH_TABLE: &[(&str, &str)] = &[
     // motion presets
     // templates
     ("drag", "拖动"),
+    // mesh edit mode
+    // boolean
+    // mesh, modifiers
+    // texture and UVs
+    // realistic people
+    // other
+    // poses
+    // hand shapes
+    // expressions
+    // hair
+    // people presets
+    // motion presets
+    // templates
+    // sky, shadows and lighting presets
+    ("Sky", "天空"),
+    ("Sky ▾", "天空 ▾"),
+    ("Sky & shadows", "天空与阴影"),
+    ("Sky light", "天空光"),
+    ("Sky (built-in skies or an HDRI), sky light and shadows", "天空（内置天空或 HDRI）、天空光和阴影"),
+    ("Studio", "摄影棚"),
+    ("Color", "纯色"),
+    ("Day", "白天"),
+    ("Sunset", "日落"),
+    ("Overcast", "阴天"),
+    ("Night", "夜晚"),
+    ("Hdri", "HDRI"),
+    ("HDRI", "HDRI"),
+    ("Neutral grey studio, no sky light (default)", "中性灰摄影棚，没有天空光（默认）"),
+    ("One colour all round: seamless paper backdrop", "四周同一种颜色：无缝背景纸"),
+    ("Clear blue sky, high sun", "晴朗蓝天，太阳很高"),
+    ("Low warm sun, orange horizon", "低角度暖阳，橙色地平线"),
+    ("Bright cloudy sky, soft even light", "明亮的多云天空，光线柔和均匀"),
+    ("Dark blue night", "深蓝色夜晚"),
+    ("Dark studio with softbox panels", "暗摄影棚加柔光板"),
+    ("An imported HDRI / panorama (environment.import)", "导入的 HDRI / 全景图（environment.import）"),
+    ("Import HDRI…", "导入 HDRI…"),
+    ("Import HDRI", "导入 HDRI"),
+    (
+        "An .hdr file or a 2:1 panorama picture (you can also drop an .hdr onto the view)",
+        "一个 .hdr 文件或 2:1 全景图（也可以把 .hdr 拖进视图）",
+    ),
+    ("Add matching sun", "添加匹配的太阳光"),
+    (
+        "A sun light from the sky's brightest spot, so shadows match (light.fromEnvironment)",
+        "从天空最亮处添加一盏太阳光，让阴影对得上（light.fromEnvironment）",
+    ),
+    ("This sky has no clear sun", "这个天空没有明显的太阳"),
+    ("Sun from sky", "从天空取太阳光"),
+    ("Tint", "色调"),
+    ("White", "白"),
+    ("Grey", "灰"),
+    ("Black", "黑"),
+    ("Green", "绿"),
+    ("Background", "背景"),
+    ("Show the sky behind the scene", "在场景后面显示天空"),
+    ("How brightly the sky lights the scene (the background keeps its look)", "天空照亮场景的强度（背景外观不变）"),
+    ("Turn the sky and its sun about the vertical axis", "绕竖直轴旋转天空和它的太阳"),
+    (
+        "The sky lights everything softly from all round and adds to your lights; with no lights it lights the scene alone. Lighting presets set a matching sky.",
+        "天空从四周柔和地照亮一切，并叠加在你的灯光上；没有灯光时由它单独照亮场景。布光预设会设置匹配的天空。",
+    ),
+    ("On", "开"),
+    ("Darkness", "暗度"),
+    ("Casts shadows", "投射阴影"),
+    ("Up to four lights cast shadows at once (the brightest)", "最多四盏灯同时投射阴影（最亮的几盏）"),
+    (
+        "Show shadows in the viewport (snapshots follow the scene's shadow settings)",
+        "在视图里显示阴影（截图按场景的阴影设置）",
+    ),
+    (
+        "A light shines along its -Z. Scenes with lights are lit by them; toggle Studio light in the view toolbar to compare. The sky and shadow settings are under Sky ▾.",
+        "灯光沿自身 -Z 方向照射。有灯光的场景由灯光照明；可在视图工具栏切换“摄影棚光”对比。天空和阴影设置在“天空 ▾”里。",
+    ),
+    ("Temperature", "色温"),
+    ("Warm bulb", "暖色灯泡"),
+    ("Tungsten film light", "钨丝影视灯"),
+    ("Shop fluorescent", "商店荧光灯"),
+    ("Daylight, flash", "日光、闪光灯"),
+    ("Shade, overcast", "阴影处、阴天"),
+    ("Everyday portrait: key a little to the side, soft fill", "日常人像：主光稍偏一侧，柔和补光"),
+    ("Butterfly", "蝴蝶光"),
+    ("Key high in front, soft fill from below", "主光在正前上方，下方柔和补光"),
+    ("Clamshell", "贝壳光"),
+    ("Soft light above and below the face: beauty", "脸部上下各一盏柔光：美妆"),
+    ("Split", "侧光"),
+    ("Hard side light: half lit, half shadow", "硬侧光：一半亮一半暗"),
+    ("High key", "高调"),
+    ("Bright and even on a white backdrop: catalogue", "白背景上明亮均匀：商品目录"),
+    ("Counter", "柜台"),
+    ("Shop counter: overhead panels, cool front fill", "商店柜台：顶部灯板，冷色正面补光"),
+    ("Low key", "低调"),
+    ("One narrow light in the dark: dramatic", "黑暗中一束窄光：戏剧感"),
+    ("Window", "窗光"),
+    ("Big soft window light from the side", "侧面大面积柔和窗光"),
+    ("Neon", "霓虹"),
+    ("Magenta and cyan side lights at night", "夜里品红和青色的侧光"),
+    ("Stage", "舞台"),
+    ("One hard spotlight from above in the dark", "黑暗中从上方打下的一束硬聚光"),
+    ("Warm low sun with a sunset sky", "日落天空下的低角度暖阳"),
+    ("High sun with a blue sky", "蓝天下的高角度太阳"),
+    ("Soft cloudy sky light, no sun", "柔和的阴天天光，没有太阳"),
+    ("Moonlight under a night sky", "夜空下的月光"),
+    ("Remove all lights and the sky: back to the flat studio light", "移除所有灯光和天空：回到平面摄影棚光"),
 ];
 
 #[cfg(test)]

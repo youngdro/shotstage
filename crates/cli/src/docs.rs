@@ -21,6 +21,7 @@ const GROUPS: &[(&str, &str)] = &[
     ("pose", "People"),
     ("person", "People"),
     ("light", "Lights"),
+    ("environment", "Lights"),
     ("motion", "Animation"),
     ("keyframe", "Animation"),
     ("timeline", "Timeline and shots"),

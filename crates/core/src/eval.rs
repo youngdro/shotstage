@@ -382,6 +382,8 @@ pub fn lights_at(scene: &Scene, frame: f32) -> Vec<crate::light::WorldLight> {
                 radiance: l.color.map(|c| c * l.intensity),
                 cos_inner: inner.cos(),
                 cos_outer: outer.cos(),
+                cast_shadows: l.cast_shadows,
+                size: if l.kind == crate::LightKind::Area { l.size[0].max(l.size[1]) } else { 0.0 },
             })
         })
         .collect()

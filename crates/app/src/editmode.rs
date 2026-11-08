@@ -1532,7 +1532,7 @@ impl EditorApp {
             if ui.small_button(tr("All")).on_hover_text(tr("A")).clicked() {
                 self.edit_select_all(true);
             }
-            if ui.small_button(tr("None")).on_hover_text(tr("Alt+A")).clicked() {
+            if ui.small_button(crate::lf!("None", "全不选")).on_hover_text(tr("Alt+A")).clicked() {
                 self.edit_select_all(false);
             }
             if ui
