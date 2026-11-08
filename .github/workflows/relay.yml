@@ -1,0 +1,57 @@
+name: Relay
+# The relay (relay/) that lets Claude drive the online editor: tested on every pull request
+# that touches it, deployed to Cloudflare Workers on pushes to main once the repository has
+# the secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (see relay/README.md).
+on:
+  push:
+    branches: [main]
+    paths: [relay/**, web/agent.js, web/agent-tools.js, .github/workflows/relay.yml]
+  pull_request:
+    paths: [relay/**, web/agent.js, web/agent-tools.js, .github/workflows/relay.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency: relay-deploy
+    defaults:
+      run:
+        working-directory: relay
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - name: Deploy
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::No Cloudflare secrets yet: the relay is not deployed (see relay/README.md)."
+            exit 0
+          fi
+          npx wrangler deploy

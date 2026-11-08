@@ -285,6 +285,15 @@ python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --scene /tmp/
 python3 examples/run-mcp-example.py examples/fresh-produce-ad.json --live    # 在浏览器里看着它搭
 ```
 
+### 在线版直连 Claude（不用安装）
+
+打开在线编辑器，顶栏点 **🤖 连接 Claude**，面板里会显示一个专属 MCP 地址：
+
+- **claude.ai / Claude 桌面版**：设置 → 连接器（Connectors）→ 添加自定义连接器，粘贴地址，然后在对话里打开这个连接器。
+- **Claude Code**：`claude mcp add --transport http shotstage <地址>`
+
+之后在对话里让 Claude 搭场景，它的每一步都直接在你打开的页面里执行：你看着场景一步步搭起来，每步都能撤销，Claude 也能截图看画面、出分镜。这条路走的是一个只转发消息的小中继（[relay/](relay/README.md)，Cloudflare Worker），不存场景。地址里的连接码就是密钥，别公开；面板里可以随时换新地址或断开。
+
 ### 实时桥：让 Claude 直接操作你打开的编辑器
 
 ```sh
