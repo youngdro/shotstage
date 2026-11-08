@@ -125,12 +125,12 @@ _query_ · MCP tool `scene_raycast`
 
 ### scene.template
 
-Start from a ready scene: groceryAisle, productTabletop, interview, streetCorner, cafe or studio (people, props, lights, cameras, shots and moves; all editable). Clears the scene first unless replace is false.  
+Start from a ready scene (scene.templates lists them): sets like groceryAisle, interview, streetCorner, cafe or studio, and styled product close-ups with tuned lights: productTabletop, packshot, darkHero, highKeyWhite, goldenWindow, pastelPop, iceDrink, macroFruit, freshCloseUp (people, props, lights, cameras, shots and moves; all editable). Clears the scene first unless replace is false.  
 _changes the scene_ · MCP tool `scene_template`
 
 | Param | Type | |
 | --- | --- | --- |
-| `name` **required** | string | groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout, freshCloseUp, cafe or studio. |
+| `name` **required** | string | groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout, freshCloseUp, darkHero, highKeyWhite, goldenWindow, pastelPop, iceDrink, macroFruit, cafe or studio. |
 | `replace` | boolean | Clear the scene first. Default true. |
 
 ### scene.templates

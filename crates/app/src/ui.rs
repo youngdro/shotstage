@@ -2276,10 +2276,15 @@ impl EditorApp {
             }
             ui.menu_button(tr("Templates"), |ui| {
                 ui.weak(tr("Start from a ready scene (replaces this one; Undo brings it back)"));
-                for (name, label, desc) in shotstage_commands::templates::TEMPLATES {
-                    if ui.button(tr(*label)).on_hover_text(tr(*desc)).clicked() {
-                        self.apply_template(name, label);
-                        ui.close();
+                use shotstage_commands::templates::{PRODUCT_LOOKS, TEMPLATES};
+                for (heading, products) in [("Scenes", false), ("Product close-ups", true)] {
+                    ui.separator();
+                    ui.label(egui::RichText::new(tr(heading)).strong());
+                    for (name, label, desc) in TEMPLATES.iter().filter(|t| PRODUCT_LOOKS.contains(&t.0) == products) {
+                        if ui.button(tr(*label)).on_hover_text(tr(*desc)).clicked() {
+                            self.apply_template(name, label);
+                            ui.close();
+                        }
                     }
                 }
             });
@@ -5781,20 +5786,26 @@ impl EditorApp {
             .default_pos(full.center())
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16)).show(ui, |ui| {
-                    ui.set_max_width(360.0);
+                    ui.set_max_width(372.0);
                     ui.heading(tr("Start a scene"));
                     ui.weak(tr("Pick a ready set (everything stays editable), or drag blocks in from the left."));
                     ui.add_space(6.0);
-                    egui::Grid::new("welcome_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                        for (i, (name, label, desc)) in shotstage_commands::templates::TEMPLATES.iter().enumerate() {
-                            if ui.add_sized([170.0, 34.0], egui::Button::new(tr(*label))).on_hover_text(tr(*desc)).clicked() {
-                                self.apply_template(name, label);
+                    use shotstage_commands::templates::{PRODUCT_LOOKS, TEMPLATES};
+                    for (heading, products) in [("Scenes", false), ("Product close-ups", true)] {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(tr(heading)).strong());
+                        egui::Grid::new(("welcome_grid", products)).num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
+                            let list = TEMPLATES.iter().filter(|t| PRODUCT_LOOKS.contains(&t.0) == products);
+                            for (i, (name, label, desc)) in list.enumerate() {
+                                if ui.add_sized([116.0, 30.0], egui::Button::new(tr(*label))).on_hover_text(tr(*desc)).clicked() {
+                                    self.apply_template(name, label);
+                                }
+                                if i % 3 == 2 {
+                                    ui.end_row();
+                                }
                             }
-                            if i % 2 == 1 {
-                                ui.end_row();
-                            }
-                        }
-                    });
+                        });
+                    }
                     ui.add_space(4.0);
                     ui.weak(tr("Tip: drop a .glb / .fbx model or a picture on the view to bring it in. Cmd/Ctrl+K searches every block, move and action."));
                 });

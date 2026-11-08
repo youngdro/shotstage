@@ -49,21 +49,69 @@ pub const TEMPLATES: &[(&str, &str, &str)] = &[
         "Fresh close-up",
         "Salmon on a cutting board with lemon, tomatoes, broccoli and a knife under a big soft light; straight down, then a low push-in on the salmon",
     ),
+    (
+        "darkHero",
+        "Dark rim light",
+        "A bottle on a black plinth in the dark: two strip lights behind trace its edges, a soft spot from above, a glow on the wall behind; a slow arc, then a push-in on the label",
+    ),
+    (
+        "highKeyWhite",
+        "High-key white",
+        "Skincare set on white cubes in a white cove: a big soft overhead light, side strips, faint shadows; a slide across, then a detail push-in",
+    ),
+    (
+        "goldenWindow",
+        "Golden window light",
+        "A bottle and a jar on a stone block in low warm sun, leaf shadows falling across them, cool fill; a slow push-in",
+    ),
+    (
+        "pastelPop",
+        "Pastel pop",
+        "A drinks can on stacked pastel podiums with spheres and a cube, soft key light and pink and blue gels; an arc around it",
+    ),
+    (
+        "iceDrink",
+        "Ice-cold drink",
+        "A can on ice on a deep blue set, cyan strip lights behind, a blue glow on the wall; low angle, push-in",
+    ),
+    (
+        "macroFruit",
+        "Macro fruit",
+        "Strawberries, grapes and lemon on dark slate, warm backlight and soft side light; a 100 mm close lens sliding sideways",
+    ),
     ("cafe", "Cafe", "Tables and chairs, two people talking, a counter with a clerk; a gentle arc around them"),
     ("studio", "Empty studio", "Just an infinity cove, a camera and three-point light, ready for your own blocks"),
+];
+
+/// The product close-ups among [`TEMPLATES`]: styled sets with tuned lights (the editor lists
+/// them under their own heading).
+pub const PRODUCT_LOOKS: &[&str] = &[
+    "productTabletop",
+    "packshot",
+    "darkHero",
+    "highKeyWhite",
+    "goldenWindow",
+    "pastelPop",
+    "iceDrink",
+    "macroFruit",
+    "freshCloseUp",
 ];
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TemplateParams {
     /// groceryAisle, productTabletop, packshot, flatLay, interview, streetCorner, checkout,
-    /// freshCloseUp, cafe or studio.
+    /// freshCloseUp, darkHero, highKeyWhite, goldenWindow, pastelPop, iceDrink, macroFruit, cafe or
+    /// studio.
     name: String,
     /// Clear the scene first. Default true.
     replace: Option<bool>,
 }
 
 fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
+    if let Some(s) = product_look(name) {
+        return Some(s);
+    }
     let floor = (
         "entity.create",
         json!({"type": "mesh", "id": "floor", "name": "floor", "primitive": {"shape": "plane", "size": [16, 16]}, "color": [0.62, 0.62, 0.6], "locked": true}),
@@ -322,6 +370,295 @@ fn steps(name: &str) -> Option<Vec<(&'static str, Value)>> {
     })
 }
 
+/// Builds a list of template steps.
+#[derive(Default)]
+struct Steps(Vec<(&'static str, Value)>);
+
+impl Steps {
+    fn add(&mut self, cmd: &'static str, params: Value) -> &mut Self {
+        self.0.push((cmd, params));
+        self
+    }
+    fn prefab(&mut self, kind: &str, id: &str, pos: [f32; 3], yaw: f32) -> &mut Self {
+        self.add("prefab.create", json!({"kind": kind, "id": id, "position": pos, "rotationY": yaw}))
+    }
+    fn prefab_scaled(&mut self, kind: &str, id: &str, pos: [f32; 3], yaw: f32, scale: f32) -> &mut Self {
+        self.add("prefab.create", json!({"kind": kind, "id": id, "position": pos, "rotationY": yaw, "scale": scale}))
+    }
+    /// Stretch a group (a plinth made lower, a riser made wider).
+    fn stretch(&mut self, id: &str, scale: [f32; 3]) -> &mut Self {
+        self.add("entity.setTransform", json!({"id": id, "scale": scale}))
+    }
+    /// Paint parts of a prefab: `group_part` for each part.
+    fn paint(&mut self, group: &str, parts: &[&str], color: [f32; 3]) -> &mut Self {
+        for part in parts {
+            self.add("mesh.setColor", json!({"id": format!("{group}_{part}"), "color": color}));
+        }
+        self
+    }
+    /// A flat floor, or with `wall_z` also a backdrop wall standing at that depth.
+    fn floor(&mut self, color: [f32; 3], wall: Option<(f32, [f32; 3])>) -> &mut Self {
+        self.add(
+            "entity.create",
+            json!({"type": "mesh", "id": "floor", "name": "floor", "primitive": {"shape": "plane", "size": [8, 8]}, "color": color, "locked": true}),
+        );
+        if let Some((z, c)) = wall {
+            self.add(
+                "entity.create",
+                json!({"type": "mesh", "id": "backdrop", "name": "backdrop", "primitive": {"shape": "plane", "size": [6, 4]}, "position": [0, 2, z], "rotationEuler": [90, 0, 0], "color": c, "locked": true}),
+            );
+        }
+        self
+    }
+    fn cove(&mut self, color: [f32; 3]) -> &mut Self {
+        self.prefab("infinityCove", "cove", [0.0, 0.0, 0.0], 0.0).paint("cove", &["sweep"], color)
+    }
+    /// The sky as one even colour all round (it lights softly and shows behind the set).
+    fn sky(&mut self, color: [f32; 3], intensity: f32, background: bool) -> &mut Self {
+        self.add(
+            "environment.set",
+            json!({"sky": "color", "color": color, "intensity": intensity, "background": background}),
+        )
+    }
+    /// A light at `pos` aimed at `aim`; `light` is its kind, intensity, size, colour...
+    fn light(&mut self, id: &str, pos: [f32; 3], aim: [f32; 3], light: Value) -> &mut Self {
+        self.add("entity.create", json!({"type": "light", "id": id, "name": id, "position": pos, "light": light}))
+            .add("camera.lookAt", json!({"id": id, "target": aim}))
+    }
+    fn shadows(&mut self, softness: f32, strength: f32) -> &mut Self {
+        self.add("light.shadows", json!({"softness": softness, "strength": strength}))
+    }
+    fn timeline(&mut self, end: u32) -> &mut Self {
+        self.add("timeline.set", json!({"fps": 24, "start": 0, "end": end}))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn camera(
+        &mut self,
+        id: &str,
+        name: &str,
+        subject: &str,
+        size: &str,
+        side: &str,
+        angle: &str,
+        mm: f32,
+    ) -> &mut Self {
+        self.add("entity.create", json!({"type": "camera", "id": id, "name": name})).add(
+            "camera.frame",
+            json!({"camera": id, "subject": subject, "size": size, "side": side, "angle": angle, "focalLengthMm": mm, "makeActive": true}),
+        )
+    }
+    fn motion(&mut self, preset: &str, cam: &str, subject: &str, start: u32, secs: f32, intensity: f32) -> &mut Self {
+        self.add(
+            "motion.apply",
+            json!({"preset": preset, "target": cam, "subject": subject, "start": start, "duration": secs, "intensity": intensity}),
+        )
+    }
+    fn shot(&mut self, cam: &str, name: &str, a: u32, b: u32) -> &mut Self {
+        self.add("shot.create", json!({"camera": cam, "name": name, "start": a, "end": b}))
+    }
+}
+
+/// Styled product close-ups: each light is placed by hand around the product (no stands in the
+/// picture), with a sky and shadows to match.
+fn product_look(name: &str) -> Option<Vec<(&'static str, Value)>> {
+    let mut s = Steps::default();
+    let area = |i: f32, w: f32, h: f32| json!({"kind": "area", "intensity": i, "size": [w, h]});
+    let spot =
+        |i: f32, cone: f32, soft: f32| json!({"kind": "spot", "intensity": i, "coneDegrees": cone, "softness": soft});
+    let with = |mut l: Value, key: &str, v: Value| {
+        l[key] = v;
+        l
+    };
+    let no_shadow = |l: Value| with(l, "castShadows", json!(false));
+    match name {
+        "darkHero" => {
+            let amber = [0.35, 0.22, 0.08];
+            s.floor([0.03, 0.03, 0.035], Some((-1.6, [0.05, 0.05, 0.06])))
+                .sky([0.0; 3], 0.0, true)
+                .prefab("podium", "plinth", [0.0, 0.0, 0.0], 0.0)
+                .paint("plinth", &["podium"], [0.04, 0.04, 0.045])
+                .prefab("bottle", "hero", [0.0, 1.0, 0.0], 0.0)
+                .paint("hero", &["body", "shoulder", "neck"], amber)
+                .paint("hero", &["cap"], [0.75, 0.6, 0.3])
+                .paint("hero", &["label"], [0.85, 0.82, 0.75])
+                // strip lights behind on both sides draw the bottle's outline
+                .light("rim_l", [-0.55, 0.55, -0.45], [0.0, 0.33, 0.0], area(0.9, 0.12, 0.9))
+                .light("rim_r", [0.55, 0.55, -0.45], [0.0, 0.33, 0.0], area(0.9, 0.12, 0.9))
+                .light("top", [0.0, 1.6, 0.35], [0.0, 0.2, 0.0], spot(0.7, 26.0, 0.7))
+                .light("fill", [0.25, 0.35, 1.2], [0.0, 0.33, 0.0], no_shadow(area(0.12, 0.6, 0.6)))
+                // a soft pool of light on the wall behind
+                .light("halo", [0.0, 0.25, -0.2], [0.0, 0.75, -1.6], no_shadow(spot(0.5, 40.0, 1.0)))
+                .timeline(143)
+                .camera("cam_hero", "Hero", "hero", "wide", "front", "low", 100.0)
+                .motion("orbitRight", "cam_hero", "hero", 0, 3.0, 0.4)
+                .shot("cam_hero", "hero arc", 0, 71)
+                .camera("cam_label", "Label", "hero", "full", "frontLeft", "eyeLevel", 135.0)
+                .motion("pushIn", "cam_label", "hero", 72, 3.0, 0.4)
+                .shot("cam_label", "label", 72, 143);
+        }
+        "highKeyWhite" => {
+            let white = [0.92, 0.92, 0.92];
+            let cream = [0.95, 0.95, 0.93];
+            let sage = [0.45, 0.62, 0.5];
+            s.cove(white)
+                .sky([1.0; 3], 0.15, true)
+                .light("cove_wash", [0.0, 1.2, 0.0], [0.0, 0.8, -1.9], no_shadow(area(0.5, 2.5, 1.0)))
+                .prefab("cubeRiser", "riser_a", [-0.06, 0.0, 0.0], 0.0)
+                .prefab("cubeRiser", "riser_b", [0.15, 0.0, 0.06], -12.0)
+                .stretch("riser_b", [1.0, 0.5, 1.0])
+                .paint("riser_a", &["riser"], white)
+                .paint("riser_b", &["riser"], white)
+                .prefab("pumpBottle", "hero", [-0.06, 1.0, 0.0], 0.0)
+                .paint("hero", &["body"], sage)
+                .paint("hero", &["collar", "stem", "head"], cream)
+                .prefab("jar", "jar", [0.15, 1.0, 0.06], 0.0)
+                .paint("jar", &["body"], [0.93, 0.93, 0.9])
+                .paint("jar", &["lid"], sage)
+                .prefab("tube", "tube", [-0.24, 0.0, 0.12], 10.0)
+                .paint("tube", &["body", "crimp"], cream)
+                .paint("tube", &["cap"], sage)
+                .prefab("pebbles", "pebbles", [0.12, 0.0, 0.28], 0.0)
+                // one big soft panel above and in front, two weak strips at the sides
+                .light("key", [0.0, 1.4, 1.1], [0.0, 0.15, 0.0], area(0.55, 1.4, 1.0))
+                .light("strip_l", [-0.9, 0.4, 0.2], [0.0, 0.2, 0.0], no_shadow(area(0.12, 0.3, 1.2)))
+                .light("strip_r", [0.9, 0.4, 0.2], [0.0, 0.2, 0.0], no_shadow(area(0.12, 0.3, 1.2)))
+                .shadows(0.9, 0.45)
+                .timeline(143)
+                .camera("cam_hero", "Hero", "riser_a", "wide", "front", "high", 70.0)
+                .motion("truckRight", "cam_hero", "hero", 0, 3.0, 0.4)
+                .shot("cam_hero", "set", 0, 71)
+                .camera("cam_detail", "Detail", "hero", "full", "frontLeft", "high", 100.0)
+                .motion("pushIn", "cam_detail", "hero", 72, 3.0, 0.4)
+                .shot("cam_detail", "detail", 72, 143);
+        }
+        "goldenWindow" => {
+            let dark = [0.2, 0.18, 0.16];
+            s.cove([0.88, 0.84, 0.78])
+                .sky([1.0, 0.93, 0.85], 0.25, false)
+                .prefab("cubeRiser", "stone", [0.0, 0.0, 0.0], 0.0)
+                .stretch("stone", [1.8, 1.0, 1.3])
+                .paint("stone", &["riser"], [0.78, 0.72, 0.64])
+                .prefab("pebbles", "pebbles", [0.2, 0.0, 0.25], 0.0)
+                .prefab("pumpBottle", "hero", [-0.04, 1.0, 0.0], 0.0)
+                .paint("hero", &["body"], [0.72, 0.45, 0.25])
+                .paint("hero", &["collar", "stem", "head"], dark)
+                .prefab("jar", "jar", [0.1, 1.0, 0.06], 0.0)
+                .paint("jar", &["body"], [0.95, 0.92, 0.86])
+                .paint("jar", &["lid"], [0.75, 0.6, 0.35])
+                // a big leafy branch out of shot, between the sun and the set: its shadow is the
+                // window-light pattern
+                .add(
+                    "prefab.create",
+                    json!({"kind": "leafBranch", "id": "gobo", "name": "leaf shadow (gobo)", "position": [-1.2, 0.76, 0.6], "drop": false, "scale": 3.0}),
+                )
+                .add("entity.setTransform", json!({"id": "gobo", "rotationEuler": [0, 20, 80]}))
+                .light("sun", [-3.0, 1.6, 1.5], [0.0, 0.2, 0.0], json!({"kind": "sun", "intensity": 1.8, "color": [1.0, 0.8, 0.6]}))
+                .light("fill", [0.8, 0.4, 1.0], [0.0, 0.2, 0.0], with(no_shadow(area(0.25, 1.0, 1.0)), "color", json!([0.75, 0.82, 1.0])))
+                .shadows(0.15, 0.8)
+                .timeline(143)
+                .camera("cam_hero", "Hero", "stone", "wide", "front", "high", 85.0)
+                .motion("pushIn", "cam_hero", "hero", 0, 6.0, 0.4)
+                .shot("cam_hero", "warm light", 0, 143);
+        }
+        "pastelPop" => {
+            let pink = [0.95, 0.62, 0.68];
+            let blue = [0.6, 0.78, 0.95];
+            s.cove([0.97, 0.74, 0.76])
+                .sky([1.0, 0.9, 0.92], 0.3, true)
+                .prefab("podium", "base", [0.0, 0.0, 0.0], 0.0)
+                .stretch("base", [0.9, 0.5, 0.9])
+                .paint("base", &["podium"], [0.98, 0.86, 0.86])
+                .prefab("podium", "top", [0.03, 1.0, -0.03], 0.0)
+                .stretch("top", [0.45, 0.5, 0.45])
+                .paint("top", &["podium"], blue)
+                .prefab("can", "hero", [0.03, 1.0, -0.03], -20.0)
+                .paint("hero", &["body"], [0.98, 0.45, 0.55])
+                .paint("hero", &["top"], [0.85, 0.85, 0.88])
+                .prefab("cubeRiser", "cube", [-0.28, 0.0, 0.05], 25.0)
+                .stretch("cube", [0.45, 0.45, 0.45])
+                .paint("cube", &["riser"], [1.0, 0.85, 0.5])
+                .prefab_scaled("decorSpheres", "spheres", [0.26, 0.0, 0.12], 0.0, 0.7)
+                .paint("spheres", &["large", "medium", "small"], blue)
+                .prefab_scaled("decorSpheres", "spheres_2", [-0.2, 0.0, 0.25], 120.0, 0.45)
+                .paint("spheres_2", &["large", "medium", "small"], pink)
+                .light("key", [-0.8, 0.9, 0.9], [0.0, 0.2, 0.0], area(0.75, 0.9, 0.9))
+                // coloured gels from behind on either side
+                .light(
+                    "gel_pink",
+                    [0.8, 0.5, -0.5],
+                    [0.0, 0.3, 0.0],
+                    with(no_shadow(spot(0.7, 40.0, 0.8)), "color", json!([1.0, 0.45, 0.7])),
+                )
+                .light(
+                    "gel_blue",
+                    [-0.8, 0.5, -0.5],
+                    [0.0, 0.3, 0.0],
+                    with(no_shadow(spot(0.7, 40.0, 0.8)), "color", json!([0.4, 0.7, 1.0])),
+                )
+                .shadows(0.6, 0.5)
+                .timeline(119)
+                .camera("cam_hero", "Hero", "base", "wide", "front", "high", 65.0)
+                .motion("orbitLeft", "cam_hero", "hero", 0, 5.0, 0.5)
+                .shot("cam_hero", "pop", 0, 119);
+        }
+        "iceDrink" => {
+            let cyan = json!([0.5, 0.85, 1.0]);
+            s.floor([0.03, 0.06, 0.12], Some((-1.4, [0.04, 0.08, 0.16])))
+                .sky([0.0, 0.02, 0.05], 0.2, true)
+                .prefab("podium", "base", [0.0, 0.0, 0.0], 0.0)
+                .stretch("base", [0.65, 0.4, 0.65])
+                .paint("base", &["podium"], [0.12, 0.18, 0.3])
+                .prefab("can", "hero", [0.0, 1.0, 0.0], 0.0)
+                .paint("hero", &["body"], [0.15, 0.75, 0.6])
+                .paint("hero", &["top"], [0.85, 0.87, 0.9])
+                .prefab("iceCubes", "ice", [0.09, 1.0, 0.07], 0.0)
+                .prefab("iceCubes", "ice_2", [-0.08, 1.0, 0.08], 60.0)
+                .prefab("citrusSlice", "slice", [0.1, 1.0, -0.05], -20.0)
+                .light("rim_l", [-0.6, 0.5, -0.5], [0.0, 0.25, 0.0], with(area(1.0, 0.15, 0.9), "color", cyan.clone()))
+                .light("rim_r", [0.6, 0.5, -0.5], [0.0, 0.25, 0.0], with(area(1.0, 0.15, 0.9), "color", cyan))
+                .light("key", [0.3, 0.9, 0.9], [0.0, 0.2, 0.0], area(0.45, 0.6, 0.6))
+                .light(
+                    "glow",
+                    [0.0, 0.2, -0.3],
+                    [0.0, 0.6, -1.4],
+                    with(no_shadow(spot(0.6, 45.0, 1.0)), "color", json!([0.2, 0.55, 1.0])),
+                )
+                .timeline(119)
+                .camera("cam_hero", "Hero", "hero", "wide", "front", "low", 85.0)
+                .motion("pushIn", "cam_hero", "hero", 0, 5.0, 0.5)
+                .shot("cam_hero", "hero", 0, 119);
+        }
+        "macroFruit" => {
+            s.floor([0.05, 0.045, 0.04], None)
+                .sky([0.02, 0.018, 0.015], 0.3, true)
+                .prefab("cuttingBoard", "slate", [0.0, 0.0, 0.0], 0.0)
+                .stretch("slate", [2.0, 1.0, 2.0])
+                .paint("slate", &["board"], [0.08, 0.08, 0.085])
+                .prefab("strawberry", "berry", [0.0, 1.0, 0.03], 10.0)
+                .prefab("strawberry", "berry_2", [0.045, 1.0, -0.02], 70.0)
+                .prefab("strawberry", "berry_3", [-0.04, 1.0, -0.03], -30.0)
+                .prefab("grapes", "grapes", [-0.1, 1.0, -0.1], 40.0)
+                .prefab("lemon", "lemon", [0.16, 1.0, -0.14], -20.0)
+                .prefab("citrusSlice", "slice", [0.1, 1.0, -0.07], 0.0)
+                // warm light from behind makes the fruit glow at the edges; soft side key
+                .light("back", [0.0, 0.35, -0.7], [0.0, 0.03, 0.0], with(spot(1.4, 35.0, 0.7), "color", json!([1.0, 0.86, 0.7])))
+                .light("key", [-0.6, 0.45, 0.25], [0.0, 0.03, 0.0], area(0.55, 0.5, 0.5))
+                .light("fill", [0.5, 0.2, 0.5], [0.0, 0.03, 0.0], no_shadow(area(0.12, 0.5, 0.5)))
+                .shadows(0.5, 0.7)
+                .timeline(119)
+                .add(
+                    "entity.create",
+                    json!({"type": "camera", "id": "cam_macro", "name": "Macro", "position": [0.0, 0.2, 0.75], "camera": {"focalLengthMm": 100}, "makeActive": true}),
+                )
+                .add("camera.lookAt", json!({"id": "cam_macro", "target": [0.0, 0.035, 0.0]}))
+                .motion("truckLeft", "cam_macro", "berry", 0, 5.0, 0.15)
+                .shot("cam_macro", "macro slide", 0, 119);
+        }
+        _ => return None,
+    }
+    Some(s.0)
+}
+
 fn apply(scene: &mut Scene, p: TemplateParams) -> CmdResult<Value> {
     let Some(steps) = steps(&p.name) else {
         return Err(CommandError::invalid(format!(
@@ -347,7 +684,7 @@ fn apply(scene: &mut Scene, p: TemplateParams) -> CmdResult<Value> {
 
 pub fn commands() -> Vec<Command> {
     vec![
-        command!("scene.template", "Start from a ready scene: groceryAisle, productTabletop, interview, streetCorner, cafe or studio (people, props, lights, cameras, shots and moves; all editable). Clears the scene first unless replace is false.", mutates: true, TemplateParams, apply),
+        command!("scene.template", "Start from a ready scene (scene.templates lists them): sets like groceryAisle, interview, streetCorner, cafe or studio, and styled product close-ups with tuned lights: productTabletop, packshot, darkHero, highKeyWhite, goldenWindow, pastelPop, iceDrink, macroFruit, freshCloseUp (people, props, lights, cameras, shots and moves; all editable). Clears the scene first unless replace is false.", mutates: true, TemplateParams, apply),
         command!("scene.templates", "The starter scenes scene.template can build.", mutates: false, crate::builtin::NoParams,
             |_, _| Ok(json!(TEMPLATES.iter().map(|(k, l, d)| json!({ "name": k, "label": l, "description": d })).collect::<Vec<_>>()))),
     ]
