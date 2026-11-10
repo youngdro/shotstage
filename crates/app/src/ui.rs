@@ -824,6 +824,20 @@ fn closest_on_line(p: Vec3, a: Vec3, o: Vec3, d: Vec3) -> Option<f32> {
     (denom.abs() > 1e-6).then(|| (ab * bd - bb * ad) / denom)
 }
 
+/// The snap step for a drag seen from `dist` metres away: the set step, or a finer round one
+/// (1 cm, 2.5 cm, 5 cm, 10 cm…) when the view is so close that the set step would be longer than
+/// a quarter of a move arrow. Otherwise a small product close up never moves: a 7 cm arrow
+/// dragged its whole length still rounds to 0 at a 25 cm step.
+fn snap_step_at(step: f32, dist: f32) -> f32 {
+    // the move arrows are 0.14 × the distance long (see the gizmo)
+    let limit = dist.max(0.0) * 0.14 / 4.0;
+    if step <= limit {
+        return step;
+    }
+    const ROUND: [f32; 12] = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
+    ROUND.into_iter().filter(|v| *v <= limit).fold(ROUND[0], f32::max)
+}
+
 fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let (ab, ap) = (b - a, p - a);
     let t = (ap.dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
@@ -957,6 +971,8 @@ pub struct EditorApp {
     marquee: Option<Rect>,
     /// Scrolling not yet turned into a 15° turn of the dragged object.
     turn_acc: f32,
+    /// How far the view is from what is being dragged (metres): close up, snapping gets finer.
+    snap_dist: f32,
     wheel_trackpad: bool,
     orbit: Orbit,
     look_through: bool,
@@ -1145,6 +1161,7 @@ impl EditorApp {
             board: None,
             scroll_mode: ScrollMode::Auto,
             turn_acc: 0.0,
+            snap_dist: 10.0,
             marquee: None,
             wheel_trackpad: false,
             orbit: Orbit { target: Vec3::new(0.0, 0.5, 0.0), yaw: 0.6, pitch: 0.35, distance: 9.0 },
@@ -1251,7 +1268,7 @@ impl EditorApp {
     }
 
     fn snap_value(&self, ctrl: bool) -> Value {
-        if self.snap && !ctrl { json!(self.snap_step) } else { Value::Null }
+        if self.snap && !ctrl { json!(snap_step_at(self.snap_step, self.snap_dist)) } else { Value::Null }
     }
 
     /// Create a palette block (unplaced) under a merge key.
@@ -5441,6 +5458,10 @@ impl EditorApp {
                 .collect();
             Some((id.clone(), o, len, c, axes, rings, joint))
         });
+        self.snap_dist = match &gizmo {
+            Some((_, o, ..)) => (eye - *o).length(),
+            None => self.orbit.distance,
+        };
         // The motion path of the selection (its group, or the camera): a line through every frame
         // and a dot per key you can drag.
         let path = selected.as_ref().filter(|_| !clean).and_then(|s| {
@@ -5757,7 +5778,8 @@ impl EditorApp {
                     if let Some(t) = closest_on_line(start, axis, o, d) {
                         let mut step = t - t0;
                         if self.snap && !modifiers.command {
-                            step = (step / self.snap_step).round() * self.snap_step;
+                            let s = snap_step_at(self.snap_step, (eye - start).length());
+                            step = (step / s).round() * s;
                         }
                         let mut p = json!({"id": id, "position": (start + axis * step).to_array(), "frame": f});
                         if self.keyed(&scene, &id) {
@@ -6599,6 +6621,14 @@ impl EditorApp {
         ui.toggle_value(&mut self.snap, tr("Snap"))
             .on_hover_text(tr("Snap dragged blocks to a grid (hold Ctrl to place freely)"));
         ui.add_enabled(self.snap, egui::DragValue::new(&mut self.snap_step).range(0.01..=5.0).speed(0.01).suffix(" m"));
+        // close up the step gets finer, so small things still move (see snap_step_at)
+        let fine = snap_step_at(self.snap_step, self.snap_dist);
+        if self.snap && fine < self.snap_step {
+            let cm = fine * 100.0;
+            ui.weak(crate::lf!("→ {cm} cm", "→ {cm} 厘米")).on_hover_text(tr(
+                "Seen this close, dragging snaps to a finer step so small things still move. Zoom out for the full step.",
+            ));
+        }
         ui.add_space(6.0);
         if !compact {
             self.camera_view_button(ui, has_cam);
@@ -6687,6 +6717,37 @@ mod quick_tests {
         assert_eq!(rank_quick(&items, "crate apples"), vec![3]);
         assert_eq!(rank_quick(&items, "zzz"), Vec::<usize>::new());
         assert_eq!(rank_quick(&items, "").len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod snap_tests {
+    use super::*;
+
+    #[test]
+    fn far_views_keep_the_set_step() {
+        assert_eq!(snap_step_at(0.25, 10.0), 0.25);
+        assert_eq!(snap_step_at(0.3, 20.0), 0.3);
+    }
+
+    /// A drinks can seen from half a metre: its move arrow is 7 cm long. With the 25 cm step a
+    /// drag along the whole arrow rounded to 0 and the can never moved.
+    #[test]
+    fn close_ups_snap_finer_so_handles_move_things() {
+        let dist = 0.5;
+        let step = snap_step_at(0.25, dist);
+        assert_eq!(step, 0.01);
+        let arrow = dist * 0.14;
+        let moved = (arrow / step).round() * step;
+        assert!(moved > 0.05, "dragging the whole arrow moves {moved} m");
+        // a metre or two away: 2.5 or 5 cm
+        assert_eq!(snap_step_at(0.25, 2.0), 0.05);
+        assert_eq!(snap_step_at(0.25, 1.0), 0.025);
+        // never below a millimetre, never above the set step
+        assert_eq!(snap_step_at(0.25, 0.0), 0.001);
+        for d in [0.05, 0.3, 1.7, 4.0, 7.0, 50.0] {
+            assert!(snap_step_at(0.25, d) <= 0.25);
+        }
     }
 }
 

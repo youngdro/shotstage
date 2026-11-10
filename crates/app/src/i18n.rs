@@ -236,6 +236,10 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("subjects", "主体"),
     ("Snap", "吸附"),
     ("Snap dragged blocks to a grid (hold Ctrl to place freely)", "拖动时吸附到网格（按住 Ctrl 自由摆放）"),
+    (
+        "Seen this close, dragging snaps to a finer step so small things still move. Zoom out for the full step.",
+        "离得这么近时，拖动会吸附到更细的步长，小物件也能移动。拉远视图恢复完整步长。",
+    ),
     ("🎥 Camera view", "🎥 相机视角"),
     ("Look through the shot camera (the clean reference frame)", "透过镜头相机看（干净的参考画面）"),
     ("📷 Save frame", "📷 存当前帧"),
