@@ -1779,6 +1779,52 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("Mirror top-bottom", "上下镜像"),
     (" · U only", " · 只动 U"),
     (" · V only", " · 只动 V"),
+    // timeline: curve editor and cut preview
+    ("Curves", "曲线"),
+    (
+        "The selection's animation as curves: drag keys to change values, click a stretch to shape its easing",
+        "把选中对象的动画显示为曲线：拖动关键帧改数值，点击一段调整它的缓动",
+    ),
+    (
+        "Curves: select an animated object or camera to see its curves.",
+        "曲线：选中一个有动画的物体或相机即可看到它的曲线。",
+    ),
+    (
+        "Curves: this has no keys yet. Press ◆ Key at two frames, or use a preset under Animate.",
+        "曲线：它还没有关键帧。在两个帧上按 ◆ 关键帧，或用右侧“动画”里的预设。",
+    ),
+    (
+        "Nothing changes yet: key this object at two frames with different poses.",
+        "还没有变化：在两个帧上以不同姿态给它打关键帧。",
+    ),
+    ("Changing only", "只看变化的"),
+    ("Show all", "显示全部"),
+    ("Holds, then jumps", "保持不动，然后跳变"),
+    ("Custom curve…", "自定义曲线…"),
+    ("Shape this stretch's easing with two handles in the curve editor", "在曲线编辑器里用两个手柄调整这一段的缓动"),
+    ("Position X", "位置 X"),
+    ("Position Y", "位置 Y"),
+    ("Position Z", "位置 Z"),
+    ("Tilt (rot X)", "俯仰（旋转 X）"),
+    ("Pan (rot Y)", "摇移（旋转 Y）"),
+    ("Roll (rot Z)", "翻滚（旋转 Z）"),
+    ("Scale X", "缩放 X"),
+    ("Scale Y", "缩放 Y"),
+    ("Scale Z", "缩放 Z"),
+    ("Previous cut ( [ )", "上一个切点（[）"),
+    ("Next cut ( ] )", "下一个切点（]）"),
+    ("✂ Preview cut", "✂ 预览切换"),
+    (
+        "Play through the next cut: a moment before it to a moment after, through the shot cameras",
+        "播放下一个镜头切换：从切点前一小段到切点后一小段，通过镜头相机观看",
+    ),
+    ("🔁 Loop shot", "🔁 循环当前镜头"),
+    ("Playback repeats the shot under the playhead", "播放时只循环播放头所在的镜头"),
+    (
+        "The shot after the next cut: click to play through the cut, double-click to jump to it",
+        "下一次切换后的镜头：单击播放这次切换，双击跳到那里",
+    ),
+    ("Drag to move, drag an edge to trim, double-click to look through", "拖动可移动，拖边缘可裁剪，双击通过它观看"),
 ];
 
 #[cfg(test)]
