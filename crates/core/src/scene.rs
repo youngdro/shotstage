@@ -256,6 +256,53 @@ mod id_index {
 }
 
 impl Scene {
+    /// Roughly how much memory keeping this scene costs next to `other` (an undo step next to
+    /// the state it leads to): its entity list, plus the meshes and pictures `other` does not
+    /// share with it. Bytes.
+    pub fn bytes_not_shared_with(&self, other: &Scene) -> usize {
+        use crate::mesh::Mesh;
+        use std::collections::HashSet;
+        let mesh_bytes = |m: &Mesh| {
+            m.positions.len() * 12
+                + m.faces.iter().map(|f| 24 + f.len() * 4).sum::<usize>()
+                + m.uvs.iter().map(|f| 24 + f.len() * 8).sum::<usize>()
+        };
+        let shared_of = |s: &Scene| -> HashSet<usize> {
+            let meshes = s.entities.iter().flat_map(|e| match &e.kind {
+                EntityKind::Mesh { source: MeshSource::Data { mesh }, .. } => vec![mesh.addr()],
+                EntityKind::Mesh { source: MeshSource::Skinned { mesh, skin }, .. } => vec![mesh.addr(), skin.addr()],
+                _ => vec![],
+            });
+            let assets = s.assets.values().map(|a| a.data.as_ptr() as usize);
+            meshes.chain(assets).collect()
+        };
+        let theirs = shared_of(other);
+        let mut bytes =
+            self.entities.len() * 256 + self.timeline.tracks.iter().map(|t| 64 + t.keys.len() * 96).sum::<usize>();
+        for e in &self.entities {
+            match &e.kind {
+                EntityKind::Mesh { source: MeshSource::Data { mesh }, .. } if !theirs.contains(&mesh.addr()) => {
+                    bytes += mesh_bytes(mesh)
+                }
+                EntityKind::Mesh { source: MeshSource::Skinned { mesh, skin }, .. } => {
+                    if !theirs.contains(&mesh.addr()) {
+                        bytes += mesh_bytes(mesh);
+                    }
+                    if !theirs.contains(&skin.addr()) {
+                        bytes += skin.vertex_joints.len() * 24 + skin.inverse_bind.len() * 64;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for a in self.assets.values() {
+            if !theirs.contains(&(a.data.as_ptr() as usize)) {
+                bytes += a.data.len();
+            }
+        }
+        bytes
+    }
+
     pub fn get(&self, id: &str) -> Result<&Entity> {
         id_index::position(&self.entities, id).map(|i| &self.entities[i]).ok_or_else(|| CoreError::NoEntity(id.into()))
     }

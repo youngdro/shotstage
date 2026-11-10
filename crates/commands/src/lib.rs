@@ -136,6 +136,12 @@ pub struct Outcome {
 }
 
 const HISTORY_LIMIT: usize = 200;
+/// Memory the undo history may hold beyond the scene itself: steps that changed big meshes
+/// keep their own copy of them, so a long session of mesh edits on a heavy model would
+/// otherwise grow without bound. The oldest steps go first.
+const HISTORY_BUDGET: usize = if cfg!(target_arch = "wasm32") { 256 << 20 } else { 768 << 20 };
+/// Steps kept whatever they cost.
+const HISTORY_MIN_STEPS: usize = 5;
 pub const BATCH_LIMIT: usize = 500;
 
 /// Commands handled by the session itself (they need the history, not just the scene).
@@ -146,20 +152,40 @@ const SESSION_COMMANDS: &[(&str, &str, bool)] = &[
     ("history.info", "How many undo and redo steps are available.", false),
     (
         "history.discard",
-        "Undo the last change and forget it (no redo): for previews that are tried and thrown away.",
+        "Undo the last change and forget it (no redo): for previews that are tried and thrown away. \
+         With `merge`, only when the last change was made under that merge key (a cancelled drag \
+         that never moved anything leaves the step before it alone).",
         true,
     ),
 ];
 
+/// One undo (or redo) step: the scene to go back to, and roughly how much memory only it holds.
+struct Step {
+    label: String,
+    scene: Scene,
+    bytes: usize,
+}
+
+impl Step {
+    /// `scene`, kept next to `neighbour` (the state it leads to or comes from): what they
+    /// share costs nothing extra.
+    fn new(label: &str, scene: Scene, neighbour: &Scene) -> Self {
+        let bytes = scene.bytes_not_shared_with(neighbour);
+        Self { label: label.to_string(), scene, bytes }
+    }
+}
+
 /// An open document: the scene plus undo/redo history.
 pub struct Session {
     scene: Scene,
-    undo: Vec<(String, Scene)>,
-    redo: Vec<(String, Scene)>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     revision: u64,
     commands: Vec<Command>,
     /// Merge key of the last recorded change (see [`Session::dispatch_merged`]).
     last_merge: Option<String>,
+    /// See [`HISTORY_BUDGET`].
+    history_budget: usize,
 }
 
 impl Default for Session {
@@ -170,7 +196,15 @@ impl Default for Session {
 
 impl Session {
     pub fn new(scene: Scene) -> Self {
-        Self { scene, undo: Vec::new(), redo: Vec::new(), revision: 0, commands: registry(), last_merge: None }
+        Self {
+            scene,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            revision: 0,
+            commands: registry(),
+            last_merge: None,
+            history_budget: HISTORY_BUDGET,
+        }
     }
 
     pub fn scene(&self) -> &Scene {
@@ -188,7 +222,14 @@ impl Session {
                 id: id.to_string(),
                 summary: summary.to_string(),
                 mutates: *mutates,
-                params: empty(),
+                params: if *id == "history.discard" {
+                    json!({"type": "object", "properties": {"merge": {
+                        "type": "string",
+                        "description": "Only discard when the last change was made under this merge key."
+                    }}})
+                } else {
+                    empty()
+                },
                 needs: vec![],
             })
             .chain(self.commands.iter().map(|c| CommandInfo {
@@ -213,11 +254,33 @@ impl Session {
 
     fn push_undo(&mut self, label: &str, before: Scene) {
         self.last_merge = None;
-        self.undo.push((label.to_string(), before));
-        if self.undo.len() > HISTORY_LIMIT {
-            self.undo.remove(0);
-        }
+        self.undo.push(Step::new(label, before, &self.scene));
         self.redo.clear();
+        self.trim_history();
+    }
+
+    /// Drop the oldest steps past the step limit or the memory budget.
+    fn trim_history(&mut self) {
+        let mut total: usize = self.undo.iter().chain(&self.redo).map(|s| s.bytes).sum();
+        let mut drop = 0;
+        while self.undo.len() - drop > HISTORY_MIN_STEPS
+            && (self.undo.len() - drop > HISTORY_LIMIT || total > self.history_budget)
+        {
+            total -= self.undo[drop].bytes;
+            drop += 1;
+        }
+        self.undo.drain(..drop);
+    }
+
+    /// Change how much memory the undo history may hold (bytes); the oldest steps beyond it go.
+    pub fn set_history_budget(&mut self, bytes: usize) {
+        self.history_budget = bytes;
+        self.trim_history();
+    }
+
+    /// Memory the history holds beyond the scene itself, roughly (bytes).
+    pub fn history_bytes(&self) -> usize {
+        self.undo.iter().chain(&self.redo).map(|s| s.bytes).sum()
     }
 
     /// Run one command. A failing command leaves the scene unchanged.
@@ -232,31 +295,36 @@ impl Session {
             "command.list" => return Ok(self.outcome(json!(self.list()), false)),
             "history.info" => {
                 let r = json!({
-                    "undo": self.undo.iter().rev().map(|(l, _)| l).collect::<Vec<_>>(),
-                    "redo": self.redo.iter().rev().map(|(l, _)| l).collect::<Vec<_>>(),
+                    "undo": self.undo.iter().rev().map(|s| &s.label).collect::<Vec<_>>(),
+                    "redo": self.redo.iter().rev().map(|s| &s.label).collect::<Vec<_>>(),
+                    "memoryMb": (self.history_bytes() as f64 / 1048576.0 * 10.0).round() / 10.0,
                 });
                 return Ok(self.outcome(r, false));
             }
             "history.undo" => {
-                let (label, prev) =
-                    self.undo.pop().ok_or_else(|| CommandError::new("nothing_to_undo", "nothing to undo"))?;
-                let cur = std::mem::replace(&mut self.scene, prev);
-                self.redo.push((label.clone(), cur));
-                return Ok(self.outcome(json!({ "undone": label }), true));
+                let step = self.undo.pop().ok_or_else(|| CommandError::new("nothing_to_undo", "nothing to undo"))?;
+                let cur = std::mem::replace(&mut self.scene, step.scene);
+                self.last_merge = None;
+                self.redo.push(Step::new(&step.label, cur, &self.scene));
+                return Ok(self.outcome(json!({ "undone": step.label }), true));
             }
             "history.discard" => {
-                let (label, prev) =
-                    self.undo.pop().ok_or_else(|| CommandError::new("nothing_to_undo", "nothing to undo"))?;
-                self.scene = prev;
+                if let Some(key) = params.get("merge").and_then(Value::as_str)
+                    && self.last_merge.as_deref() != Some(key)
+                {
+                    return Ok(self.outcome(json!({ "discarded": null }), false));
+                }
+                let step = self.undo.pop().ok_or_else(|| CommandError::new("nothing_to_undo", "nothing to undo"))?;
+                self.scene = step.scene;
                 self.last_merge = None;
-                return Ok(self.outcome(json!({ "discarded": label }), true));
+                return Ok(self.outcome(json!({ "discarded": step.label }), true));
             }
             "history.redo" => {
-                let (label, next) =
-                    self.redo.pop().ok_or_else(|| CommandError::new("nothing_to_redo", "nothing to redo"))?;
-                let cur = std::mem::replace(&mut self.scene, next);
-                self.undo.push((label.clone(), cur));
-                return Ok(self.outcome(json!({ "redone": label }), true));
+                let step = self.redo.pop().ok_or_else(|| CommandError::new("nothing_to_redo", "nothing to redo"))?;
+                let cur = std::mem::replace(&mut self.scene, step.scene);
+                self.last_merge = None;
+                self.undo.push(Step::new(&step.label, cur, &self.scene));
+                return Ok(self.outcome(json!({ "redone": step.label }), true));
             }
             _ => {}
         }

@@ -1401,11 +1401,11 @@ impl EditorApp {
         let shift = ui.input(|i| i.modifiers.shift) || presses.iter().any(|(_, m)| m.shift);
         // history and file keys work as usual
         if kc(egui::Key::Z) {
-            self.run(if shift { "history.redo" } else { "history.undo" }, json!({}));
+            self.undo_redo(shift);
             return true;
         }
         if kc(egui::Key::Y) {
-            self.run("history.redo", json!({}));
+            self.undo_redo(true);
             return true;
         }
         if kc(egui::Key::S) {

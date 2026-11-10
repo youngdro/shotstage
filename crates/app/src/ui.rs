@@ -464,9 +464,51 @@ fn friendly(command: &str) -> String {
         "light.fromEnvironment" => "Sun from sky".into(),
         "environment.set" => "Sky".into(),
         "environment.import" => "Import HDRI".into(),
-        "scene.load" => "Open scene".into(),
+        "scene.load" | "scene.open" => "Open scene".into(),
         "scene.new" => "New scene".into(),
         "batch" => "Several changes".into(),
+        "entity.translate" => "Move".into(),
+        "entity.setParent" => "Change parent".into(),
+        "entity.face" => "Turn to face".into(),
+        "camera.orbitMove" | "camera.dollyMove" => "Camera move".into(),
+        "camera.setReference" => "Reference picture".into(),
+        "timeline.set" => "Timeline settings".into(),
+        "image.set" => "Edit picture".into(),
+        "mesh.setColor" => "Change colour".into(),
+        "mesh.setPrimitive" => "Change shape".into(),
+        "mesh.addModifier" => "Add modifier".into(),
+        "mesh.removeModifier" => "Remove modifier".into(),
+        "mesh.applyModifiers" => "Apply modifiers".into(),
+        "mesh.join" => "Join meshes".into(),
+        "mesh.setOriginToCenter" => "Origin to centre".into(),
+        "mesh.setData" | "mesh.editData" | "mesh.makeEditable" => "Edit mesh".into(),
+        "mesh.transformElements" => "Move vertices".into(),
+        "mesh.extrude" => "Extrude".into(),
+        "mesh.inset" => "Inset".into(),
+        "mesh.bevel" => "Bevel".into(),
+        "mesh.loopCut" => "Loop cut".into(),
+        "mesh.subdivideFaces" => "Subdivide".into(),
+        "mesh.connect" => "Connect vertices".into(),
+        "mesh.deleteElements" => "Delete elements".into(),
+        "mesh.merge" => "Merge vertices".into(),
+        "mesh.mergeByDistance" => "Merge by distance".into(),
+        "mesh.fill" => "Fill".into(),
+        "mesh.flipNormals" => "Flip normals".into(),
+        "mesh.bridge" => "Bridge".into(),
+        "mesh.edgeSlide" => "Edge slide".into(),
+        "mesh.bisect" => "Bisect".into(),
+        "mesh.knife" => "Knife".into(),
+        "mesh.spin" => "Spin".into(),
+        "mesh.boolean" => "Boolean".into(),
+        "mesh.setMaterial" => "Material".into(),
+        "mesh.unwrap" => "Unwrap UVs".into(),
+        "mesh.uvTransform" | "mesh.uvSet" | "mesh.uvAlign" | "mesh.uvWeld" | "mesh.uvPack" => "Edit UVs".into(),
+        "person.setBody" => "Body shape".into(),
+        "person.setOutfit" => "Outfit".into(),
+        "person.setHair" => "Hair".into(),
+        "person.setExpression" => "Expression".into(),
+        "person.lookAt" => "Look at".into(),
+        "pose.hand" => "Hand pose".into(),
         other => other.replace('.', " "),
     }
 }
@@ -1172,6 +1214,38 @@ impl EditorApp {
         self.toast = Some((tr(msg.into()), f64::NAN));
     }
 
+    /// Undo (or redo) one step and say which: with many kinds of edits, a silent undo leaves
+    /// people unsure what it took back.
+    pub(crate) fn undo_redo(&mut self, redo: bool) {
+        let command = if redo { "history.redo" } else { "history.undo" };
+        match hub::dispatch(&self.hub, json!({ "command": command })) {
+            Ok(o) => {
+                let label = o.result[if redo { "redone" } else { "undone" }].as_str().unwrap_or_default();
+                let what = tr(friendly(label));
+                self.toast(if redo {
+                    crate::lf!("Redone: {what}", "已重做：{what}")
+                } else {
+                    crate::lf!("Undone: {what}", "已撤销：{what}")
+                });
+            }
+            Err(_) => self.toast(if redo { tr("Nothing to redo") } else { tr("Nothing to undo yet") }),
+        }
+    }
+
+    /// The merge key of the drag in progress, if it is one that changes the scene.
+    fn gesture_key(&self) -> Option<String> {
+        match &self.drag {
+            Gesture::Move { key, .. }
+            | Gesture::Axis { key, .. }
+            | Gesture::Ring { key, .. }
+            | Gesture::Aim { key, .. }
+            | Gesture::Scale { key, .. }
+            | Gesture::LightAim { key, .. }
+            | Gesture::PathKey { key, .. } => Some(key.clone()),
+            _ => None,
+        }
+    }
+
     /// Import the files that were picked or dropped.
     fn import_incoming(&mut self) {
         use shotstage_commands::model::{ModelFormat, encode};
@@ -1789,8 +1863,8 @@ impl EditorApp {
             QuickRun::Action(a) => match a {
                 QuickAction::Save => self.save_scene(),
                 QuickAction::Open => crate::files::pick(&self.incoming, ctx),
-                QuickAction::Undo => _ = self.run("history.undo", json!({})),
-                QuickAction::Redo => _ = self.run("history.redo", json!({})),
+                QuickAction::Undo => self.undo_redo(false),
+                QuickAction::Redo => self.undo_redo(true),
                 QuickAction::New => self.new_scene(),
                 QuickAction::Shadows => self.shadows = !self.shadows,
                 QuickAction::Focus => self.focus_selection(),
@@ -1985,6 +2059,11 @@ impl eframe::App for EditorApp {
             let _ = rs.device.poll(wgpu::PollType::Poll);
             ui.ctx().request_repaint();
         }
+        // every new click or drag is its own undo step: a slider or colour that is pressed
+        // again must not fold into the previous change of the same field
+        if ui.input(|i| i.pointer.any_pressed()) {
+            self.gesture += 1;
+        }
         {
             let mut h = self.hub.borrow_mut();
             if h.selected.as_ref().is_some_and(|s| !h.session.scene().contains(s)) {
@@ -2126,10 +2205,10 @@ impl EditorApp {
             self.duplicate_selection();
         }
         if undo {
-            self.run("history.undo", json!({}));
+            self.undo_redo(false);
         }
         if redo {
-            self.run("history.redo", json!({}));
+            self.undo_redo(true);
         }
         if del {
             self.delete_selection();
@@ -2240,33 +2319,72 @@ impl EditorApp {
             if ui.button(tr("New")).on_hover_text(tr("Clear the scene (undoable)")).clicked() {
                 self.new_scene();
             }
-            if ui.button(tr("Undo")).on_hover_text(tr("Cmd/Ctrl+Z")).clicked() {
-                self.run("history.undo", json!({}));
+            let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
+            let labels = |k: &str| -> Vec<String> {
+                info[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+            };
+            let (undo, redo) = (labels("undo"), labels("redo"));
+            let next = |l: Option<&String>, key: &str| match l {
+                Some(l) => format!("{} · {key}", tr(friendly(l))),
+                None => key.to_string(),
+            };
+            if ui
+                .add_enabled(!undo.is_empty(), egui::Button::new(tr("Undo")))
+                .on_hover_text(next(undo.first(), "Cmd/Ctrl+Z"))
+                .on_disabled_hover_text(tr("Nothing to undo yet"))
+                .clicked()
+            {
+                self.undo_redo(false);
             }
-            if ui.button(tr("Redo")).on_hover_text(tr("Cmd/Ctrl+Shift+Z")).clicked() {
-                self.run("history.redo", json!({}));
+            if ui
+                .add_enabled(!redo.is_empty(), egui::Button::new(tr("Redo")))
+                .on_hover_text(next(redo.first(), "Cmd/Ctrl+Shift+Z"))
+                .on_disabled_hover_text(tr("Nothing to redo"))
+                .clicked()
+            {
+                self.undo_redo(true);
             }
             if ui.button(tr("🔍 Actions")).on_hover_text(tr("Search every block, move, pose, template and action (Cmd/Ctrl+K or /)")).clicked() {
                 self.quick = Some((String::new(), 0));
             }
             ui.menu_button(tr("History"), |ui| {
-                let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
-                let undo: Vec<String> = info["undo"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default();
-                if undo.is_empty() {
+                if undo.is_empty() && redo.is_empty() {
                     ui.weak(tr("Nothing to undo yet"));
                 } else {
-                    ui.weak(tr("Click a step to go back to before it"));
+                    ui.weak(tr("Click a step to go back (or forward) to it"));
                 }
-                for (i, label) in undo.iter().take(20).enumerate() {
-                    if ui.button(format!("{}. {}", i + 1, tr(friendly(label)))).clicked() {
-                        for _ in 0..=i {
-                            self.run("history.undo", json!({}));
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    // redo steps on top (the furthest last), then where you are, then undo steps
+                    for (i, label) in redo.iter().enumerate().take(30).rev() {
+                        let text = egui::RichText::new(format!("↷ {}", tr(friendly(label)))).weak();
+                        if ui.button(text).on_hover_text(tr("Redo up to this step")).clicked() {
+                            for _ in 0..=i {
+                                self.run("history.redo", json!({}));
+                            }
+                            ui.close();
                         }
-                        ui.close();
                     }
+                    ui.label(egui::RichText::new(tr("● Now")).strong());
+                    for (i, label) in undo.iter().enumerate().take(50) {
+                        if ui
+                            .button(format!("{}. {}", i + 1, tr(friendly(label))))
+                            .on_hover_text(tr("Go back to before this step"))
+                            .clicked()
+                        {
+                            for _ in 0..=i {
+                                self.run("history.undo", json!({}));
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+                if let Some(mb) = info["memoryMb"].as_f64().filter(|mb| *mb >= 1.0) {
+                    ui.separator();
+                    ui.weak(crate::lf!(
+                        "{} steps kept ({mb:.0} MB); the oldest go first when it gets large",
+                        "保留了 {} 步（{mb:.0} MB）；占用变大时最早的步骤会先被清掉",
+                        undo.len() + redo.len()
+                    ));
                 }
             });
             ui.separator();
@@ -4720,13 +4838,14 @@ impl EditorApp {
             }
             let pd = self.palette.as_ref().expect("checked above");
             if released || esc {
-                finish = Some((inside.is_some() && !esc, pd.spawned.clone()));
+                finish = Some((inside.is_some() && !esc, pd.spawned.clone(), pd.key.clone()));
             }
-            if let Some((keep, spawned)) = finish {
+            if let Some((keep, spawned, key)) = finish {
                 match (keep, spawned) {
                     (true, Some(id)) => self.select(Some(id)),
                     (false, Some(_)) => {
-                        self.run("history.undo", json!({}));
+                        // take the block back without leaving it to redo
+                        self.run("history.discard", json!({ "merge": key }));
                     }
                     _ => {}
                 }
@@ -5008,7 +5127,10 @@ impl EditorApp {
                 self.drag = Gesture::Cancelled;
             }
             if esc && !matches!(self.drag, Gesture::Idle | Gesture::Navigate | Gesture::Cancelled | Gesture::EditTool) {
-                self.run("history.undo", json!({}));
+                // only what this drag did (nothing, if it had not moved yet), and nothing to redo
+                if let Some(key) = self.gesture_key() {
+                    self.run("history.discard", json!({ "merge": key }));
+                }
                 self.drag = Gesture::Cancelled;
             }
             let ptr = pointer.unwrap_or(rect.center());
@@ -6068,6 +6190,12 @@ mod i18n_tests {
                 if !lit.contains('"') {
                     texts.push(lit.replace("\\n", "\n").replace("\\\"", "\""));
                 }
+            }
+        }
+        // every change can show in the History menu and the undo toast by name
+        for c in shotstage_commands::Session::default().list().into_iter().filter(|c| c.mutates) {
+            if !c.id.starts_with("history.") && !c.id.starts_with("render.") && !c.id.starts_with("editor.") {
+                texts.push(friendly(&c.id));
             }
         }
         let mut missing: Vec<String> = texts.into_iter().filter(|t| needs_words(t) && !crate::i18n::has(t)).collect();
