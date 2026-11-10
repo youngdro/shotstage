@@ -414,7 +414,7 @@ fn create(scene: &mut Scene, p: CreateParams) -> CmdResult<Value> {
             }
             let source = match (p.mesh, p.primitive) {
                 (Some(_), Some(_)) => return Err(CommandError::invalid("give `mesh` or `primitive`, not both")),
-                (Some(mesh), None) => MeshSource::Data { mesh },
+                (Some(mesh), None) => MeshSource::Data { mesh: mesh.into() },
                 (None, prim) => MeshSource::Primitive { primitive: prim.unwrap_or(Primitive::Cube { size: [1.0; 3] }) },
             };
             source.base_mesh()?;
@@ -580,7 +580,7 @@ fn join(scene: &mut Scene, p: JoinParams) -> CmdResult<Value> {
         scene.remove(id)?;
     }
     let (source, modifiers, _) = mesh_parts(scene, first)?;
-    *source = MeshSource::Data { mesh: merged };
+    *source = MeshSource::Data { mesh: merged.into() };
     modifiers.clear();
     Ok(json!({ "id": first }))
 }
@@ -725,7 +725,7 @@ pub fn registry() -> Vec<Command> {
         command!("mesh.setPrimitive", "Change a mesh's primitive parameters (size, segments...).", mutates: true, PrimitiveParams,
             |s, p| { p.primitive.build()?; let (src, _, _) = mesh_parts(s, &p.id)?; *src = MeshSource::Primitive { primitive: p.primitive }; Ok(Value::Null) }),
         command!("mesh.setData", "Replace a mesh's geometry with explicit vertices and faces.", mutates: true, SetMeshParams,
-            |s, p| { p.mesh.validate()?; let (src, _, _) = mesh_parts(s, &p.id)?; *src = MeshSource::Data { mesh: p.mesh }; Ok(Value::Null) }),
+            |s, p| { p.mesh.validate()?; let (src, _, _) = mesh_parts(s, &p.id)?; *src = MeshSource::Data { mesh: p.mesh.into() }; Ok(Value::Null) }),
         command!("mesh.setColor", "Set a mesh's display colour.", mutates: true, ColorParams,
             |s, p| { let c = color(p.color)?; let (_, _, col) = mesh_parts(s, &p.id)?; *col = c; Ok(Value::Null) }),
         command!("mesh.addModifier", "Add a non-destructive modifier (mirror, array, subdivide).", mutates: true, AddModifierParams,
@@ -749,7 +749,7 @@ pub fn registry() -> Vec<Command> {
             let (src, mods, _) = mesh_parts(s, &p.id)?;
             let m = evaluate_mesh(src, mods)?;
             let faces = m.faces.len();
-            *src = MeshSource::Data { mesh: m }; mods.clear();
+            *src = MeshSource::Data { mesh: m.into() }; mods.clear();
             Ok(json!({ "faces": faces }))
         }),
         command!("mesh.join", "Merge several meshes into the first one (world positions kept).", mutates: true, JoinParams, join),
@@ -763,7 +763,7 @@ pub fn registry() -> Vec<Command> {
             let moved = base.transformed(Mat4::from_translation(-c));
             let shift = e.transform.matrix().transform_vector3(c);
             let (src, _, _) = mesh_parts(s, &p.id)?;
-            *src = MeshSource::Data { mesh: moved };
+            *src = MeshSource::Data { mesh: moved.into() };
             let ent = s.get_mut(&p.id)?;
             ent.transform.translation = (ent.transform.translation() + shift).to_array();
             Ok(json!({ "shift": shift.to_array() }))

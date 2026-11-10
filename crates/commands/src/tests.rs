@@ -424,3 +424,119 @@ fn push_in_keeps_the_framing_on_its_first_frame() {
     // `id` is accepted for the target too
     s.dispatch("motion.apply", json!({"preset": "orbitLeft", "id": "cam", "start": 100})).unwrap();
 }
+
+fn dense_mesh(s: &mut Session, id: &str) {
+    run(
+        s,
+        "entity.create",
+        json!({"id": id, "type": "mesh", "primitive": {"shape": "sphere", "radius": 0.5, "segments": 128, "rings": 64}}),
+    );
+    run(s, "mesh.makeEditable", json!({"id": id}));
+}
+
+#[test]
+fn undo_steps_share_unchanged_meshes() {
+    let mut s = Session::default();
+    dense_mesh(&mut s, "m");
+    let start = s.history_bytes();
+    // moving it 50 times copies no geometry: every step shares the same mesh
+    for i in 0..50 {
+        run(&mut s, "entity.setTransform", json!({"id": "m", "position": [i as f32 * 0.1, 0.0, 0.0]}));
+    }
+    assert!(s.history_bytes() - start < 50 * 1024, "history grew by {} bytes", s.history_bytes() - start);
+    let mesh_of = |s: &Session| match &s.scene().get("m").unwrap().kind {
+        shotstage_core::EntityKind::Mesh { source: shotstage_core::MeshSource::Data { mesh }, .. } => mesh.clone(),
+        _ => unreachable!(),
+    };
+    let before = mesh_of(&s);
+    // editing it copies it once: the old version stays with the undo step, unchanged
+    run(&mut s, "mesh.transformElements", json!({"id": "m", "vertices": [0], "translate": [0.0, 1.0, 0.0]}));
+    let after = mesh_of(&s);
+    assert_ne!(before.positions[0], after.positions[0]);
+    run(&mut s, "history.undo", json!({}));
+    assert_eq!(mesh_of(&s).positions[0], before.positions[0]);
+    run(&mut s, "history.redo", json!({}));
+    assert_eq!(mesh_of(&s).positions[0], after.positions[0]);
+}
+
+#[test]
+fn history_stays_within_its_memory_budget() {
+    let mut s = Session::default();
+    dense_mesh(&mut s, "m");
+    s.set_history_budget(4 << 20);
+    for _ in 0..40 {
+        run(&mut s, "mesh.transformElements", json!({"id": "m", "vertices": [0], "translate": [0.0, 0.01, 0.0]}));
+    }
+    assert!(s.history_bytes() <= 4 << 20, "history holds {} bytes", s.history_bytes());
+    let info = run(&mut s, "history.info", json!({}));
+    let steps = info["undo"].as_array().unwrap().len();
+    assert!((5..40).contains(&steps), "{steps} steps kept");
+    // what is left still undoes cleanly
+    for _ in 0..steps {
+        run(&mut s, "history.undo", json!({}));
+    }
+}
+
+#[test]
+fn a_gesture_after_undo_starts_a_new_step() {
+    let mut s = Session::default();
+    run(&mut s, "entity.create", json!({"id": "a", "type": "empty"}));
+    let drag = |s: &mut Session, x: f32| {
+        s.dispatch_json(json!({"command": "entity.setTransform", "params": {"id": "a", "position": [x, 0.0, 0.0]}, "merge": "drag:1"}))
+            .unwrap();
+    };
+    drag(&mut s, 1.0);
+    drag(&mut s, 2.0);
+    run(&mut s, "history.undo", json!({}));
+    assert_eq!(s.scene().get("a").unwrap().transform.translation[0], 0.0);
+    // the same merge key again after an undo must not fold into the step before the drag
+    drag(&mut s, 3.0);
+    run(&mut s, "history.undo", json!({}));
+    assert_eq!(s.scene().get("a").unwrap().transform.translation[0], 0.0);
+    assert!(s.scene().contains("a"), "undo went one step too far");
+}
+
+#[test]
+fn big_scenes_find_entities_after_renames_and_deletes() {
+    let mut s = Session::default();
+    for i in 0..200 {
+        run(&mut s, "entity.create", json!({"id": format!("e{i}"), "type": "empty"}));
+    }
+    // look things up often enough for the index to kick in
+    for _ in 0..3 {
+        for i in 0..200 {
+            assert!(s.scene().contains(&format!("e{i}")));
+        }
+    }
+    // an id changed in place (the index cannot see that) is still found right
+    let mut sc = s.scene().clone();
+    for _ in 0..20 {
+        assert!(sc.contains("e10"));
+    }
+    sc.get_mut("e10").unwrap().id = "renamed".into();
+    assert!(!sc.contains("e10"));
+    assert_eq!(sc.get("renamed").unwrap().id, "renamed");
+    run(&mut s, "entity.delete", json!({"id": "e5"}));
+    assert!(s.scene().get("e5").is_err());
+    for i in (0..200).filter(|i| *i != 5) {
+        assert_eq!(s.scene().get(&format!("e{i}")).unwrap().id, format!("e{i}"));
+    }
+}
+
+#[test]
+fn discarding_a_gesture_that_changed_nothing_keeps_the_step_before() {
+    let mut s = Session::default();
+    run(&mut s, "entity.create", json!({"id": "a", "type": "empty"}));
+    // a drag under "drag:7" that was cancelled before it moved anything
+    let r = run(&mut s, "history.discard", json!({"merge": "drag:7"}));
+    assert!(r["discarded"].is_null());
+    assert!(s.scene().contains("a"));
+    // once it has moved, cancelling takes the move back (and leaves nothing to redo)
+    s.dispatch_json(
+        json!({"command": "entity.setTransform", "params": {"id": "a", "position": [1, 0, 0]}, "merge": "drag:7"}),
+    )
+    .unwrap();
+    run(&mut s, "history.discard", json!({"merge": "drag:7"}));
+    assert_eq!(s.scene().get("a").unwrap().transform.translation[0], 0.0);
+    assert!(s.dispatch("history.redo", json!({})).is_err());
+}

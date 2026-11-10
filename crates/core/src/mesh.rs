@@ -83,10 +83,10 @@ pub enum MeshSource {
     /// Re-generated from parameters, so its size and segment counts stay editable.
     Primitive { primitive: Primitive },
     /// Explicit geometry (imported, applied modifiers, merged, or edited).
-    Data { mesh: Mesh },
+    Data { mesh: crate::Shared<Mesh> },
     /// Imported geometry bound to a skeleton: `mesh` is the rest pose, and every vertex follows
     /// up to four joint entities (see [`crate::eval::posed_mesh`]).
-    Skinned { mesh: Mesh, skin: Skin },
+    Skinned { mesh: crate::Shared<Mesh>, skin: crate::Shared<Skin> },
     /// One part of a realistic person (MakeHuman / MPFB), generated from its body parameters and
     /// bent by `joints` (one entity id per bone of [`crate::human::skeleton`]).
     Human {
@@ -424,12 +424,12 @@ impl MeshSource {
             MeshSource::Primitive { primitive } => primitive.build(),
             MeshSource::Data { mesh } => {
                 mesh.validate()?;
-                Ok(mesh.clone())
+                Ok(mesh.to_inner())
             }
             MeshSource::Skinned { mesh, skin } => {
                 mesh.validate()?;
                 skin.validate(mesh.positions.len())?;
-                Ok(mesh.clone())
+                Ok(mesh.to_inner())
             }
             MeshSource::Human { body, part, outfit, .. } => {
                 body.validate()?;

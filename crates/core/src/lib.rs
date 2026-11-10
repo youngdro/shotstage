@@ -12,10 +12,12 @@ pub mod eval;
 pub mod human;
 pub mod image;
 pub mod light;
+pub mod lru;
 pub mod mesh;
 pub mod meshcache;
 pub mod meshedit;
 pub mod scene;
+pub mod shared;
 pub mod spatial;
 pub mod timeline;
 pub mod uv;
@@ -28,6 +30,7 @@ pub use image::{Asset, ImageData};
 pub use light::{LightData, LightKind};
 pub use mesh::{Mesh, MeshSource, Modifier, Primitive, Skin, TriMesh};
 pub use scene::{CameraReference, Entity, EntityKind, Scene, Transform};
+pub use shared::Shared;
 pub use timeline::{Channel, ExpressionMix, Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
 
 /// Errors produced by scene operations. Messages are written for agents as well as people.

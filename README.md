@@ -40,7 +40,8 @@
 
 ## 顺手的操作
 
-- **保存 / 打开**：**Save**（Cmd/Ctrl+S）把整个场景存成 `.shotstage.json`；**Open…** 打开它（也能导入模型和图片），打开算一步，可撤销。每次改动约 2 秒后自动保存（网页存在浏览器本地，桌面版存在 `~/.shotstage/autosave.json`），下次启动会询问是否恢复上次的场景。
+- **保存 / 打开**：**Save**（Cmd/Ctrl+S）把整个场景存成 `.shotstage.json`；**Open…** 打开它（也能导入模型和图片），打开算一步，可撤销。每次改动约 2 秒后自动保存，切走标签页、关闭页面或关闭窗口时也会立即保存（网页存在浏览器的 IndexedDB，带模型和图片的大场景也存得下；桌面版在后台线程写 `~/.shotstage/autosave.json`，写到一半崩溃也不会损坏上一份），下次启动会询问是否恢复上次的场景。
+- **撤销 / 重做**：所有修改（摆放、网格编辑、UV、灯光、人物、动画、模板……）都能撤销。撤销后底部会提示撤销了哪一步；**History** 菜单列出可撤销和可重做的步骤，点一步就跳到那里。拖动中按 Esc 只撤回这次拖动。历史最多 200 步，并有内存上限（桌面 768 MB，网页 256 MB），超过时最早的步骤先被清掉；没改动的模型在各步之间共享，不占额外内存。
 - **快捷操作框**：**Cmd/Ctrl+K**（或 `/`，或工具栏的 **Actions**）打开一个搜索框，能搜到所有积木、灯光预设、模板、编辑操作（保存、撤销、聚焦、复制……），以及当前选中对象能用的姿势、人物动作、物体运动或运镜。还能按名字选中物体、跳到某个镜头、透过某台相机看，以及播放 / 暂停、切换相机视角 / 故事板 / 镜头小窗、存当前帧、导出故事板。输入几个字母，↑↓ 选择，回车执行；每次都是普通的一步撤销。
 - **复制 / 剪切 / 粘贴**：Cmd/Ctrl+C / X / V 通过系统剪贴板复制物体（连同子物体、动画和图片），可以贴到同一场景、另一个场景或另一个浏览器标签页；在原物体旁边粘贴会稍微错开。人物粘贴后依然可以摆姿势。命令 `entity.copy` / `entity.paste`，agent 也能用。
 - **框选**：在视口空白处按住 Cmd/Ctrl 拖动，拉出选框，框住的物体（看得见、没锁定的）一起选中；Esc 取消。
@@ -230,6 +231,8 @@ await init();
 const editor = await mount("#stage", { scene: savedSceneJson }); // 元素或 CSS 选择器；scene 可选
 // toolbar 可选：在编辑器顶栏加自己的按钮，点击时 editor.on 收到 { type: "toolbar", id }
 // mount("#stage", { toolbar: [{ id: "share", label: "Share link", labelZh: "分享链接", tooltip: "…", tooltipZh: "…" }] })
+// autosaveKey 可选：自动保存到浏览器 IndexedDB 的哪个位置（默认 "shotstage.autosave"，null 关闭自动保存）
+// restorePrompt: false 不弹「恢复上次场景」，由页面自己用 await editor.autosaved() 取回
 window.shotstage = editor;                                        // 可选：挂到全局给 agent / 控制台用
 
 editor.dispatch("entity.create", { type: "mesh", primitive: { shape: "cube", size: [1, 1, 1] } });

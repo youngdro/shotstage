@@ -20,6 +20,7 @@ use glam::{Mat4, Quat, Vec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::lru::Lru;
 use crate::mesh::{Mesh, TriMesh};
 use crate::{CoreError, Result};
 
@@ -656,29 +657,26 @@ impl Hasher {
 }
 
 thread_local! {
-    static RESTS: RefCell<HashMap<u64, Rc<HumanRest>>> = RefCell::new(HashMap::new());
-    static SLICES: RefCell<HashMap<u64, Rc<Slice>>> = RefCell::new(HashMap::new());
-    static POSED: RefCell<HashMap<u64, Rc<TriMesh>>> = RefCell::new(HashMap::new());
-    static GEOMETRY: RefCell<HashMap<u64, Rc<Geometry>>> = RefCell::new(HashMap::new());
+    static RESTS: RefCell<Lru<HumanRest>> = RefCell::new(Lru::new(256));
+    static SLICES: RefCell<Lru<Slice>> = RefCell::new(Lru::new(256));
+    static POSED: RefCell<Lru<TriMesh>> = RefCell::new(Lru::new(crate::lru::cache_budget(384)));
+    static GEOMETRY: RefCell<Lru<Geometry>> = RefCell::new(Lru::new(crate::lru::cache_budget(256)));
 }
 
+/// Look `key` up in `cache`, else make it and keep it; `size` says what it costs against the
+/// cache's budget (1 for caches budgeted by count).
 fn cached<T>(
-    cache: &'static std::thread::LocalKey<RefCell<HashMap<u64, Rc<T>>>>,
+    cache: &'static std::thread::LocalKey<RefCell<Lru<T>>>,
     key: u64,
-    limit: usize,
+    size: impl FnOnce(&T) -> usize,
     make: impl FnOnce() -> T,
 ) -> Rc<T> {
-    if let Some(v) = cache.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(v) = cache.with(|c| c.borrow_mut().get(key)) {
         return v;
     }
     let v = Rc::new(make());
-    cache.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() >= limit {
-            c.clear();
-        }
-        c.insert(key, v.clone());
-    });
+    let n = size(&v);
+    cache.with(|c| c.borrow_mut().insert(key, v.clone(), n));
     v
 }
 
@@ -686,7 +684,7 @@ fn cached<T>(
 pub fn rest(body: &HumanBody) -> Rc<HumanRest> {
     let mut h = Hasher::new();
     body.key(&mut h);
-    cached(&RESTS, h.0, 64, || build_rest(body))
+    cached(&RESTS, h.0, |_| 1, || build_rest(body))
 }
 
 fn build_rest(body: &HumanBody) -> HumanRest {
@@ -915,88 +913,93 @@ fn slice(part: HumanPart, outfit: &HumanOutfit) -> Rc<Slice> {
     let mut h = Hasher::new();
     h.word(part as u32);
     outfit.key(&mut h);
-    cached(&SLICES, h.0, 256, || {
-        let a = asset();
-        // an eye face is iris when it is near the front of its eyeball
-        let iris = |q: usize| -> bool {
-            let c = a.quads[q].iter().map(|i| a.base[1][*i as usize]).sum::<Vec3>() / 4.0;
-            let side: Vec<Vec3> = (0..a.quads.len())
-                .filter(|o| a.part[*o] == 3)
-                .flat_map(|o| a.quads[o].iter().map(|i| a.base[1][*i as usize]))
-                .filter(|p| p.x.signum() == c.x.signum())
-                .collect();
-            let centre = side.iter().sum::<Vec3>() / side.len().max(1) as f32;
-            let radius = side.iter().map(|p| (p.z - centre.z).abs()).fold(0.0, f32::max);
-            c.z > centre.z + radius * 0.86
-        };
-        // skin stays under the edges of clothes (they sit a few mm off it): hidden only well inside
-        let covered = |v: u32| {
-            let v = v as usize;
-            top_field(outfit, v).max(bottom_field(outfit, v)).max(shoe_field(outfit, v)) > 0.12
-        };
-        // (source part, field to cut by)
-        let (source, field): (u8, Option<Field>) = match part {
-            HumanPart::Skin => (0, None),
-            HumanPart::Top => (1, Some(top_field)),
-            HumanPart::Bottom => (1, Some(bottom_field)),
-            HumanPart::Shoes => (0, Some(shoe_field)),
-            HumanPart::Hair => (0, Some(hair_field)),
-            HumanPart::Apron => (u8::MAX, None),
-            HumanPart::Eyes | HumanPart::Irises => (3, None),
-            HumanPart::Teeth => (4, None),
-        };
-        let mut out = Slice { verts: vec![], faces: vec![] };
-        let mut asset_map: HashMap<u32, u32> = HashMap::new();
-        let mut cut_map: HashMap<(u32, u32), u32> = HashMap::new();
-        for q in (0..a.quads.len()).filter(|q| a.part[*q] == source) {
-            let quad = a.quads[q];
-            let keep_whole = match part {
-                HumanPart::Skin => !quad.iter().all(|v| covered(*v)),
-                HumanPart::Eyes => !iris(q),
-                HumanPart::Irises => iris(q),
-                _ => true,
+    cached(
+        &SLICES,
+        h.0,
+        |_| 1,
+        || {
+            let a = asset();
+            // an eye face is iris when it is near the front of its eyeball
+            let iris = |q: usize| -> bool {
+                let c = a.quads[q].iter().map(|i| a.base[1][*i as usize]).sum::<Vec3>() / 4.0;
+                let side: Vec<Vec3> = (0..a.quads.len())
+                    .filter(|o| a.part[*o] == 3)
+                    .flat_map(|o| a.quads[o].iter().map(|i| a.base[1][*i as usize]))
+                    .filter(|p| p.x.signum() == c.x.signum())
+                    .collect();
+                let centre = side.iter().sum::<Vec3>() / side.len().max(1) as f32;
+                let radius = side.iter().map(|p| (p.z - centre.z).abs()).fold(0.0, f32::max);
+                c.z > centre.z + radius * 0.86
             };
-            if !keep_whole {
-                continue;
-            }
-            let mut add_asset = |out: &mut Slice, v: u32| {
-                *asset_map.entry(v).or_insert_with(|| {
-                    out.verts.push(SliceVert::Asset(v));
-                    out.verts.len() as u32 - 1
-                })
+            // skin stays under the edges of clothes (they sit a few mm off it): hidden only well inside
+            let covered = |v: u32| {
+                let v = v as usize;
+                top_field(outfit, v).max(bottom_field(outfit, v)).max(shoe_field(outfit, v)) > 0.12
             };
-            let Some(f) = field else {
-                let face = quad.iter().map(|v| add_asset(&mut out, *v)).collect();
-                out.faces.push(face);
-                continue;
+            // (source part, field to cut by)
+            let (source, field): (u8, Option<Field>) = match part {
+                HumanPart::Skin => (0, None),
+                HumanPart::Top => (1, Some(top_field)),
+                HumanPart::Bottom => (1, Some(bottom_field)),
+                HumanPart::Shoes => (0, Some(shoe_field)),
+                HumanPart::Hair => (0, Some(hair_field)),
+                HumanPart::Apron => (u8::MAX, None),
+                HumanPart::Eyes | HumanPart::Irises => (3, None),
+                HumanPart::Teeth => (4, None),
             };
-            let vals = quad.map(|v| f(outfit, v as usize));
-            if vals.iter().all(|x| *x < 0.0) {
-                continue;
-            }
-            let mut poly = vec![];
-            for k in 0..4 {
-                let (va, vb, fa, fb) = (quad[k], quad[(k + 1) % 4], vals[k], vals[(k + 1) % 4]);
-                if fa >= 0.0 {
-                    poly.push(add_asset(&mut out, va));
+            let mut out = Slice { verts: vec![], faces: vec![] };
+            let mut asset_map: HashMap<u32, u32> = HashMap::new();
+            let mut cut_map: HashMap<(u32, u32), u32> = HashMap::new();
+            for q in (0..a.quads.len()).filter(|q| a.part[*q] == source) {
+                let quad = a.quads[q];
+                let keep_whole = match part {
+                    HumanPart::Skin => !quad.iter().all(|v| covered(*v)),
+                    HumanPart::Eyes => !iris(q),
+                    HumanPart::Irises => iris(q),
+                    _ => true,
+                };
+                if !keep_whole {
+                    continue;
                 }
-                if (fa >= 0.0) != (fb >= 0.0) {
-                    // the same edge point for both faces sharing the edge
-                    let (lo, hi, flo, fhi) = if va < vb { (va, vb, fa, fb) } else { (vb, va, fb, fa) };
-                    let t = (flo / (flo - fhi)).clamp(0.0, 1.0);
-                    let i = *cut_map.entry((lo, hi)).or_insert_with(|| {
-                        out.verts.push(SliceVert::Cut(lo, hi, t));
+                let mut add_asset = |out: &mut Slice, v: u32| {
+                    *asset_map.entry(v).or_insert_with(|| {
+                        out.verts.push(SliceVert::Asset(v));
                         out.verts.len() as u32 - 1
-                    });
-                    poly.push(i);
+                    })
+                };
+                let Some(f) = field else {
+                    let face = quad.iter().map(|v| add_asset(&mut out, *v)).collect();
+                    out.faces.push(face);
+                    continue;
+                };
+                let vals = quad.map(|v| f(outfit, v as usize));
+                if vals.iter().all(|x| *x < 0.0) {
+                    continue;
+                }
+                let mut poly = vec![];
+                for k in 0..4 {
+                    let (va, vb, fa, fb) = (quad[k], quad[(k + 1) % 4], vals[k], vals[(k + 1) % 4]);
+                    if fa >= 0.0 {
+                        poly.push(add_asset(&mut out, va));
+                    }
+                    if (fa >= 0.0) != (fb >= 0.0) {
+                        // the same edge point for both faces sharing the edge
+                        let (lo, hi, flo, fhi) = if va < vb { (va, vb, fa, fb) } else { (vb, va, fb, fa) };
+                        let t = (flo / (flo - fhi)).clamp(0.0, 1.0);
+                        let i = *cut_map.entry((lo, hi)).or_insert_with(|| {
+                            out.verts.push(SliceVert::Cut(lo, hi, t));
+                            out.verts.len() as u32 - 1
+                        });
+                        poly.push(i);
+                    }
+                }
+                if poly.len() >= 3 {
+                    out.faces.push(poly);
                 }
             }
-            if poly.len() >= 3 {
-                out.faces.push(poly);
-            }
-        }
-        out
-    })
+            out
+        },
+    )
 }
 
 /// Skinning matrices for `rest` with joints at world matrices `joint_world` (None = in rest),
@@ -1065,6 +1068,14 @@ struct Geometry {
 }
 
 impl Geometry {
+    /// Memory it takes, roughly (for the cache budget).
+    fn bytes(&self) -> usize {
+        self.rest.len() * 12
+            + self.skin.len() * std::mem::size_of::<Influence>()
+            + self.faces.iter().map(|f| 24 + f.len() * 4).sum::<usize>()
+            + 64
+    }
+
     fn push(&mut self, p: Vec3, v: u32) -> u32 {
         self.rest.push(p);
         self.skin.push(influence(v));
@@ -1095,7 +1106,7 @@ fn geometry(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit) -> Rc<Geome
     body.key(&mut h);
     outfit.key(&mut h);
     h.word(part as u32 + 1000);
-    cached(&GEOMETRY, h.0, 128, || {
+    cached(&GEOMETRY, h.0, Geometry::bytes, || {
         let r = rest(body);
         if part == HumanPart::Hair {
             return hair(&r, outfit);
@@ -1490,7 +1501,7 @@ pub fn part_tris(body: &HumanBody, part: HumanPart, outfit: &HumanOutfit, mats: 
             h.word(v.to_bits());
         }
     }
-    cached(&POSED, h.0, 128, || {
+    cached(&POSED, h.0, crate::meshcache::tri_bytes, || {
         let g = geometry(body, part, outfit);
         let pos = skinned_positions(&g, &rest(body), mats);
         let mut normals = vec![Vec3::ZERO; pos.len()];

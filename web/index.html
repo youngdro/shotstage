@@ -109,7 +109,8 @@
         id: "agent", label: "🤖 Claude", labelZh: "🤖 连接 Claude",
         tooltip: "Let Claude build and edit this scene for you (no install)", tooltipZh: "让 Claude 直接在这个页面里搭场景（无需安装）",
       });
-      editor = await mount("#stage", { toolbar });
+      // this page restores the autosave itself (below), so the editor need not offer it
+      editor = await mount("#stage", { toolbar, restorePrompt: false });
       overlay.remove();
     } catch (e) {
       console.error(e);
@@ -149,18 +150,9 @@
       ]);
     }
 
-    // ---- Autosave: the scene survives a reload (kept in this browser only). ----
-    const AUTOSAVE = "shotstage.autosave", PREVIOUS = "shotstage.autosave.previous";
-    let saveTimer = 0, warnedFull = false;
-    function autosave() {
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => {
-        if (!store.set(AUTOSAVE, JSON.stringify(editor.scene())) && !warnedFull) {
-          warnedFull = true;
-          toast(t("场景太大，浏览器存不下自动保存；请用 文件 → 保存 存成 .json。", "The scene is too big for the browser's autosave; use File → Save to keep a .json."));
-        }
-      }, 800);
-    }
+    // ---- Autosave: the editor keeps the scene in this browser (IndexedDB) a moment after each
+    // change and when the tab is hidden, so it survives a reload or a closed tab. ----
+    let previous = null;   // your own scene, while a shared link's scene is open in its place
 
     /** Open the scene carried by the URL, if any; true when one was opened. */
     async function openSharedLink() {
@@ -174,7 +166,7 @@
         return false;
       }
       if (!shared) return false;
-      const mine = editor.revision() > 0 ? JSON.stringify(editor.scene()) : store.get(AUTOSAVE);
+      const mine = editor.revision() > 0 ? editor.scene() : await editor.autosaved();
       try {
         editor.load(shared);
       } catch (e) {
@@ -185,10 +177,11 @@
       }
       clearSceneFromLocation();
       if (mine) {
-        // Opening someone's link must not cost you your own work: keep it one step back.
-        store.set(PREVIOUS, mine);
+        // Opening someone's link must not cost you your own work: keep it one step back
+        // (Undo also brings it back).
+        previous = mine;
         toast(t("已打开分享的场景。", "Opened the shared scene."), t("换回我之前的场景", "Back to my previous scene"), () => {
-          editor.load(JSON.parse(store.get(PREVIOUS)));
+          if (previous) editor.load(previous);
         }, 10000);
       }
       return true;
@@ -212,16 +205,14 @@
       const opened = await openSharedLink();
       if (!opened) {
         let restored = false;
-        const saved = store.get(AUTOSAVE);
+        const saved = await editor.autosaved();
         if (saved) {
-          try { editor.load(JSON.parse(saved)); restored = true; } catch (e) { console.warn("autosave unreadable", e); }
+          try { editor.load(saved); restored = true; } catch (e) { console.warn("autosave unreadable", e); }
         }
         if (!restored) loadExample();
       }
       // A share link pasted into this tab's address bar only changes the fragment.
       addEventListener("hashchange", () => { openSharedLink(); });
-      editor.on(ev => { if (ev.type === "change") autosave(); });
-      autosave();
     }
 
     // ---- Share. ----

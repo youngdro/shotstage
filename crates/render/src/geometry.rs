@@ -5,7 +5,11 @@ use glam::{Mat4, Vec3};
 use shotstage_core::eval::{camera_data_at, posed_tris, world_at};
 use shotstage_core::human::HumanPart;
 use shotstage_core::spatial::{self, RayOptions, is_hidden};
-use shotstage_core::{EntityKind, MeshSource, Scene};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use shotstage_core::lru::{Lru, cache_budget};
+use shotstage_core::{EntityKind, MeshSource, Scene, TriMesh};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -26,7 +30,7 @@ pub struct LineVertex {
 }
 
 /// What to draw besides the meshes.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Overlay {
     pub selected: Option<String>,
     pub grid: bool,
@@ -120,11 +124,100 @@ impl Geometry {
     }
 }
 
+/// A mesh's triangles placed in the world, as the GPU takes them.
+enum Placed {
+    Plain(Vec<Vertex>),
+    Tex(Vec<TexVertex>),
+}
+
+impl Placed {
+    fn bytes(&self) -> usize {
+        let n = match self {
+            Placed::Plain(v) => std::mem::size_of_val(v.as_slice()),
+            Placed::Tex(v) => std::mem::size_of_val(v.as_slice()),
+        };
+        n + 64
+    }
+}
+
+/// What a placed mesh was made from: the very same triangles (held, so the address stays
+/// theirs), where and how they are drawn.
+struct PlacedKey {
+    tri: Rc<TriMesh>,
+    world: [f32; 16],
+    color: [f32; 3],
+    id: u32,
+    material: Option<shotstage_core::uv::Material>,
+}
+
+impl PlacedKey {
+    fn same(&self, other: &PlacedKey) -> bool {
+        Rc::ptr_eq(&self.tri, &other.tri)
+            && self.world == other.world
+            && self.color == other.color
+            && self.id == other.id
+            && self.material == other.material
+    }
+    fn hash(&self) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut word = |w: u64| {
+            h ^= w;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        };
+        word(Rc::as_ptr(&self.tri) as usize as u64);
+        for f in self.world.iter().chain(&self.color) {
+            word(f.to_bits() as u64);
+        }
+        word(self.id as u64);
+        h
+    }
+}
+
+thread_local! {
+    /// Placed meshes from the frames drawn before. Most of a big scene stands still while the
+    /// view turns, the playhead moves or one thing is dragged, so its vertices are copied from
+    /// here instead of transformed again every frame.
+    static PLACED: RefCell<Lru<(PlacedKey, Placed)>> = RefCell::new(Lru::new(cache_budget(256)));
+}
+
+fn world_vertices(
+    tri: &Rc<TriMesh>,
+    world: Mat4,
+    color: [f32; 3],
+    id: u32,
+    material: Option<&shotstage_core::uv::Material>,
+    place: impl FnOnce(&TriMesh, Mat4, Mat4) -> Placed,
+) -> Rc<(PlacedKey, Placed)> {
+    let key = PlacedKey { tri: tri.clone(), world: world.to_cols_array(), color, id, material: material.cloned() };
+    let h = key.hash();
+    if let Some(hit) = PLACED.with(|c| c.borrow_mut().get(h))
+        && hit.0.same(&key)
+    {
+        return hit;
+    }
+    let placed = place(tri, world, world.inverse().transpose());
+    let size = placed.bytes();
+    let entry = Rc::new((key, placed));
+    PLACED.with(|c| c.borrow_mut().insert(h, entry.clone(), size));
+    entry
+}
+
 const SELECT: [f32; 3] = [1.0, 0.62, 0.18];
 const CAMERA: [f32; 3] = [0.35, 0.6, 1.0];
 
 pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
     let mut g = Geometry::default();
+    build_into(&mut g, scene, frame, overlay);
+    g
+}
+
+/// [`build`] into `g`, reusing its memory: a big scene's vertex lists are tens of megabytes,
+/// and allocating them afresh every frame costs more than filling them.
+pub fn build_into(g: &mut Geometry, scene: &Scene, frame: f32, overlay: &Overlay) {
+    g.triangles.clear();
+    g.lines.clear();
+    g.images.clear();
+    g.textured.clear();
     if overlay.grid {
         grid(&mut g.lines);
     }
@@ -164,7 +257,6 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                     MeshSource::Human { part: HumanPart::Eyes | HumanPart::Irises, .. } => 3,
                     _ => 0,
                 };
-                let normal_m = world.inverse().transpose();
                 let c = if selected {
                     mix(*color, SELECT, 0.45)
                 } else if hovered {
@@ -172,39 +264,55 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
                 } else {
                     *color
                 };
+                let id = (index as u32 + 1) | look << 28;
                 if let Some((mat, key)) = textured {
-                    let uvs = shotstage_core::uv::tri_uvs(&tri, mat);
-                    let vertices = tri
-                        .indices
-                        .iter()
-                        .zip(uvs)
-                        .map(|(&i, uv)| {
-                            let i = i as usize;
-                            TexVertex {
-                                pos: world.transform_point3(Vec3::from_array(tri.positions[i])).to_array(),
-                                normal: normal_m
-                                    .transform_vector3(Vec3::from_array(tri.normals[i]))
-                                    .normalize_or_zero()
-                                    .to_array(),
-                                uv,
-                                color: c,
-                            }
-                        })
-                        .collect();
-                    g.textured.push(TexBatch { asset: key.clone(), id: index as u32 + 1, vertices });
+                    let vertices = world_vertices(&tri, world, c, id, Some(mat), |tri, world, normal_m| {
+                        let uvs = shotstage_core::uv::tri_uvs(tri, mat);
+                        Placed::Tex(
+                            tri.indices
+                                .iter()
+                                .zip(uvs)
+                                .map(|(&i, uv)| {
+                                    let i = i as usize;
+                                    TexVertex {
+                                        pos: world.transform_point3(Vec3::from_array(tri.positions[i])).to_array(),
+                                        normal: normal_m
+                                            .transform_vector3(Vec3::from_array(tri.normals[i]))
+                                            .normalize_or_zero()
+                                            .to_array(),
+                                        uv,
+                                        color: c,
+                                    }
+                                })
+                                .collect(),
+                        )
+                    });
+                    if let Placed::Tex(v) = &vertices.1 {
+                        g.textured.push(TexBatch { asset: key.clone(), id: index as u32 + 1, vertices: v.clone() });
+                    }
                     continue;
                 }
-                for &i in &tri.indices {
-                    let i = i as usize;
-                    g.triangles.push(Vertex {
-                        pos: world.transform_point3(Vec3::from_array(tri.positions[i])).to_array(),
-                        normal: normal_m
-                            .transform_vector3(Vec3::from_array(tri.normals[i]))
-                            .normalize_or_zero()
-                            .to_array(),
-                        color: c,
-                        id: (index as u32 + 1) | look << 28,
-                    });
+                let vertices = world_vertices(&tri, world, c, id, None, |tri, world, normal_m| {
+                    Placed::Plain(
+                        tri.indices
+                            .iter()
+                            .map(|&i| {
+                                let i = i as usize;
+                                Vertex {
+                                    pos: world.transform_point3(Vec3::from_array(tri.positions[i])).to_array(),
+                                    normal: normal_m
+                                        .transform_vector3(Vec3::from_array(tri.normals[i]))
+                                        .normalize_or_zero()
+                                        .to_array(),
+                                    color: c,
+                                    id,
+                                }
+                            })
+                            .collect(),
+                    )
+                });
+                if let Placed::Plain(v) = &vertices.1 {
+                    g.triangles.extend_from_slice(v);
                 }
             }
             EntityKind::Image(img) => {
@@ -278,7 +386,6 @@ pub fn build(scene: &Scene, frame: f32, overlay: &Overlay) -> Geometry {
         line(&mut g.lines, mid - Vec3::X * s, mid + Vec3::X * s, SELECT);
         line(&mut g.lines, mid - Vec3::Z * s, mid + Vec3::Z * s, SELECT);
     }
-    g
 }
 
 /// Wire icon of a light: a small star at the light, plus its beam (sun arrow, spot cone, area

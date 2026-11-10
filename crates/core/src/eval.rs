@@ -32,26 +32,67 @@ pub struct EvaluatedScene {
 
 /// Animated local transform of `id` at `frame`.
 pub fn local_at(scene: &Scene, id: &str, frame: f32) -> Result<Transform> {
-    let e = scene.get(id)?;
-    Ok(match scene.timeline.track(id, TrackProperty::Transform).and_then(|t| t.sample(frame)) {
+    Ok(local_of(scene, scene.get(id)?, frame))
+}
+
+fn local_of(scene: &Scene, e: &crate::scene::Entity, frame: f32) -> Transform {
+    match scene.timeline.track(&e.id, TrackProperty::Transform).and_then(|t| t.sample(frame)) {
         Some(KeyValue::Transform(t)) => t,
         _ => e.transform,
-    })
+    }
 }
 
 pub fn world_at(scene: &Scene, id: &str, frame: f32) -> Result<Mat4> {
     let mut m = Mat4::IDENTITY;
-    let mut cur = Some(id.to_string());
+    let mut cur = Some(scene.get(id)?);
     let mut guard = 0;
-    while let Some(c) = cur {
-        m = local_at(scene, &c, frame)?.matrix() * m;
-        cur = scene.get(&c)?.parent.clone();
+    while let Some(e) = cur {
+        m = local_of(scene, e, frame).matrix() * m;
+        cur = match &e.parent {
+            Some(p) => Some(scene.get(p)?),
+            None => None,
+        };
         guard += 1;
         if guard > 10_000 {
             return Err(CoreError::Invalid("hierarchy too deep or cyclic".into()));
         }
     }
     Ok(m)
+}
+
+/// [`world_at`], remembering every matrix it works out on the way up in `memo`.
+fn world_memo<'a>(
+    scene: &'a Scene,
+    id: &str,
+    frame: f32,
+    memo: &mut std::collections::HashMap<&'a str, Mat4>,
+) -> Result<Mat4> {
+    if let Some(m) = memo.get(id) {
+        return Ok(*m);
+    }
+    // walk up until a remembered ancestor (or the root), then come back down
+    let mut chain: Vec<&'a crate::scene::Entity> = Vec::new();
+    let mut base = Mat4::IDENTITY;
+    let mut cur = Some(scene.get(id)?);
+    while let Some(e) = cur {
+        if let Some(m) = memo.get(e.id.as_str()) {
+            base = *m;
+            break;
+        }
+        chain.push(e);
+        if chain.len() > 10_000 {
+            return Err(CoreError::Invalid("hierarchy too deep or cyclic".into()));
+        }
+        cur = match &e.parent {
+            Some(p) => Some(scene.get(p)?),
+            None => None,
+        };
+    }
+    for e in chain.into_iter().rev() {
+        base *= local_of(scene, e, frame).matrix();
+        memo.insert(e.id.as_str(), base);
+    }
+    Ok(base)
 }
 
 /// Camera lens at `frame` (focal length may be animated).
@@ -268,7 +309,7 @@ pub fn posed_mesh(scene: &Scene, id: &str, frame: f32) -> Result<crate::Mesh> {
             }
         })
         .collect();
-    let mut posed = mesh.clone();
+    let mut posed = mesh.to_inner();
     for (i, p) in posed.positions.iter_mut().enumerate() {
         let (js, ws) = (skin.vertex_joints[i], skin.vertex_weights[i]);
         let total: f32 = ws.iter().sum();
@@ -321,12 +362,15 @@ fn human_matrices(
     let to_local = world_at(scene, id, frame)?.inverse();
     // joints missing from the scene stay where the person's root puts them at rest
     let root = world_at(scene, id, frame)?;
+    // joints are a chain: remember each one's world matrix so its children start from it
+    // instead of walking up to the root again
+    let mut memo: std::collections::HashMap<&str, Mat4> = std::collections::HashMap::with_capacity(joints.len());
     let worlds: Vec<Option<Mat4>> = joints
         .iter()
         .enumerate()
         .map(|(i, j)| {
             Some(
-                world_at(scene, j, frame)
+                world_memo(scene, j, frame, &mut memo)
                     .unwrap_or_else(|_| root * Mat4::from_translation(rest.joints.get(i).copied().unwrap_or_default())),
             )
         })
