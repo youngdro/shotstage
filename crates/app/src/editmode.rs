@@ -322,7 +322,7 @@ impl EditorApp {
             let mesh = match &scene.get(id).map(|e| &e.kind) {
                 Ok(EntityKind::Mesh { source, .. }) => match source {
                     MeshSource::Primitive { primitive } => primitive.build().ok(),
-                    MeshSource::Data { mesh } => Some(mesh.clone()),
+                    MeshSource::Data { mesh } => Some(mesh.to_inner()),
                     MeshSource::Skinned { .. } | MeshSource::Human { .. } => None,
                 },
                 _ => None,

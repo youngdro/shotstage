@@ -9,7 +9,6 @@ pub mod geometry;
 use glam::Mat4;
 use shotstage_core::Scene;
 pub use shotstage_core::depthfit::DepthMap;
-use wgpu::util::DeviceExt as _;
 
 use geometry::{ImageVertex, LineVertex, TexVertex, Vertex};
 pub use geometry::{Overlay, pick};
@@ -529,6 +528,7 @@ struct Target {
 pub struct Renderer {
     mesh_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    shadow_tex_pipeline: wgpu::RenderPipeline,
     /// One small uniform (the light's matrix) per shadow slot.
     shadow_slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     shadow_view: wgpu::TextureView,
@@ -550,6 +550,61 @@ pub struct Renderer {
     pub target_generation: u64,
     /// The depth map the last render used (the fitted one when it was automatic).
     pub last_depth: DepthMap,
+    /// Identifies the scene the next `render` is given: set it (to something that changes
+    /// whenever the scene does, like the document revision) and a frame that shows the same
+    /// scene, frame and overlay again (the view turning, a repaint for the UI) reuses the
+    /// built geometry and its GPU buffers instead of rebuilding them. `None` always rebuilds.
+    pub scene_key: Option<u64>,
+    /// The geometry of the last build (its memory is reused by the next one).
+    geo: geometry::Geometry,
+    /// What `geo` and the buffers were built from.
+    built: Option<(u64, u32, Overlay)>,
+    buffers: FrameBuffers,
+}
+
+/// Vertex buffers kept from frame to frame and grown when a bigger scene needs it.
+#[derive(Default)]
+struct FrameBuffers {
+    triangles: GpuVertices,
+    lines: GpuVertices,
+    textured: GpuVertices,
+    images: GpuVertices,
+}
+
+#[derive(Default)]
+struct GpuVertices {
+    buffer: Option<wgpu::Buffer>,
+    /// Vertices in it now.
+    count: u32,
+}
+
+impl GpuVertices {
+    fn upload<T: bytemuck::Pod>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &[T]) {
+        self.count = data.len() as u32;
+        if data.is_empty() {
+            return;
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        let fits = self.buffer.as_ref().is_some_and(|b| b.size() >= bytes.len() as u64);
+        if !fits {
+            // room to grow, so a scene that gains a few things does not reallocate every time
+            let size = (bytes.len() as u64 + bytes.len() as u64 / 4).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+            self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if let Some(b) = &self.buffer {
+            queue.write_buffer(b, 0, bytes);
+        }
+    }
+
+    /// The buffer when it holds anything.
+    fn get(&self) -> Option<&wgpu::Buffer> {
+        self.buffer.as_ref().filter(|_| self.count > 0)
+    }
 }
 
 impl Renderer {
@@ -653,32 +708,37 @@ impl Renderer {
             bind_group_layouts: &[Some(&shadow_bgl)],
             immediate_size: 0,
         });
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vs_shadow"),
-            layout: Some(&shadow_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_module,
-                entry_point: Some("vs_shadow"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                })],
-            },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
-            }),
-            multisample: Default::default(),
-            fragment: None,
-            multiview_mask: None,
-            cache: None,
-        });
+        // shadow casters are drawn straight from the plain and the textured vertex buffers
+        let shadow_for = |stride: usize| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vs_shadow"),
+                layout: Some(&shadow_layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_module,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: stride as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    })],
+                },
+                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+                }),
+                multisample: Default::default(),
+                fragment: None,
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let shadow_pipeline = shadow_for(std::mem::size_of::<Vertex>());
+        let shadow_tex_pipeline = shadow_for(std::mem::size_of::<TexVertex>());
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shotstage"),
             bind_group_layouts: &[Some(&bgl)],
@@ -888,6 +948,7 @@ impl Renderer {
         Self {
             mesh_pipeline,
             shadow_pipeline,
+            shadow_tex_pipeline,
             shadow_slots,
             shadow_view,
             bg_pipeline,
@@ -904,6 +965,10 @@ impl Renderer {
             target: None,
             target_generation: 0,
             last_depth: DepthMap::default(),
+            scene_key: None,
+            geo: Default::default(),
+            built: None,
+            buffers: Default::default(),
         }
     }
 
@@ -1089,12 +1154,37 @@ impl Renderer {
         let mut overlay = overlay.clone();
         overlay.eye = Some(view.view.inverse().w_axis.truncate().to_array());
         let overlay = &overlay;
-        let geo = geometry::build(scene, frame, overlay);
-        let used: Vec<&str> =
-            geo.images.iter().map(|q| q.asset.as_str()).chain(geo.textured.iter().map(|b| b.asset.as_str())).collect();
+        // the same scene, frame and overlay as last time: keep the geometry and buffers (the
+        // viewer's position only matters to pictures that turn towards it)
+        let billboards =
+            scene.entities.iter().any(|e| matches!(&e.kind, shotstage_core::EntityKind::Image(i) if i.billboard));
+        let key = self.scene_key.map(|k| {
+            let mut o = overlay.clone();
+            if !billboards {
+                o.eye = None;
+            }
+            (k, frame.to_bits(), o)
+        });
+        let fresh = key.is_some() && key == self.built;
+        if !fresh {
+            geometry::build_into(&mut self.geo, scene, frame, overlay);
+            let g = &self.geo;
+            let b = &mut self.buffers;
+            b.triangles.upload(device, queue, "shotstage triangles", &g.triangles);
+            b.lines.upload(device, queue, "shotstage lines", &g.lines);
+            let tex: Vec<TexVertex> = g.textured.iter().flat_map(|b| b.vertices.iter().copied()).collect();
+            b.textured.upload(device, queue, "shotstage textured", &tex);
+            let img: Vec<ImageVertex> = g.images.iter().flat_map(|q| q.vertices).collect();
+            b.images.upload(device, queue, "shotstage images", &img);
+            self.built = key;
+        }
+        let used: Vec<String> = (self.geo.images.iter().map(|q| q.asset.clone()))
+            .chain(self.geo.textured.iter().map(|b| b.asset.clone()))
+            .collect();
+        let used: Vec<&str> = used.iter().map(String::as_str).collect();
         self.sync_textures(device, queue, scene, &used);
         let depth = match (pass, view.depth) {
-            (Pass::Depth, None) => depth_fit(scene, &geo, view.view, view.proj),
+            (Pass::Depth, None) => depth_fit(scene, &self.geo, view.view, view.proj),
             (_, Some(d)) => d,
             _ => DepthMap::default(),
         };
@@ -1143,7 +1233,7 @@ impl Renderer {
             None => None,
         };
         let plan = if pass == Pass::Clay && !overlay.no_shadows && settings.enabled {
-            shadow_plan(&geo, &mut u.lights[..count], &casts[..count], ambient_dir)
+            shadow_plan(&self.geo, &mut u.lights[..count], &casts[..count], ambient_dir)
         } else {
             for l in &mut u.lights {
                 l.shadow[0] = -1.0;
@@ -1169,46 +1259,13 @@ impl Renderer {
             u.light_params[3] = amount;
         }
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
-        let tri_buf = (!geo.triangles.is_empty()).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("shotstage triangles"),
-                contents: bytemuck::cast_slice(&geo.triangles),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        });
-        let line_buf = (!geo.lines.is_empty() && pass == Pass::Clay).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("shotstage lines"),
-                contents: bytemuck::cast_slice(&geo.lines),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        });
-        let tex_verts: Vec<TexVertex> = geo.textured.iter().flat_map(|b| b.vertices.iter().copied()).collect();
-        let tex_buf = (!tex_verts.is_empty()).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("shotstage textured"),
-                contents: bytemuck::cast_slice(&tex_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        });
-        // shadows come from every solid triangle, textured or not
-        let shadow_tris: Vec<Vertex> =
-            geo.solid_positions().map(|pos| Vertex { pos, normal: [0.0; 3], color: [0.0; 3], id: 0 }).collect();
-        let shadow_buf = (!shadow_tris.is_empty()).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("shotstage shadow casters"),
-                contents: bytemuck::cast_slice(&shadow_tris),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        });
-        let img_verts: Vec<ImageVertex> = geo.images.iter().flat_map(|q| q.vertices).collect();
-        let img_buf = (!img_verts.is_empty()).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("shotstage images"),
-                contents: bytemuck::cast_slice(&img_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        });
+        let bufs = &self.buffers;
+        let (tri_buf, line_buf, tex_buf, img_buf) = (
+            bufs.triangles.get(),
+            bufs.lines.get().filter(|_| pass == Pass::Clay),
+            bufs.textured.get(),
+            bufs.images.get(),
+        );
         let clear = match pass {
             Pass::Clay => wgpu::Color { r: 0.16, g: 0.165, b: 0.18, a: 1.0 },
             Pass::Depth => wgpu::Color::BLACK,
@@ -1216,7 +1273,7 @@ impl Renderer {
         };
         let Some(target) = &self.target else { return };
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("shotstage") });
-        if let (false, Some(b)) = (plan.slots.is_empty(), &shadow_buf) {
+        if !plan.slots.is_empty() && (tri_buf.is_some() || tex_buf.is_some()) {
             let mut sp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shotstage shadow"),
                 color_attachments: &[],
@@ -1229,13 +1286,20 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            sp.set_pipeline(&self.shadow_pipeline);
-            sp.set_vertex_buffer(0, b.slice(..));
             let side = SHADOW_SIZE as f32 / tiles as f32;
             for i in 0..plan.slots.len() {
                 sp.set_viewport((i % tiles) as f32 * side, (i / tiles) as f32 * side, side, side, 0.0, 1.0);
                 sp.set_bind_group(0, &self.shadow_slots[i].1, &[]);
-                sp.draw(0..shadow_tris.len() as u32, 0..1);
+                for (buf, n, pipeline) in [
+                    (tri_buf, bufs.triangles.count, &self.shadow_pipeline),
+                    (tex_buf, bufs.textured.count, &self.shadow_tex_pipeline),
+                ] {
+                    if let Some(b) = buf {
+                        sp.set_pipeline(pipeline);
+                        sp.set_vertex_buffer(0, b.slice(..));
+                        sp.draw(0..n, 0..1);
+                    }
+                }
             }
         }
         {
@@ -1264,16 +1328,16 @@ impl Renderer {
                 rp.set_bind_group(1, &env.background, &[]);
                 rp.draw(0..3, 0..1);
             }
-            if let Some(b) = &tri_buf {
+            if let Some(b) = tri_buf {
                 rp.set_pipeline(&self.mesh_pipeline);
                 rp.set_vertex_buffer(0, b.slice(..));
-                rp.draw(0..geo.triangles.len() as u32, 0..1);
+                rp.draw(0..bufs.triangles.count, 0..1);
             }
-            if let Some(b) = &tex_buf {
+            if let Some(b) = tex_buf {
                 rp.set_pipeline(&self.tex_pipeline);
                 rp.set_vertex_buffer(0, b.slice(..));
                 let mut start = 0u32;
-                for batch in &geo.textured {
+                for batch in &self.geo.textured {
                     let n = batch.vertices.len() as u32;
                     if let Some((_, _, bg)) = self.textures.get(&batch.asset) {
                         rp.set_bind_group(1, bg, &[]);
@@ -1282,20 +1346,20 @@ impl Renderer {
                     start += n;
                 }
             }
-            if let Some(b) = &img_buf {
+            if let Some(b) = img_buf {
                 rp.set_pipeline(&self.image_pipeline);
                 rp.set_vertex_buffer(0, b.slice(..));
-                for (i, q) in geo.images.iter().enumerate() {
+                for (i, q) in self.geo.images.iter().enumerate() {
                     if let Some((_, bg, _)) = self.textures.get(&q.asset) {
                         rp.set_bind_group(1, bg, &[]);
                         rp.draw(i as u32 * 6..i as u32 * 6 + 6, 0..1);
                     }
                 }
             }
-            if let Some(b) = &line_buf {
+            if let Some(b) = line_buf {
                 rp.set_pipeline(&self.line_pipeline);
                 rp.set_vertex_buffer(0, b.slice(..));
-                rp.draw(0..geo.lines.len() as u32, 0..1);
+                rp.draw(0..bufs.lines.count, 0..1);
             }
         }
         queue.submit([enc.finish()]);

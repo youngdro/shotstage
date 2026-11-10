@@ -51,12 +51,12 @@ impl Aabb {
 
 /// Is `id` hidden itself or through one of its ancestors?
 pub fn is_hidden(scene: &Scene, id: &str) -> bool {
-    let mut cur = Some(id.to_string());
+    let mut cur = Some(id);
     let mut guard = 0;
     while let Some(c) = cur {
-        match scene.get(&c) {
+        match scene.get(c) {
             Ok(e) if !e.visible => return true,
-            Ok(e) => cur = e.parent.clone(),
+            Ok(e) => cur = e.parent.as_deref(),
             Err(_) => return true,
         }
         guard += 1;

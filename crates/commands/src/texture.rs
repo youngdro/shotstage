@@ -147,7 +147,7 @@ struct UnwrapParams {
 fn store_uvs(s: &mut Scene, id: &str, mesh: shotstage_core::Mesh) -> CmdResult<()> {
     mesh.validate()?;
     let (_, material, source) = mesh_parts(s, id)?;
-    *source = MeshSource::Data { mesh };
+    *source = MeshSource::Data { mesh: mesh.into() };
     // the UV map is what the texture follows from now on
     material.get_or_insert_with(Material::default).mapping = Mapping::Uv;
     Ok(())

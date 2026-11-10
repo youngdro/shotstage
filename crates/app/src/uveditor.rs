@@ -213,7 +213,7 @@ impl EditorApp {
         };
         let mesh = match source {
             shotstage_core::MeshSource::Primitive { primitive } => primitive.build().ok(),
-            shotstage_core::MeshSource::Data { mesh } => Some(mesh.clone()),
+            shotstage_core::MeshSource::Data { mesh } => Some(mesh.to_inner()),
             _ => None,
         };
         let Some(mesh) = mesh else {

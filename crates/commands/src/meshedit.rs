@@ -35,7 +35,7 @@ pub fn edit_mesh(scene: &Scene, id: &str) -> CmdResult<Mesh> {
     match &scene.get(id)?.kind {
         EntityKind::Mesh { source, .. } => match source {
             MeshSource::Primitive { primitive } => Ok(primitive.build()?),
-            MeshSource::Data { mesh } => Ok(mesh.clone()),
+            MeshSource::Data { mesh } => Ok(mesh.to_inner()),
             MeshSource::Skinned { .. } | MeshSource::Human { .. } => Err(CommandError::new(
                 "failed",
                 format!("`{id}` is a rigged (skinned) mesh: pose it instead, or apply its pose first"),
@@ -55,7 +55,7 @@ fn store(scene: &mut Scene, id: &str, mesh: Mesh) -> CmdResult<()> {
     }
     match &mut scene.get_mut(id)?.kind {
         EntityKind::Mesh { source, .. } => {
-            *source = MeshSource::Data { mesh };
+            *source = MeshSource::Data { mesh: mesh.into() };
             Ok(())
         }
         _ => Err(CommandError::new("failed", format!("entity `{id}` is not a mesh"))),

@@ -5352,6 +5352,10 @@ impl EditorApp {
         if px.0 < 2 || px.1 < 2 {
             return;
         }
+        // the scene copy for this revision: a redraw that only turns the view (or repaints the
+        // panels) reuses the built geometry
+        let rev = self.hub.borrow().session.revision();
+        renderer.scene_key = Some(rev ^ (std::rc::Rc::as_ptr(&scene) as usize as u64).rotate_left(32));
         renderer.render(&rs.device, &rs.queue, &scene, f, view, pass, &overlay, px);
         self.depth_seen = renderer.last_depth;
         let generation = renderer.target_generation;

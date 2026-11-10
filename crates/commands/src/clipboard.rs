@@ -50,8 +50,14 @@ pub(crate) fn remap_refs(e: &mut Entity, ids: &HashMap<String, String>, assets: 
         e.parent = ids.get(p).cloned().or(Some(p.clone()));
     }
     match &mut e.kind {
-        EntityKind::Mesh { source: MeshSource::Skinned { skin: shotstage_core::Skin { joints, .. }, .. }, .. }
-        | EntityKind::Mesh { source: MeshSource::Human { joints, .. }, .. } => {
+        EntityKind::Mesh { source: MeshSource::Skinned { skin, .. }, .. } => {
+            for j in &mut skin.joints {
+                if let Some(n) = ids.get(j) {
+                    *j = n.clone();
+                }
+            }
+        }
+        EntityKind::Mesh { source: MeshSource::Human { joints, .. }, .. } => {
             for j in joints {
                 if let Some(n) = ids.get(j) {
                     *j = n.clone();
@@ -273,13 +279,14 @@ mod tests {
         e.parent = Some("rig".into());
         e.kind = EntityKind::Mesh {
             source: MeshSource::Skinned {
-                mesh: shotstage_core::Primitive::Cube { size: [1.0; 3] }.build().unwrap(),
+                mesh: shotstage_core::Primitive::Cube { size: [1.0; 3] }.build().unwrap().into(),
                 skin: shotstage_core::Skin {
                     joints: vec!["rig_bone".into()],
                     inverse_bind: vec![glam::Mat4::IDENTITY.to_cols_array()],
                     vertex_joints: vec![[0; 4]; 24],
                     vertex_weights: vec![[1.0, 0.0, 0.0, 0.0]; 24],
-                },
+                }
+                .into(),
             },
             modifiers: vec![],
             color: [0.5; 3],

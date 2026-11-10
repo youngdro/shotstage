@@ -657,9 +657,9 @@ fn import(scene: &mut Scene, p: ImportParams) -> CmdResult<Value> {
                         };
                         skin.validate(mesh.positions.len())?;
                         skins += 1;
-                        MeshSource::Skinned { mesh, skin }
+                        MeshSource::Skinned { mesh: mesh.into(), skin: skin.into() }
                     }
-                    _ => MeshSource::Data { mesh },
+                    _ => MeshSource::Data { mesh: mesh.into() },
                 };
                 EntityKind::Mesh { source, modifiers: vec![], color, material }
             }

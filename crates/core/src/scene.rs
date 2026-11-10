@@ -177,15 +177,96 @@ pub fn validate_id(id: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(CoreError::Invalid(format!("bad id `{id}`: use 1-64 of [A-Za-z0-9_-]"))) }
 }
 
+/// Finding an entity by id is a scan of the entity list; drawing a frame looks up every
+/// entity, its parents and a person's joints, which made big scenes quadratic. So a scene that
+/// is looked up again and again without changing gets a hash index, kept per thread for the
+/// last few entity lists. Every hit is checked against the list itself, and anything the index
+/// does not know falls back to the scan, so a stale index can never give a wrong answer.
+mod id_index {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use super::Entity;
+
+    /// Below this many entities the scan is as fast as hashing.
+    const MIN_LEN: usize = 48;
+    /// Scans of the same list before it is indexed (a list that keeps growing, like a template
+    /// being built, is not worth indexing on every step).
+    const SCANS_BEFORE_INDEX: u32 = 16;
+    const SLOTS: usize = 4;
+
+    struct Index {
+        key: (usize, usize),
+        map: HashMap<u64, u32>,
+    }
+
+    #[derive(Default)]
+    struct State {
+        indexes: Vec<Index>,
+        /// The list being scanned without an index, and how many times.
+        scanning: ((usize, usize), u32),
+    }
+
+    thread_local! {
+        static STATE: RefCell<State> = RefCell::new(State::default());
+    }
+
+    fn hash(id: &str) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for b in id.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+        h
+    }
+
+    pub(super) fn position(entities: &[Entity], id: &str) -> Option<usize> {
+        let scan = || entities.iter().position(|e| e.id == id);
+        if entities.len() < MIN_LEN {
+            return scan();
+        }
+        let key = (entities.as_ptr() as usize, entities.len());
+        let h = hash(id);
+        let hit = STATE.with(|s| s.borrow().indexes.iter().find(|x| x.key == key).and_then(|x| x.map.get(&h).copied()));
+        if let Some(i) = hit
+            && entities.get(i as usize).is_some_and(|e| e.id == id)
+        {
+            return Some(i as usize);
+        }
+        let found = scan()?;
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.scanning.0 == key {
+                s.scanning.1 += 1;
+            } else {
+                s.scanning = (key, 1);
+            }
+            if s.scanning.1 >= SCANS_BEFORE_INDEX {
+                s.scanning = ((0, 0), 0);
+                s.indexes.retain(|x| x.key != key);
+                if s.indexes.len() >= SLOTS {
+                    s.indexes.remove(0);
+                }
+                let map = entities.iter().enumerate().map(|(i, e)| (hash(&e.id), i as u32)).collect();
+                s.indexes.push(Index { key, map });
+            }
+        });
+        Some(found)
+    }
+}
+
 impl Scene {
     pub fn get(&self, id: &str) -> Result<&Entity> {
-        self.entities.iter().find(|e| e.id == id).ok_or_else(|| CoreError::NoEntity(id.into()))
+        id_index::position(&self.entities, id).map(|i| &self.entities[i]).ok_or_else(|| CoreError::NoEntity(id.into()))
     }
     pub fn get_mut(&mut self, id: &str) -> Result<&mut Entity> {
-        self.entities.iter_mut().find(|e| e.id == id).ok_or_else(|| CoreError::NoEntity(id.into()))
+        match id_index::position(&self.entities, id) {
+            Some(i) => Ok(&mut self.entities[i]),
+            None => Err(CoreError::NoEntity(id.into())),
+        }
     }
     pub fn contains(&self, id: &str) -> bool {
-        self.entities.iter().any(|e| e.id == id)
+        id_index::position(&self.entities, id).is_some()
     }
 
     /// A fresh id like `cube_3` that is not taken yet.
