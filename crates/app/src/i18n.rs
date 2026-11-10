@@ -176,6 +176,23 @@ Shift+拖动：抬起 · Alt+拖动：复制 · R / Shift+R 或拖动时滚轮�
 按键：Cmd/Ctrl+Z 撤销 · Cmd/Ctrl+Shift+Z 重做 · Cmd/Ctrl+C / X / V 复制、剪切、粘贴（也能跨场景）· Cmd/Ctrl+D 复制一份 · Delete 删除 · 空格 播放 · K 关键帧 · F 聚焦 · Cmd/Ctrl+S 保存。\n\
 多个物体：Shift+单击 加选 · 在空白处 Cmd/Ctrl+拖动 框选 · Cmd/Ctrl+G 编组 · Cmd/Ctrl+Shift+G 解组。";
 
+/// How to work the view with fingers (phones and tablets).
+pub fn touch_help() -> &'static str {
+    if zh() {
+        "手指操作：\n\
+单指拖空白处：旋转视角 · 双指拖动：平移 · 双指捏合：缩放 · 双指扭转：转动视角。\n\
+轻点：选中 · 双击：聚焦 · 单指拖物体：在表面上滑动 · 拖彩色箭头 / 圆环：沿轴移动、旋转。\n\
+素材：轻点放到视图中央，或横着拖进场景（上下拖动是滚动列表）。\n\
+小屏幕上，顶栏的「素材」「属性」按钮会把面板滑出来盖在视图上，再点一次收起。"
+    } else {
+        "With fingers:\n\
+One finger on empty space: orbit · two-finger drag: pan · pinch: zoom · twist: turn the view.\n\
+Tap: select · double-tap: focus · drag an object: slide it over surfaces · drag the coloured arrows / rings: move along an axis, turn.\n\
+Blocks: tap to drop one in the middle of the view, or drag it sideways into the scene (up and down scrolls the list).\n\
+On a small screen the Blocks and Properties buttons in the top bar slide those panels over the view; tap again to put them away."
+    }
+}
+
 /// English wording → Chinese.
 static ZH_TABLE: &[(&str, &str)] = &[
     // top bar, toolbars, menus
@@ -183,6 +200,16 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("Save", "保存"),
     ("New", "新建"),
     ("Undo", "撤销"),
+    ("☰ Menu", "☰ 菜单"),
+    ("＋ Blocks", "＋ 素材"),
+    ("Properties", "属性"),
+    ("✕ Close", "✕ 收起"),
+    ("View options ▾", "视图选项 ▾"),
+    ("Search every block, move, pose, template and action", "搜索所有素材、运动、姿势、模板和操作"),
+    (
+        "Tap to drop one in the middle of the view, or drag it sideways into the scene.",
+        "轻点放到视图中央，或横着拖进场景。",
+    ),
     ("Redo", "重做"),
     ("History", "历史"),
     ("Import…", "导入…"),

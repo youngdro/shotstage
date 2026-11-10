@@ -894,6 +894,68 @@ pub struct EditorApp {
     /// Boolean panel: the other mesh and the operation.
     bool_with: Option<String>,
     bool_op: shotstage_core::csg::BoolOp,
+    /// Small screen (phone, narrow tablet): the side panels slide over the view one at a time.
+    compact: bool,
+    /// The side panel open over the view in the compact layout.
+    drawer: Option<Drawer>,
+    /// The blocks drawer shows the scene list instead of the blocks.
+    drawer_tree: bool,
+    /// Fingers, not a mouse: bigger buttons and handles.
+    touch: bool,
+    /// Two fingers are on the view (pan, pinch, twist); the one-finger drag waits until both lift.
+    two_finger: bool,
+    /// Undo steps there were when the current viewport drag began (a second finger landing
+    /// soon after takes back what the first one did).
+    drag_base: Option<(usize, f64)>,
+}
+
+/// A side panel shown over the view in the compact layout.
+#[derive(Clone, Copy, PartialEq)]
+enum Drawer {
+    Blocks,
+    Properties,
+}
+
+/// Narrower than this (in points), the side panels become drawers over the view.
+const COMPACT_WIDTH: f32 = 900.0;
+
+/// Is the main pointer a finger (a phone or tablet)? Known before the first touch.
+fn coarse_pointer() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        thread_local! {
+            static COARSE: bool = web_sys::window()
+                .and_then(|w| w.match_media("(pointer: coarse)").ok().flatten())
+                .is_some_and(|m| m.matches());
+        }
+        COARSE.with(|c| *c)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    false
+}
+
+/// One row of buttons that scrolls sideways when the screen is too narrow for it.
+fn transport_row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::horizontal().id_salt("transport").show(ui, |ui| {
+        ui.horizontal(add);
+    });
+}
+
+/// Roomier buttons and rows for fingers (the mouse sizes otherwise).
+fn finger_spacing(s: &mut egui::Style, touch: bool) {
+    if touch {
+        s.spacing.item_spacing = egui::vec2(8.0, 7.0);
+        s.spacing.button_padding = egui::vec2(10.0, 6.0);
+        s.spacing.interact_size.y = 32.0;
+        s.spacing.icon_width = 18.0;
+        s.spacing.icon_width_inner = 10.0;
+    } else {
+        s.spacing.item_spacing = egui::vec2(6.0, 5.0);
+        s.spacing.button_padding = egui::vec2(8.0, 3.0);
+        s.spacing.interact_size.y = 22.0;
+        s.spacing.icon_width = egui::Spacing::default().icon_width;
+        s.spacing.icon_width_inner = egui::Spacing::default().icon_width_inner;
+    }
 }
 
 impl EditorApp {
@@ -991,11 +1053,22 @@ impl EditorApp {
             edit_prop: false,
             bool_with: None,
             bool_op: Default::default(),
+            compact: false,
+            drawer: None,
+            drawer_tree: false,
+            touch: false,
+            two_finger: false,
+            drag_base: None,
         }
     }
 
     fn run(&self, command: &str, params: Value) -> Option<Value> {
         hub::run(&self.hub, command, params)
+    }
+
+    /// How many steps Undo can take back now.
+    fn undo_depth(&self) -> usize {
+        self.run("history.info", json!({})).and_then(|v| v["undo"].as_array().map(Vec::len)).unwrap_or(0)
     }
 
     /// Run a command whose repeated calls during one gesture merge into one undo step.
@@ -2042,35 +2115,57 @@ impl eframe::App for EditorApp {
             let h = self.hub.borrow();
             (self.pass, self.look_through) = (h.pass, h.look_through);
         }
+        let screen = ui.ctx().content_rect();
+        self.compact = screen.width() < COMPACT_WIDTH;
+        if !self.compact {
+            self.drawer = None;
+        }
+        let touch = coarse_pointer() || ui.input(|i| i.has_touch_screen());
+        if touch != self.touch {
+            self.touch = touch;
+            ui.ctx().all_styles_mut(|s| finger_spacing(s, touch));
+        }
+        // a block carried out of the drawer: clear the view for it
+        if self.palette.is_some() && self.drawer == Some(Drawer::Blocks) {
+            self.drawer = None;
+        }
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
+        // a drawer covers everything under the top bar, the timeline too
+        let under_top = ui.available_rect_before_wrap();
         egui::Panel::bottom("timeline").resizable(false).show(ui, |ui| self.bottom(ui));
         if self.show_board {
             egui::Panel::bottom("storyboard").resizable(false).show(ui, |ui| self.storyboard_strip(ui, frame));
         }
-        egui::Panel::left("outliner")
-            .resizable(true)
-            .default_size(252.0)
-            .min_size(220.0)
-            .max_size(420.0)
-            .show(ui, |ui| self.outliner(ui));
-        egui::Panel::right("properties").resizable(true).default_size(300.0).min_size(260.0).max_size(460.0).show(
-            ui,
-            |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.properties(ui));
-            },
-        );
+        if !self.compact {
+            egui::Panel::left("outliner")
+                .resizable(true)
+                .default_size(252.0)
+                .min_size(220.0)
+                .max_size(420.0)
+                .show(ui, |ui| self.outliner(ui));
+            egui::Panel::right("properties").resizable(true).default_size(300.0).min_size(260.0).max_size(460.0).show(
+                ui,
+                |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.properties(ui));
+                },
+            );
+        }
         if self.hub.borrow().uv.is_some() {
+            let max = if self.compact { (screen.width() * 0.6).max(240.0) } else { 1400.0 };
             egui::Panel::right("uv_editor")
                 .resizable(true)
-                .default_size(440.0)
-                .min_size(280.0)
-                .max_size(1400.0)
+                .default_size(440.0f32.min(max))
+                .min_size(240.0f32.min(max))
+                .max_size(max)
                 .show(ui, |ui| self.uv_panel(ui));
         } else {
             self.uv.hovered = false;
             self.uv.gesture = Default::default();
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, frame));
+        if let Some(d) = self.drawer {
+            self.drawer_panel(ui.ctx(), d, under_top);
+        }
         {
             let mut h = self.hub.borrow_mut();
             (h.pass, h.look_through) = (self.pass, self.look_through);
@@ -2228,6 +2323,10 @@ impl EditorApp {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        if self.compact {
+            self.top_bar_compact(ui);
+            return;
+        }
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tr("shotstage")).strong().color(ACCENT));
             ui.separator();
@@ -2249,26 +2348,7 @@ impl EditorApp {
             if ui.button(tr("🔍 Actions")).on_hover_text(tr("Search every block, move, pose, template and action (Cmd/Ctrl+K or /)")).clicked() {
                 self.quick = Some((String::new(), 0));
             }
-            ui.menu_button(tr("History"), |ui| {
-                let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
-                let undo: Vec<String> = info["undo"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default();
-                if undo.is_empty() {
-                    ui.weak(tr("Nothing to undo yet"));
-                } else {
-                    ui.weak(tr("Click a step to go back to before it"));
-                }
-                for (i, label) in undo.iter().take(20).enumerate() {
-                    if ui.button(format!("{}. {}", i + 1, tr(friendly(label)))).clicked() {
-                        for _ in 0..=i {
-                            self.run("history.undo", json!({}));
-                        }
-                        ui.close();
-                    }
-                }
-            });
+            ui.menu_button(tr("History"), |ui| self.history_menu(ui));
             ui.separator();
             if ui
                 .button(tr("Import…"))
@@ -2277,62 +2357,201 @@ impl EditorApp {
             {
                 crate::files::pick(&self.incoming, ui.ctx());
             }
-            ui.menu_button(tr("Templates"), |ui| {
-                ui.weak(tr("Start from a ready scene (replaces this one; Undo brings it back)"));
-                use shotstage_commands::templates::{PRODUCT_LOOKS, TEMPLATES};
-                for (heading, products) in [("Scenes", false), ("Product close-ups", true)] {
-                    ui.separator();
-                    ui.label(egui::RichText::new(tr(heading)).strong());
-                    for (name, label, desc) in TEMPLATES.iter().filter(|t| PRODUCT_LOOKS.contains(&t.0) == products) {
-                        if ui.button(tr(*label)).on_hover_text(tr(*desc)).clicked() {
-                            self.apply_template(name, label);
-                            ui.close();
-                        }
-                    }
-                }
-            });
-            ui.menu_button(tr("Export"), |ui| {
-                ui.weak(tr("The scene posed at the current frame"));
-                for (label, format, tip) in [
-                    ("GLB (glTF binary)", "glb", "Meshes, colours, cameras and lights: Blender, Unreal, Unity, three.js"),
-                    ("glTF (text)", "gltf", "The same as GLB, as one JSON file"),
-                    ("OBJ + MTL", "obj", "Meshes and colours, for almost any 3D tool"),
-                    ("STL", "stl", "Geometry only, for 3D printing and CAD"),
-                    ("FBX (via Blender)", "fbx", "Needs Blender on this computer (desktop editor)"),
-                ] {
-                    if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
-                        self.export_model(format);
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                self.sheet_menu(ui);
-            });
+            ui.menu_button(tr("Templates"), |ui| self.templates_menu(ui));
+            ui.menu_button(tr("Export"), |ui| self.export_menu(ui));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // the language switch, in both languages so it is always findable
-                let zh = crate::i18n::zh();
-                if ui.selectable_label(zh, tr("中文")).on_hover_text(tr("界面语言：中文")).clicked() && !zh {
-                    crate::i18n::set_zh(true);
-                }
-                if ui.selectable_label(!zh, tr("EN")).on_hover_text(tr("Interface language: English")).clicked() && zh {
-                    crate::i18n::set_zh(false);
-                }
+                self.language_switch(ui);
                 ui.separator();
                 let buttons = self.hub.borrow().host_buttons.clone();
                 if buttons.is_empty() {
                     ui.weak(tr("3D previs for AI images and video"));
                 }
-                for b in buttons.iter().rev() {
-                    let mut r = ui.button(b.label());
-                    if let Some(tip) = b.tooltip() {
-                        r = r.on_hover_text(tip);
-                    }
-                    if r.clicked() {
-                        hub::emit(&self.hub, &json!({ "type": "toolbar", "id": b.id }));
-                    }
-                }
+                self.host_buttons(ui, true);
             });
         });
+    }
+
+    /// The top bar on a small screen: the file actions fold into a menu, and two buttons slide
+    /// the blocks and the properties over the view.
+    fn top_bar_compact(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.menu_button(tr("☰ Menu"), |ui| {
+                if ui.button(tr("Open…")).clicked() {
+                    crate::files::pick(&self.incoming, ui.ctx());
+                    ui.close();
+                }
+                if ui.button(tr("Save")).clicked() {
+                    self.save_scene();
+                    ui.close();
+                }
+                if ui.button(tr("New")).clicked() {
+                    self.new_scene();
+                    ui.close();
+                }
+                if ui.button(tr("Import…")).clicked() {
+                    crate::files::pick(&self.incoming, ui.ctx());
+                    ui.close();
+                }
+                ui.separator();
+                ui.menu_button(tr("Templates"), |ui| self.templates_menu(ui));
+                ui.menu_button(tr("Export"), |ui| self.export_menu(ui));
+                ui.menu_button(tr("History"), |ui| self.history_menu(ui));
+                ui.separator();
+                ui.horizontal(|ui| self.language_switch(ui));
+                if !self.hub.borrow().host_buttons.is_empty() {
+                    ui.separator();
+                    self.host_buttons(ui, false);
+                }
+            });
+            if ui.button(tr("Undo")).clicked() {
+                self.run("history.undo", json!({}));
+            }
+            if ui.button(tr("Redo")).clicked() {
+                self.run("history.redo", json!({}));
+            }
+            if ui.button(tr("🔍")).on_hover_text(tr("Search every block, move, pose, template and action")).clicked()
+            {
+                self.quick = Some((String::new(), 0));
+            }
+            ui.separator();
+            for (d, label) in [(Drawer::Blocks, "＋ Blocks"), (Drawer::Properties, "Properties")] {
+                if ui.selectable_label(self.drawer == Some(d), tr(label)).clicked() {
+                    self.drawer = if self.drawer == Some(d) { None } else { Some(d) };
+                }
+            }
+        });
+    }
+
+    fn history_menu(&mut self, ui: &mut egui::Ui) {
+        let info = self.run("history.info", json!({})).unwrap_or(Value::Null);
+        let undo: Vec<String> = info["undo"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        if undo.is_empty() {
+            ui.weak(tr("Nothing to undo yet"));
+        } else {
+            ui.weak(tr("Click a step to go back to before it"));
+        }
+        for (i, label) in undo.iter().take(20).enumerate() {
+            if ui.button(format!("{}. {}", i + 1, tr(friendly(label)))).clicked() {
+                for _ in 0..=i {
+                    self.run("history.undo", json!({}));
+                }
+                ui.close();
+            }
+        }
+    }
+
+    fn templates_menu(&mut self, ui: &mut egui::Ui) {
+        ui.weak(tr("Start from a ready scene (replaces this one; Undo brings it back)"));
+        use shotstage_commands::templates::{PRODUCT_LOOKS, TEMPLATES};
+        for (heading, products) in [("Scenes", false), ("Product close-ups", true)] {
+            ui.separator();
+            ui.label(egui::RichText::new(tr(heading)).strong());
+            for (name, label, desc) in TEMPLATES.iter().filter(|t| PRODUCT_LOOKS.contains(&t.0) == products) {
+                if ui.button(tr(*label)).on_hover_text(tr(*desc)).clicked() {
+                    self.apply_template(name, label);
+                    ui.close();
+                }
+            }
+        }
+    }
+
+    fn export_menu(&mut self, ui: &mut egui::Ui) {
+        ui.weak(tr("The scene posed at the current frame"));
+        for (label, format, tip) in [
+            ("GLB (glTF binary)", "glb", "Meshes, colours, cameras and lights: Blender, Unreal, Unity, three.js"),
+            ("glTF (text)", "gltf", "The same as GLB, as one JSON file"),
+            ("OBJ + MTL", "obj", "Meshes and colours, for almost any 3D tool"),
+            ("STL", "stl", "Geometry only, for 3D printing and CAD"),
+            ("FBX (via Blender)", "fbx", "Needs Blender on this computer (desktop editor)"),
+        ] {
+            if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
+                self.export_model(format);
+                ui.close();
+            }
+        }
+        ui.separator();
+        self.sheet_menu(ui);
+    }
+
+    fn language_switch(&mut self, ui: &mut egui::Ui) {
+        let zh = crate::i18n::zh();
+        if ui.selectable_label(zh, tr("中文")).on_hover_text(tr("界面语言：中文")).clicked() && !zh {
+            crate::i18n::set_zh(true);
+        }
+        if ui.selectable_label(!zh, tr("EN")).on_hover_text(tr("Interface language: English")).clicked() && zh {
+            crate::i18n::set_zh(false);
+        }
+    }
+
+    /// The buttons the host page added to the top bar (`reversed` in a right-to-left row).
+    fn host_buttons(&mut self, ui: &mut egui::Ui, reversed: bool) {
+        let mut buttons = self.hub.borrow().host_buttons.clone();
+        if reversed {
+            buttons.reverse();
+        }
+        for b in buttons.iter() {
+            let mut r = ui.button(b.label());
+            if let Some(tip) = b.tooltip() {
+                r = r.on_hover_text(tip);
+            }
+            if r.clicked() {
+                hub::emit(&self.hub, &json!({ "type": "toolbar", "id": b.id }));
+            }
+        }
+    }
+
+    /// A side panel slid over the view (compact layout): the blocks from the left, the
+    /// properties from the right.
+    fn drawer_panel(&mut self, ctx: &egui::Context, d: Drawer, middle: Rect) {
+        let w = (middle.width() * 0.88).min(340.0);
+        let rect = match d {
+            Drawer::Blocks => Rect::from_min_size(middle.min, Vec2::new(w, middle.height())),
+            Drawer::Properties => {
+                Rect::from_min_size(egui::pos2(middle.right() - w, middle.top()), Vec2::new(w, middle.height()))
+            }
+        };
+        egui::Area::new(egui::Id::unique("drawer"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .constrain(false)
+            .show(ctx, |ui| {
+                let frame = egui::Frame::side_top_panel(ui.style())
+                    .inner_margin(egui::Margin::same(8))
+                    .shadow(ui.style().visuals.popup_shadow);
+                frame.show(ui, |ui| {
+                    let inner = rect.size() - Vec2::splat(16.0);
+                    ui.set_min_size(inner);
+                    ui.set_max_size(inner);
+                    ui.horizontal(|ui| {
+                        match d {
+                            // the blocks and the scene list take turns: each gets the full height
+                            Drawer::Blocks => {
+                                ui.selectable_value(&mut self.drawer_tree, false, tr("Blocks"));
+                                ui.selectable_value(&mut self.drawer_tree, true, tr("Scene"));
+                            }
+                            Drawer::Properties => {
+                                ui.strong(tr("Properties"));
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(tr("✕ Close")).clicked() {
+                                self.drawer = None;
+                            }
+                        });
+                    });
+                    match d {
+                        Drawer::Blocks if self.drawer_tree => self.scene_tree(ui),
+                        Drawer::Blocks => self.blocks(ui),
+                        Drawer::Properties => {
+                            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.properties(ui));
+                        }
+                    }
+                });
+            });
     }
 
     fn outliner(&mut self, ui: &mut egui::Ui) {
@@ -2355,7 +2574,11 @@ impl EditorApp {
                     .desired_width(f32::INFINITY),
             );
         });
-        ui.weak(tr("Drag into the scene, or click to drop it in the middle."));
+        ui.weak(if self.touch {
+            tr("Tap to drop one in the middle of the view, or drag it sideways into the scene.")
+        } else {
+            tr("Drag into the scene, or click to drop it in the middle.")
+        });
         ui.add_space(2.0);
         let filter = self.block_filter.trim().to_lowercase();
         egui::ScrollArea::vertical().id_salt("blocks").auto_shrink([false, false]).show(ui, |ui| {
@@ -2469,9 +2692,17 @@ impl EditorApp {
             ),
         };
         let r = r.on_hover_cursor(CursorIcon::Grab).on_hover_text(tr(b.description()));
-        if r.drag_started() && !matches!(b, Block::LightPreset(..)) {
+        // With fingers a drag up or down scrolls the list; a sideways one carries the block out.
+        let sideways = || {
+            let d = ui.input(|i| Some(i.pointer.latest_pos()? - i.pointer.press_origin()?)).unwrap_or_default();
+            d.x.abs() > d.y.abs()
+        };
+        if r.drag_started() && !matches!(b, Block::LightPreset(..)) && (!self.touch || sideways()) {
             let key = self.new_key("new");
             self.palette = Some(PaletteDrag { block: b.clone(), spawned: None, key });
+        }
+        if self.touch && r.dragged() && self.palette.is_none() {
+            ui.scroll_with_delta(Vec2::new(0.0, r.drag_delta().y));
         }
         if r.clicked() {
             self.use_block(b);
@@ -2498,6 +2729,10 @@ impl EditorApp {
                 self.run_key(&key, "entity.place", json!({"id": id}));
             }
             self.select(Some(id));
+            // on a small screen, get out of the way so the new block shows
+            if self.compact {
+                self.drawer = None;
+            }
         }
     }
 
@@ -3804,7 +4039,7 @@ impl EditorApp {
         let t = scene.timeline.clone();
         let fps = t.fps.max(1.0);
         ui.add_space(3.0);
-        ui.horizontal(|ui| {
+        transport_row(ui, |ui| {
             if ui.button(tr("⏮")).on_hover_text(tr("To the start (Home)")).clicked() {
                 self.hub.borrow_mut().frame = t.start as f32;
             }
@@ -4755,7 +4990,8 @@ impl EditorApp {
         let gizmo = selected.as_ref().filter(|s| !clean && !scene.get(s).is_ok_and(|e| e.locked)).and_then(|id| {
             let o = world_at(&scene, id, f).ok()?.w_axis.truncate();
             let joint = rig::is_joint(&scene, id);
-            let len = (eye - o).length().max(0.1) * if joint { 0.09 } else { 0.14 };
+            let len =
+                (eye - o).length().max(0.1) * if joint { 0.09 } else { 0.14 } * if self.touch { 1.3 } else { 1.0 };
             let c = project(rect, &view, o)?;
             let axes: Vec<Option<Pos2>> = if joint {
                 vec![]
@@ -4825,21 +5061,23 @@ impl EditorApp {
             let hit = raycast(&scene, f, o, d, &opts).map(|h| Vec3::from_array(h.point)).unwrap_or(o + d * 3.0);
             Some((s.clone(), project(rect, &view, hit)?))
         });
+        // fingers are less exact than a mouse pointer
+        let tol = if self.touch { 2.2 } else { 1.0 };
         let path_key_at = |p: Pos2| -> Option<(String, f32, Vec3)> {
             let (id, _, keys) = path.as_ref()?;
             keys.iter()
-                .filter(|(_, sp, _)| (*sp - p).length() < 8.0)
+                .filter(|(_, sp, _)| (*sp - p).length() < 8.0 * tol)
                 .min_by(|a, b| (a.1 - p).length().total_cmp(&(b.1 - p).length()))
                 .map(|(f, _, w)| (id.clone(), *f, *w))
         };
         let handle_at = |p: Pos2| -> Option<Handle> {
             let (_, _, _, c, axes, rings, joint) = gizmo.as_ref()?;
-            if !joint && (p - (*c + Vec2::new(30.0, -30.0))).length() < 8.0 {
+            if !joint && (p - (*c + Vec2::new(30.0, -30.0))).length() < 8.0 * tol {
                 return Some(Handle::Scale);
             }
             for (i, a) in axes.iter().enumerate() {
                 if let Some(a) = a
-                    && seg_dist(p, *c, *a) < 7.0
+                    && seg_dist(p, *c, *a) < 7.0 * tol
                     && (p - *c).length() > 6.0
                 {
                     return Some(Handle::Axis(i));
@@ -4848,7 +5086,7 @@ impl EditorApp {
             rings
                 .iter()
                 .map(|(ax, pts)| (*ax, pts.windows(2).map(|w| seg_dist(p, w[0], w[1])).fold(f32::MAX, f32::min)))
-                .filter(|(_, d)| *d < 5.0)
+                .filter(|(_, d)| *d < 5.0 * tol)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(ax, _)| Handle::Ring(ax))
         };
@@ -4908,6 +5146,44 @@ impl EditorApp {
             });
         }
 
+        // Two fingers on the view pan, pinch to zoom and twist to turn around (below). They end
+        // what the first finger was doing; if it only just began, it is taken back.
+        let multi = ui
+            .input(|i| i.multi_touch())
+            .filter(|m| m.num_touches >= 2)
+            .filter(|_| self.two_finger || resp.hovered() || resp.dragged());
+        if multi.is_some() && !self.two_finger {
+            let now = ui.input(|i| i.time);
+            match &self.drag {
+                Gesture::Idle | Gesture::Navigate | Gesture::Cancelled | Gesture::Marquee { .. } => {}
+                Gesture::EditTool => self.edit_cancel(),
+                _ => {
+                    if let Some((base, t0)) = self.drag_base
+                        && now - t0 < 0.6
+                    {
+                        while self.undo_depth() > base && self.run("history.discard", json!({})).is_some() {}
+                    }
+                }
+            }
+            if self.edit_modal.is_some() {
+                self.edit_cancel();
+            }
+            self.drag = Gesture::Cancelled;
+        }
+        self.two_finger = multi.is_some();
+        if let Some(m) = multi
+            && cam.is_none()
+            && self.palette.is_none()
+        {
+            let inv = self.orbit.view().inverse();
+            let k = self.orbit.distance * 0.0015;
+            let d = m.translation_delta;
+            self.orbit.target += (-inv.x_axis.xyz() * d.x + inv.y_axis.xyz() * d.y) * k;
+            // (the scene turns with the fingers)
+            self.orbit.yaw += m.rotation_delta;
+            ui.ctx().request_repaint();
+        }
+
         // 4. Drags in the viewport.
         if self.palette.is_none() {
             let primary = resp.drag_started_by(egui::PointerButton::Primary);
@@ -4915,6 +5191,7 @@ impl EditorApp {
                 && !matches!(self.drag, Gesture::Cancelled)
                 && let Some(start) = ui.input(|i| i.pointer.press_origin()).filter(|p| rect.contains(*p))
             {
+                self.drag_base = self.touch.then(|| (self.undo_depth(), ui.input(|i| i.time)));
                 let (o, d) = ray_at(rect, &view, start);
                 if let Some(cg) = cage.as_ref() {
                     self.drag = self.edit_drag_start(cg, start, (o, d), modifiers, cam.is_none());
@@ -4932,7 +5209,7 @@ impl EditorApp {
                         .and_then(|h| joint_at(&scene, h, hit_point, f))
                         .map(|j| drive_joint(&scene, &j));
                     self.drag = if let Some(id) =
-                        aim.as_ref().filter(|(_, sp)| (*sp - start).length() < 9.0).map(|(id, _)| id.clone())
+                        aim.as_ref().filter(|(_, sp)| (*sp - start).length() < 9.0 * tol).map(|(id, _)| id.clone())
                     {
                         let key = self.new_key("aim");
                         Gesture::LightAim { id, key }
@@ -5224,7 +5501,7 @@ impl EditorApp {
             }
             // trackpad pinch (and Ctrl+wheel) arrives as a zoom factor, not as scrolling
             let pinch = ui.input(|i| i.zoom_delta());
-            if resp.hovered() && pinch != 1.0 && pinch.is_finite() && pinch > 0.0 {
+            if (resp.hovered() || self.two_finger) && pinch != 1.0 && pinch.is_finite() && pinch > 0.0 {
                 self.orbit.distance = (self.orbit.distance / pinch).clamp(0.3, 500.0);
             }
             if resp.double_clicked()
@@ -5277,7 +5554,7 @@ impl EditorApp {
                         .filter_map(|e| {
                             let p = project(rect, &view, world_at(&scene, &e.id, f).ok()?.w_axis.truncate())?;
                             let dist = (p - pos).length();
-                            (dist < 14.0).then(|| (dist, e.id.clone()))
+                            (dist < 14.0 * tol).then(|| (dist, e.id.clone()))
                         })
                         .min_by(|a, b| a.0.total_cmp(&b.0))
                         .map(|(_, id)| id)
@@ -5375,7 +5652,7 @@ impl EditorApp {
             && let (Ok(lens), Ok(world)) = (camera_data_at(&scene, &c, f), world_at(&scene, &c, f))
         {
             let a = lens.aspect.clamp(0.3, 4.0);
-            let w = (full.width() * 0.24).clamp(150.0, 300.0);
+            let w = (full.width() * 0.24).clamp(if self.compact { 110.0 } else { 150.0 }, 300.0);
             let size = Vec2::new(w, w / a);
             let prect = Rect::from_min_size(full.right_bottom() - size - Vec2::splat(12.0), size);
             let ppx = ((size.x * ppp).round() as u32, (size.y * ppp).round() as u32);
@@ -5598,11 +5875,15 @@ impl EditorApp {
                 painter.rect_filled(sq, 1.0, if lit(Handle::Scale) { Color32::WHITE } else { Color32::from_gray(200) });
             }
         }
-        self.toolbar(ui, full, cam.is_some() || camera_id_at(&scene, f).is_some());
-        if cage.is_some() {
+        // (an open drawer covers the view: its floating bits would sit on top of it)
+        let covered = self.drawer.is_some();
+        if !covered {
+            self.toolbar(ui, full, cam.is_some() || camera_id_at(&scene, f).is_some());
+        }
+        if cage.is_some() && !covered {
             self.edit_bar(ui, full);
         }
-        if !clean {
+        if !clean && !covered {
             self.view_cube(ui, full);
             // name of what the pointer would grab
             if let (Some(h), Some(p)) = (&self.hovered, inside)
@@ -5650,7 +5931,7 @@ impl EditorApp {
                         });
                     });
                 });
-        } else if scene.entities.is_empty() && self.palette.is_none() {
+        } else if scene.entities.is_empty() && self.palette.is_none() && !covered {
             self.welcome(ui, full);
         }
         // files dragged over the window
@@ -5858,8 +6139,10 @@ impl EditorApp {
         });
     }
 
-    /// Floating view options at the top-left of the viewport.
+    /// Floating view options at the top-left of the viewport (folded into one menu on a small
+    /// screen, next to the camera view switch).
     fn toolbar(&mut self, ui: &egui::Ui, full: Rect, has_cam: bool) {
+        let compact = self.compact;
         egui::Area::new(egui::Id::unique("viewport_toolbar"))
             .order(egui::Order::Foreground)
             .fixed_pos(full.left_top() + Vec2::new(8.0, 8.0))
@@ -5868,78 +6151,100 @@ impl EditorApp {
                     // wrap rather than spill over the side panels or under the view cube
                     ui.set_max_width((full.width() - 28.0 - 100.0).max(160.0));
                     ui.horizontal_wrapped(|ui| {
-                        ui.selectable_value(&mut self.pass, Pass::Clay, tr("Clay")).on_hover_text(tr("Clay shading"));
-                        ui.selectable_value(&mut self.pass, Pass::Depth, tr("Depth"))
-                            .on_hover_text(tr("Depth pass (near = white)"));
-                        ui.selectable_value(&mut self.pass, Pass::Normal, tr("Normal")).on_hover_text(tr("Normal pass"));
-                        if self.pass == Pass::Depth {
-                            self.depth_menu(ui);
+                        if compact {
+                            ui.menu_button(tr("View options ▾"), |ui| self.view_options(ui, has_cam, true));
+                            self.camera_view_button(ui, has_cam);
+                        } else {
+                            self.view_options(ui, has_cam, false);
                         }
-                        ui.add_space(6.0);
-                        ui.toggle_value(&mut self.snap, tr("Snap"))
-                            .on_hover_text(tr("Snap dragged blocks to a grid (hold Ctrl to place freely)"));
-                        ui.add_enabled(
-                            self.snap,
-                            egui::DragValue::new(&mut self.snap_step).range(0.01..=5.0).speed(0.01).suffix(" m"),
-                        );
-                        ui.add_space(6.0);
-                        // (a plain button: an enabled_ui wrapper would wrap its text letter by letter)
-                        if ui
-                            .add_enabled(has_cam, egui::Button::selectable(self.look_through, tr("🎥 Camera view")))
-                            .on_hover_text(tr("Look through the shot camera (the clean reference frame)"))
-                            .clicked()
-                        {
-                            self.look_through = !self.look_through;
-                        }
-                        if !has_cam {
-                            self.look_through = false;
-                        }
-                        if ui
-                            .add_enabled(has_cam, egui::Button::new(tr("📷 Save frame")))
-                            .on_hover_text(tr("Save the shot camera's view at this frame as a PNG (1920 px wide)"))
-                            .clicked()
-                        {
-                            crate::files::save_frame(&self.hub, 1920, &self.saved);
-                        }
-                        if !self.look_through
-                            && ui.button(tr("+ Camera")).on_hover_text(tr("A new camera right where you are looking from")).clicked()
-                        {
-                            self.camera_from_view();
-                        }
-                        ui.menu_button(tr("Sky ▾"), |ui| {
-                            ui.set_min_width(330.0);
-                            self.world_panel(ui);
-                        })
-                        .response
-                        .on_hover_text(tr("Sky (built-in skies or an HDRI), sky light and shadows"));
-                        ui.menu_button(tr("View ▾"), |ui| {
-                            ui.checkbox(&mut self.shadows, tr("Shadows"))
-                                .on_hover_text(tr("Show shadows in the viewport (snapshots follow the scene's shadow settings)"));
-                            ui.checkbox(&mut self.studio_light, tr("Studio light")).on_hover_text(
-                                tr("Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)"),
-                            );
-                            ui.checkbox(&mut self.safe_areas, tr("Safe areas in camera view"))
-                                .on_hover_text(tr("Action / title safe frames and a centre cross when looking through a camera"));
-                            ui.checkbox(&mut self.cam_preview, tr("Camera preview in the corner"))
-                                .on_hover_text(tr("A small live view of the shot camera while you work in the free view"));
-                            ui.separator();
-                            ui.label(tr("Two-finger scroll / mouse wheel"));
-                            ui.horizontal(|ui| {
-                                for (m, label, tip) in [
-                                    (ScrollMode::Auto, "Auto", "Trackpad orbits, mouse wheel zooms"),
-                                    (ScrollMode::Orbit, "Orbit", "Scrolling orbits (Shift: pan); pinch or Ctrl+scroll zooms"),
-                                    (ScrollMode::Zoom, "Zoom", "Scrolling always zooms"),
-                                ] {
-                                    ui.selectable_value(&mut self.scroll_mode, m, tr(label)).on_hover_text(tr(tip));
-                                }
-                            });
-                        })
-                        .response
-                        .on_hover_text(tr("Shadows, lighting, camera preview and navigation"));
-                        ui.label(egui::RichText::new(tr(" ? ")).strong()).on_hover_text(crate::i18n::help(HELP));
                     });
                 });
             });
+    }
+
+    /// Look through the shot camera (the clean reference frame).
+    fn camera_view_button(&mut self, ui: &mut egui::Ui, has_cam: bool) {
+        // (a plain button: an enabled_ui wrapper would wrap its text letter by letter)
+        if ui
+            .add_enabled(has_cam, egui::Button::selectable(self.look_through, tr("🎥 Camera view")))
+            .on_hover_text(tr("Look through the shot camera (the clean reference frame)"))
+            .clicked()
+        {
+            self.look_through = !self.look_through;
+        }
+        if !has_cam {
+            self.look_through = false;
+        }
+    }
+
+    fn view_options(&mut self, ui: &mut egui::Ui, has_cam: bool, compact: bool) {
+        ui.selectable_value(&mut self.pass, Pass::Clay, tr("Clay")).on_hover_text(tr("Clay shading"));
+        ui.selectable_value(&mut self.pass, Pass::Depth, tr("Depth")).on_hover_text(tr("Depth pass (near = white)"));
+        ui.selectable_value(&mut self.pass, Pass::Normal, tr("Normal")).on_hover_text(tr("Normal pass"));
+        if self.pass == Pass::Depth {
+            self.depth_menu(ui);
+        }
+        ui.add_space(6.0);
+        ui.toggle_value(&mut self.snap, tr("Snap"))
+            .on_hover_text(tr("Snap dragged blocks to a grid (hold Ctrl to place freely)"));
+        ui.add_enabled(self.snap, egui::DragValue::new(&mut self.snap_step).range(0.01..=5.0).speed(0.01).suffix(" m"));
+        ui.add_space(6.0);
+        if !compact {
+            self.camera_view_button(ui, has_cam);
+        }
+        if ui
+            .add_enabled(has_cam, egui::Button::new(tr("📷 Save frame")))
+            .on_hover_text(tr("Save the shot camera's view at this frame as a PNG (1920 px wide)"))
+            .clicked()
+        {
+            crate::files::save_frame(&self.hub, 1920, &self.saved);
+        }
+        if !self.look_through
+            && ui.button(tr("+ Camera")).on_hover_text(tr("A new camera right where you are looking from")).clicked()
+        {
+            self.camera_from_view();
+        }
+        ui.menu_button(tr("Sky ▾"), |ui| {
+            ui.set_min_width(330.0);
+            self.world_panel(ui);
+        })
+        .response
+        .on_hover_text(tr("Sky (built-in skies or an HDRI), sky light and shadows"));
+        ui.menu_button(tr("View ▾"), |ui| {
+            ui.checkbox(&mut self.shadows, tr("Shadows"))
+                .on_hover_text(tr("Show shadows in the viewport (snapshots follow the scene's shadow settings)"));
+            ui.checkbox(&mut self.studio_light, tr("Studio light")).on_hover_text(tr(
+                "Show the flat studio clay light instead of the scene's lights (scenes without lights always use it)",
+            ));
+            ui.checkbox(&mut self.safe_areas, tr("Safe areas in camera view"))
+                .on_hover_text(tr("Action / title safe frames and a centre cross when looking through a camera"));
+            ui.checkbox(&mut self.cam_preview, tr("Camera preview in the corner"))
+                .on_hover_text(tr("A small live view of the shot camera while you work in the free view"));
+            ui.separator();
+            ui.label(tr("Two-finger scroll / mouse wheel"));
+            ui.horizontal(|ui| {
+                for (m, label, tip) in [
+                    (ScrollMode::Auto, "Auto", "Trackpad orbits, mouse wheel zooms"),
+                    (ScrollMode::Orbit, "Orbit", "Scrolling orbits (Shift: pan); pinch or Ctrl+scroll zooms"),
+                    (ScrollMode::Zoom, "Zoom", "Scrolling always zooms"),
+                ] {
+                    ui.selectable_value(&mut self.scroll_mode, m, tr(label)).on_hover_text(tr(tip));
+                }
+            });
+        })
+        .response
+        .on_hover_text(tr("Shadows, lighting, camera preview and navigation"));
+        if self.touch {
+            // no hovering with fingers: tap for the help
+            ui.menu_button(egui::RichText::new(tr(" ? ")).strong(), |ui| {
+                ui.set_max_width(340.0);
+                ui.label(crate::i18n::touch_help());
+                ui.separator();
+                ui.weak(crate::i18n::help(HELP));
+            });
+        } else {
+            ui.label(egui::RichText::new(tr(" ? ")).strong()).on_hover_text(crate::i18n::help(HELP));
+        }
     }
 }
 
