@@ -18,7 +18,7 @@ pub enum TrackProperty {
     Expression,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Interp {
     /// Hold the value until the next key.
@@ -33,6 +33,10 @@ pub enum Interp {
     EaseOut,
     /// Overshoot a little and settle back (a springy arrival).
     Overshoot,
+    /// A custom speed curve, like CSS `cubic-bezier(x1, y1, x2, y2)`: the curve runs from (0,0)
+    /// to (1,1) through two handles. x is time (kept within 0..1), y is progress (may go below
+    /// 0 or above 1 to anticipate or overshoot). `{"bezier": [0.42, 0, 0.58, 1]}` is ease-in-out.
+    Bezier([f32; 4]),
 }
 
 impl Interp {
@@ -49,8 +53,75 @@ impl Interp {
                 let (c1, c3) = (1.70158f32, 2.70158f32);
                 1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
             }
+            Interp::Bezier(h) => cubic_bezier(Interp::clamp_handles(h), t),
         }
     }
+
+    /// Bezier handles kept usable: x within 0..1 (so time only moves forward), y within -1..2.
+    pub fn clamp_handles(h: [f32; 4]) -> [f32; 4] {
+        let ok = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        [
+            ok(h[0], 0.25).clamp(0.0, 1.0),
+            ok(h[1], 0.1).clamp(-1.0, 2.0),
+            ok(h[2], 0.25).clamp(0.0, 1.0),
+            ok(h[3], 1.0).clamp(-1.0, 2.0),
+        ]
+    }
+
+    /// The same curve as Bezier handles, for editing a preset by hand. `None` for step.
+    pub fn as_bezier(self) -> Option<[f32; 4]> {
+        Some(match self {
+            Interp::Step => return None,
+            Interp::Linear => [0.0, 0.0, 1.0, 1.0],
+            // smoothstep is close to this ease-in-out
+            Interp::Ease => [0.42, 0.0, 0.58, 1.0],
+            Interp::EaseIn => [0.55, 0.0, 1.0, 0.45],
+            Interp::EaseOut => [0.0, 0.55, 0.45, 1.0],
+            Interp::Overshoot => [0.34, 1.56, 0.64, 1.0],
+            Interp::Bezier(h) => Interp::clamp_handles(h),
+        })
+    }
+}
+
+/// CSS-style cubic Bezier from (0,0) to (1,1): find the curve parameter whose x is `t`, give
+/// its y.
+fn cubic_bezier([x1, y1, x2, y2]: [f32; 4], t: f32) -> f32 {
+    let bez = |a: f32, b: f32, s: f32| {
+        let u = 1.0 - s;
+        3.0 * u * u * s * a + 3.0 * u * s * s * b + s * s * s
+    };
+    let dx = |s: f32| {
+        let u = 1.0 - s;
+        3.0 * u * u * x1 + 6.0 * u * s * (x2 - x1) + 3.0 * s * s * (1.0 - x2)
+    };
+    // Newton from s = t, then bisection if it wanders (x is monotonic since x1, x2 are in 0..1)
+    let mut s = t;
+    for _ in 0..8 {
+        let err = bez(x1, x2, s) - t;
+        if err.abs() < 1e-6 {
+            return bez(y1, y2, s);
+        }
+        let d = dx(s);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        s = (s - err / d).clamp(0.0, 1.0);
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    s = t;
+    for _ in 0..30 {
+        let x = bez(x1, x2, s);
+        if (x - t).abs() < 1e-6 {
+            break;
+        }
+        if x < t {
+            lo = s
+        } else {
+            hi = s
+        }
+        s = (lo + hi) / 2.0;
+    }
+    bez(y1, y2, s)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -130,6 +201,92 @@ impl Default for Timeline {
         // 5 s at 24 fps: a typical AI video clip length.
         Self { fps: 24.0, start: 0, end: 119, tracks: Vec::new(), shots: Vec::new() }
     }
+}
+
+/// One number of an animated value, for curve editing: a position or rotation axis, a scale
+/// axis, or a camera's focal length. Rotations are Euler degrees (Y, X, Z order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Channel {
+    X,
+    Y,
+    Z,
+    RotX,
+    RotY,
+    RotZ,
+    ScaleX,
+    ScaleY,
+    ScaleZ,
+    Focal,
+}
+
+impl Channel {
+    pub const TRANSFORM: [Channel; 9] = [
+        Channel::X,
+        Channel::Y,
+        Channel::Z,
+        Channel::RotX,
+        Channel::RotY,
+        Channel::RotZ,
+        Channel::ScaleX,
+        Channel::ScaleY,
+        Channel::ScaleZ,
+    ];
+
+    /// The channels a property has.
+    pub fn of(property: TrackProperty) -> &'static [Channel] {
+        match property {
+            TrackProperty::Transform => &Channel::TRANSFORM,
+            TrackProperty::FocalLength => &[Channel::Focal],
+            TrackProperty::Expression => &[],
+        }
+    }
+
+    pub fn is_rotation(self) -> bool {
+        matches!(self, Channel::RotX | Channel::RotY | Channel::RotZ)
+    }
+
+    /// This channel's number in `v` (None when `v` has no such number).
+    pub fn get(self, v: &KeyValue) -> Option<f32> {
+        match (self, v) {
+            (Channel::Focal, KeyValue::Scalar(f)) => Some(*f),
+            (Channel::X | Channel::Y | Channel::Z, KeyValue::Transform(t)) => {
+                Some(t.translation[self as usize - Channel::X as usize])
+            }
+            (Channel::RotX | Channel::RotY | Channel::RotZ, KeyValue::Transform(t)) => {
+                Some(t.euler_degrees()[self as usize - Channel::RotX as usize])
+            }
+            (Channel::ScaleX | Channel::ScaleY | Channel::ScaleZ, KeyValue::Transform(t)) => {
+                Some(t.scale[self as usize - Channel::ScaleX as usize])
+            }
+            _ => None,
+        }
+    }
+
+    /// `v` with this channel set to `x`. False when `v` has no such channel.
+    pub fn set(self, v: &mut KeyValue, x: f32) -> bool {
+        match (self, v) {
+            (Channel::Focal, KeyValue::Scalar(f)) => *f = x,
+            (Channel::X | Channel::Y | Channel::Z, KeyValue::Transform(t)) => {
+                t.translation[self as usize - Channel::X as usize] = x
+            }
+            (Channel::RotX | Channel::RotY | Channel::RotZ, KeyValue::Transform(t)) => {
+                let mut e = t.euler_degrees();
+                e[self as usize - Channel::RotX as usize] = x;
+                t.set_euler_degrees(e);
+            }
+            (Channel::ScaleX | Channel::ScaleY | Channel::ScaleZ, KeyValue::Transform(t)) => {
+                t.scale[self as usize - Channel::ScaleX as usize] = x
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// Keep an angle in degrees within half a turn of `near`, so a rotation curve reads continuous.
+pub fn unwrap_degrees(a: f32, near: f32) -> f32 {
+    a - ((a - near) / 360.0).round() * 360.0
 }
 
 fn ease(t: f32) -> f32 {
@@ -247,6 +404,54 @@ mod tests {
         assert_eq!(val(scalar_track(Interp::Step).sample(9.0)), 20.0);
         let e = val(scalar_track(Interp::Ease).sample(2.0));
         assert!(e > 20.0 && e < 26.0);
+    }
+
+    #[test]
+    fn channels_read_and_write() {
+        let mut v = KeyValue::Transform(Transform::default());
+        assert!(Channel::Y.set(&mut v, 1.5));
+        assert!(Channel::RotY.set(&mut v, 30.0));
+        assert!(Channel::ScaleZ.set(&mut v, 2.0));
+        assert_eq!(Channel::Y.get(&v), Some(1.5));
+        assert!((Channel::RotY.get(&v).unwrap() - 30.0).abs() < 1e-3);
+        assert_eq!(Channel::ScaleZ.get(&v), Some(2.0));
+        assert_eq!(Channel::Focal.get(&v), None);
+        assert!(!Channel::Focal.set(&mut v, 3.0));
+        let mut f = KeyValue::Scalar(35.0);
+        assert!(Channel::Focal.set(&mut f, 50.0));
+        assert_eq!(Channel::Focal.get(&f), Some(50.0));
+        assert!((unwrap_degrees(-170.0, 175.0) - 190.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn bezier_curves() {
+        let lin = Interp::Bezier([0.0, 0.0, 1.0, 1.0]);
+        for t in [0.0, 0.1, 0.5, 0.77, 1.0] {
+            assert!((lin.apply(t) - t).abs() < 1e-3, "linear at {t}");
+        }
+        let io = Interp::Bezier([0.42, 0.0, 0.58, 1.0]);
+        assert!((io.apply(0.5) - 0.5).abs() < 1e-3);
+        assert!(io.apply(0.1) < 0.05 && io.apply(0.9) > 0.95);
+        // close to the built-in ease
+        assert!((io.apply(0.3) - Interp::Ease.apply(0.3)).abs() < 0.05);
+        // overshoots above 1 before settling
+        let back = Interp::Bezier([0.34, 1.56, 0.64, 1.0]);
+        assert!((1..20).any(|i| back.apply(i as f32 / 20.0) > 1.0));
+        assert!((back.apply(1.0) - 1.0).abs() < 1e-4);
+        // nonsense handles are clamped, never NaN
+        let wild = Interp::Bezier([f32::NAN, 9.0, -3.0, -9.0]);
+        assert!(wild.apply(0.4).is_finite());
+        // serde: unit presets stay strings, custom curves are {"bezier": [...]}
+        assert_eq!(serde_json::to_value(Interp::Ease).unwrap(), serde_json::json!("ease"));
+        let b: Interp = serde_json::from_value(serde_json::json!({"bezier": [0.1, 0.2, 0.3, 0.4]})).unwrap();
+        assert_eq!(b, Interp::Bezier([0.1, 0.2, 0.3, 0.4]));
+        for i in [Interp::Linear, Interp::Ease, Interp::EaseIn, Interp::EaseOut, Interp::Overshoot] {
+            let h = i.as_bezier().unwrap();
+            let approx = Interp::Bezier(h);
+            for t in [0.25, 0.5, 0.75] {
+                assert!((approx.apply(t) - i.apply(t)).abs() < 0.12, "{i:?} at {t}");
+            }
+        }
     }
 
     #[test]

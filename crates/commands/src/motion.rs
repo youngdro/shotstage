@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use shotstage_core::camera::look_rotation;
 use shotstage_core::eval::{camera_data_at, local_at, world_at};
 use shotstage_core::spatial;
-use shotstage_core::{EntityKind, Interp, Key, KeyValue, Scene, TrackProperty, Transform};
+use shotstage_core::{Channel, EntityKind, Interp, Key, KeyValue, Scene, TrackProperty, Transform};
 
 use crate::builtin::finite3;
 use crate::rig;
@@ -1009,8 +1009,37 @@ struct KeyInterpParams {
     id: String,
     property: TrackProperty,
     frame: f32,
-    /// step, linear, ease, easeIn, easeOut or overshoot: how to move from this key to the next.
+    /// step, linear, ease, easeIn, easeOut, overshoot, or a custom curve
+    /// `{"bezier": [x1, y1, x2, y2]}` (CSS cubic-bezier handles): how to move from this key to
+    /// the next.
     interp: Interp,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct KeyChannelParams {
+    id: String,
+    property: TrackProperty,
+    /// Frame of the key to change.
+    frame: f32,
+    /// x, y, z (metres), rotX, rotY, rotZ (degrees), scaleX, scaleY, scaleZ, or focal (mm).
+    channel: Channel,
+    value: f32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct KeyCurveParams {
+    id: String,
+    /// `transform` (default) or `focalLength`.
+    #[serde(default)]
+    property: Option<TrackProperty>,
+    /// Only these channels (default: the ones that change).
+    #[serde(default)]
+    channels: Option<Vec<Channel>>,
+    /// Samples per channel between the first and last key (default 24, at most 500).
+    #[serde(default)]
+    samples: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1115,10 +1144,78 @@ pub fn commands() -> Vec<Command> {
             let t = track_of(s, &p.id, p.property)?;
             let k = t.keys.iter_mut().find(|k| (k.frame - p.frame).abs() < 1e-3)
                 .ok_or_else(|| CommandError::new("failed", format!("no key at frame {}", p.frame)))?;
-            k.interp = p.interp;
+            k.interp = match p.interp {
+                Interp::Bezier(h) => Interp::Bezier(Interp::clamp_handles(h)),
+                i => i,
+            };
             Ok(Value::Null)
         }),
+        command!("keyframe.setChannel", "Change one number of a keyframe: a position axis (x, y, z), a rotation in degrees (rotX, rotY, rotZ), a scale axis or a camera's focal length. What the curve editor drags.", mutates: true, KeyChannelParams,
+        |s, p| {
+            if !p.value.is_finite() {
+                return Err(CommandError::invalid("`value` must be a number"));
+            }
+            if p.channel == Channel::Focal && !(1.0..=2000.0).contains(&p.value) {
+                return Err(CommandError::invalid("focal length must be 1..=2000 mm"));
+            }
+            let t = track_of(s, &p.id, p.property)?;
+            let k = t.keys.iter_mut().find(|k| (k.frame - p.frame).abs() < 1e-3)
+                .ok_or_else(|| CommandError::new("failed", format!("no key at frame {}", p.frame)))?;
+            if !p.channel.set(&mut k.value, p.value) {
+                return Err(CommandError::invalid(format!("{:?} keys have no {:?} channel", p.property, p.channel)));
+            }
+            Ok(json!({ "value": p.channel.get(&k.value) }))
+        }),
+        command!("keyframe.curve", "The animation curves of an entity: for each channel that changes (or those asked for), its keys (frame, value, easing) and evenly spaced samples, for plotting or checking a move.", mutates: false, KeyCurveParams,
+            |s, p| curve(s, p)),
     ]
+}
+
+fn curve(scene: &Scene, p: KeyCurveParams) -> CmdResult<Value> {
+    let property = p.property.unwrap_or(TrackProperty::Transform);
+    let track = scene
+        .timeline
+        .track(&p.id, property)
+        .ok_or_else(|| CommandError::new("failed", format!("`{}` has no {property:?} keys", p.id)))?;
+    let (Some(first), Some(last)) = (track.keys.first(), track.keys.last()) else {
+        return Ok(json!({ "channels": [] }));
+    };
+    let n = p.samples.unwrap_or(24).clamp(2, 500);
+    let (a, b) = (first.frame, last.frame);
+    let frames: Vec<f32> = (0..n).map(|i| a + (b - a) * i as f32 / (n - 1) as f32).collect();
+    let channels: Vec<Channel> = match p.channels {
+        Some(c) => c,
+        None => Channel::of(property)
+            .iter()
+            .copied()
+            .filter(|c| {
+                let vals: Vec<f32> = track.keys.iter().filter_map(|k| c.get(&k.value)).collect();
+                vals.iter().any(|v| (v - vals[0]).abs() > 1e-4)
+            })
+            .collect(),
+    };
+    let mut out = Vec::new();
+    for c in channels {
+        let mut prev: Option<f32> = None;
+        let mut unwrap = |v: f32| {
+            let v =
+                if c.is_rotation() { prev.map_or(v, |p| shotstage_core::timeline::unwrap_degrees(v, p)) } else { v };
+            prev = Some(v);
+            v
+        };
+        let keys: Vec<Value> = track
+            .keys
+            .iter()
+            .filter_map(|k| Some(json!({ "frame": k.frame, "value": c.get(&k.value)?, "interp": k.interp })))
+            .collect();
+        if keys.is_empty() {
+            return Err(CommandError::invalid(format!("{property:?} keys have no {c:?} channel")));
+        }
+        let samples: Vec<Value> =
+            frames.iter().filter_map(|f| Some(json!([f, unwrap(c.get(&track.sample(*f)?)?)]))).collect();
+        out.push(json!({ "channel": c, "keys": keys, "samples": samples }));
+    }
+    Ok(json!({ "id": p.id, "property": property, "channels": out }))
 }
 
 #[cfg(test)]
@@ -1205,6 +1302,67 @@ mod tests {
             .unwrap();
         let p = world_at(s.scene(), "w", 60.0).unwrap().w_axis.truncate();
         assert!((p - p1).length() < 1e-4);
+    }
+
+    #[test]
+    fn curves_edit_by_channel_and_bezier() {
+        let mut s = crate::Session::default();
+        s.dispatch(
+            "entity.create",
+            json!({"type": "mesh", "id": "box", "primitive": {"shape": "cube", "size": [1, 1, 1]}}),
+        )
+        .unwrap();
+        let key = |s: &mut crate::Session, f: f32, x: f32| {
+            s.dispatch(
+                "keyframe.set",
+                json!({"id": "box", "property": "transform", "frame": f, "interp": "linear",
+                "value": {"kind": "transform", "value": {"translation": [x, 0, 0]}}}),
+            )
+            .unwrap();
+        };
+        key(&mut s, 0.0, 0.0);
+        key(&mut s, 10.0, 2.0);
+        let c = s.dispatch("keyframe.curve", json!({"id": "box", "samples": 11})).unwrap().result;
+        let chans = c["channels"].as_array().unwrap();
+        assert_eq!(chans.len(), 1, "only x changes: {c}");
+        assert_eq!(chans[0]["channel"], "x");
+        assert!((chans[0]["samples"][5][1].as_f64().unwrap() - 1.0).abs() < 1e-4);
+        // drag the second key up: one channel only, the rest of the key stays
+        s.dispatch(
+            "keyframe.setChannel",
+            json!({"id": "box", "property": "transform", "frame": 10, "channel": "y", "value": 3}),
+        )
+        .unwrap();
+        let at = world_at(s.scene(), "box", 10.0).unwrap().w_axis.truncate();
+        assert!((at - glam::Vec3::new(2.0, 3.0, 0.0)).length() < 1e-4, "{at}");
+        // a custom curve: slow start
+        s.dispatch(
+            "keyframe.setInterp",
+            json!({"id": "box", "property": "transform", "frame": 0, "interp": {"bezier": [0.9, 0, 1, 1]}}),
+        )
+        .unwrap();
+        let mid = world_at(s.scene(), "box", 5.0).unwrap().w_axis.truncate();
+        assert!(mid.x < 0.5, "{mid}");
+        let c = s.dispatch("keyframe.curve", json!({"id": "box", "channels": ["x"]})).unwrap().result;
+        assert_eq!(c["channels"][0]["keys"][0]["interp"]["bezier"][0], 0.9f32 as f64);
+        // bad input
+        assert!(
+            s.dispatch(
+                "keyframe.setChannel",
+                json!({"id": "box", "property": "transform", "frame": 3, "channel": "x", "value": 1})
+            )
+            .is_err()
+        );
+        assert!(
+            s.dispatch(
+                "keyframe.setChannel",
+                json!({"id": "box", "property": "transform", "frame": 0, "channel": "focal", "value": 50})
+            )
+            .is_err()
+        );
+        s.dispatch("history.undo", json!({})).unwrap();
+        let mid = world_at(s.scene(), "box", 5.0).unwrap().w_axis.truncate();
+        assert!((mid.x - 1.0).abs() < 1e-3, "undo restores the linear curve: {mid}");
     }
 
     #[test]

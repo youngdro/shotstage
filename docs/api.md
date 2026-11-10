@@ -26,7 +26,7 @@ Units: metres, degrees, frames; +Y up, the ground is y = 0, object fronts face +
 - **Cameras**: [`camera.setLens`](#camerasetlens) [`camera.lookAt`](#cameralookat) [`camera.setActive`](#camerasetactive) [`camera.describe`](#cameradescribe) [`camera.trajectory`](#cameratrajectory) [`camera.orbitMove`](#cameraorbitmove) [`camera.dollyMove`](#cameradollymove) [`camera.frame`](#cameraframe) [`camera.setReference`](#camerasetreference)
 - **People**: [`pose.set`](#poseset) [`pose.aim`](#poseaim) [`pose.get`](#poseget) [`pose.list`](#poselist) [`person.setHair`](#personsethair) [`person.setBody`](#personsetbody) [`person.setOutfit`](#personsetoutfit) [`person.setExpression`](#personsetexpression) [`person.expressions`](#personexpressions) [`pose.hand`](#posehand) [`person.get`](#personget) [`person.lookAt`](#personlookat)
 - **Lights**: [`light.set`](#lightset) [`light.preset`](#lightpreset) [`light.list`](#lightlist) [`environment.set`](#environmentset) [`environment.import`](#environmentimport) [`environment.list`](#environmentlist) [`light.shadows`](#lightshadows) [`light.fromEnvironment`](#lightfromenvironment)
-- **Animation**: [`keyframe.set`](#keyframeset) [`keyframe.delete`](#keyframedelete) [`keyframe.list`](#keyframelist) [`motion.apply`](#motionapply) [`motion.list`](#motionlist) [`keyframe.move`](#keyframemove) [`keyframe.retime`](#keyframeretime) [`keyframe.setInterp`](#keyframesetinterp)
+- **Animation**: [`keyframe.set`](#keyframeset) [`keyframe.delete`](#keyframedelete) [`keyframe.list`](#keyframelist) [`motion.apply`](#motionapply) [`motion.list`](#motionlist) [`keyframe.move`](#keyframemove) [`keyframe.retime`](#keyframeretime) [`keyframe.setInterp`](#keyframesetinterp) [`keyframe.setChannel`](#keyframesetchannel) [`keyframe.curve`](#keyframecurve)
 - **Timeline and shots**: [`timeline.set`](#timelineset) [`shot.create`](#shotcreate) [`shot.delete`](#shotdelete) [`shot.cut`](#shotcut) [`shot.set`](#shotset) [`shot.list`](#shotlist)
 - **Rendering**: [`render.snapshot`](#rendersnapshot) [`render.storyboard`](#renderstoryboard) [`render.shotSheet`](#rendershotsheet) [`render.sequence`](#rendersequence)
 - **Editor view**: [`editor.select`](#editorselect) [`editor.setFrame`](#editorsetframe) [`editor.setView`](#editorsetview) [`editor.editMesh`](#editoreditmesh) [`editor.editSelect`](#editoreditselect) [`editor.uvEditor`](#editoruveditor) [`editor.uvSelect`](#editoruvselect) [`editor.state`](#editorstate)
@@ -1111,7 +1111,7 @@ _changes the scene_ · MCP tool `camera_dollyMove`
 | `distance` **required** | number | Metres to move along the view direction (positive = push in). |
 | `end` **required** | integer |  |
 | `id` **required** | string | Camera to animate. |
-| `interp` | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` |  |
+| `interp` | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` \| object |  |
 | `start` **required** | integer |  |
 
 ### camera.frame
@@ -1402,7 +1402,7 @@ _changes the scene_ · MCP tool `keyframe_set`
 | --- | --- | --- |
 | `frame` **required** | number |  |
 | `id` **required** | string |  |
-| `interp` | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` | `ease` (default), `linear` or `step`: how to move from this key to the next. |
+| `interp` | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` \| object | `ease` (default), `linear` or `step`: how to move from this key to the next. |
 | `property` **required** | `transform` \| `focalLength` \| `expression` | `transform` (any entity) or `focalLength` (cameras). |
 | `value` | object \| object \| object | Value to key. Default: the entity's current value. |
 
@@ -1434,7 +1434,7 @@ _changes the scene_ · MCP tool `motion_apply`
 | Param | Type | |
 | --- | --- | --- |
 | `duration` | number | Length in seconds. Default: the preset's. |
-| `ease` | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` | Easing of the move: ease (default), linear, easeIn, easeOut, overshoot. |
+| `ease` | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` \| object | Easing of the move: ease (default), linear, easeIn, easeOut, overshoot. |
 | `intensity` | number | How far / how strong, 0.1..=5. Default 1. |
 | `points` | array | pathFollow: world points to pass through. |
 | `preset` **required** | string | Preset name, see `motion.list`. |
@@ -1484,8 +1484,33 @@ _changes the scene_ · MCP tool `keyframe_setInterp`
 | --- | --- | --- |
 | `frame` **required** | number |  |
 | `id` **required** | string |  |
-| `interp` **required** | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` | step, linear, ease, easeIn, easeOut or overshoot: how to move from this key to the next. |
+| `interp` **required** | `linear` \| `step` \| `ease` \| `easeIn` \| `easeOut` \| `overshoot` \| object | step, linear, ease, easeIn, easeOut, overshoot, or a custom curve `{"bezier": [x1, y1, x2, y2]}` (CSS cubic-bezier handles): how to move from this key to the next. |
 | `property` **required** | `transform` \| `focalLength` \| `expression` |  |
+
+### keyframe.setChannel
+
+Change one number of a keyframe: a position axis (x, y, z), a rotation in degrees (rotX, rotY, rotZ), a scale axis or a camera's focal length. What the curve editor drags.  
+_changes the scene_ · MCP tool `keyframe_setChannel`
+
+| Param | Type | |
+| --- | --- | --- |
+| `channel` **required** | `x` \| `y` \| `z` \| `rotX` \| `rotY` \| `rotZ` \| `scaleX` \| `scaleY` \| `scaleZ` \| `focal` | x, y, z (metres), rotX, rotY, rotZ (degrees), scaleX, scaleY, scaleZ, or focal (mm). |
+| `frame` **required** | number | Frame of the key to change. |
+| `id` **required** | string |  |
+| `property` **required** | `transform` \| `focalLength` \| `expression` |  |
+| `value` **required** | number |  |
+
+### keyframe.curve
+
+The animation curves of an entity: for each channel that changes (or those asked for), its keys (frame, value, easing) and evenly spaced samples, for plotting or checking a move.  
+_query_ · MCP tool `keyframe_curve`
+
+| Param | Type | |
+| --- | --- | --- |
+| `channels` | array | Only these channels (default: the ones that change). |
+| `id` **required** | string |  |
+| `property` | `transform` \| `focalLength` \| `expression` | `transform` (default) or `focalLength`. |
+| `samples` | integer | Samples per channel between the first and last key (default 24, at most 500). |
 
 
 ## Timeline and shots

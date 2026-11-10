@@ -84,7 +84,7 @@ pub async fn mount(container: JsValue, options: JsValue) -> Result<Shotstage, Js
         _ => Session::default(),
     };
     let canvas: HtmlCanvasElement = document.create_element("canvas")?.dyn_into()?;
-    canvas.set_attribute("style", "display:block;width:100%;height:100%;outline:none;")?;
+    canvas.set_attribute("style", "display:block;width:100%;height:100%;outline:none;touch-action:none;")?;
     canvas.set_attribute("data-shotstage", "")?;
     container.append_child(&canvas)?;
 

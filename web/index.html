@@ -2,11 +2,19 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#111111">
   <title>shotstage · 在线 3D 导播台</title>
   <meta name="description" content="Block out scenes, people, cameras and moves in the browser; share a scene as a link.">
   <style>
     html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 13px system-ui, sans-serif; overflow: hidden; }
+    /* Phones and tablets: the editor takes every finger gesture (no page zoom, scroll bounce or
+       text selection), and fills the screen between the browser bars. */
+    html, body { overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+    body { height: 100dvh; }
+    #stage canvas { touch-action: none; }
     #bridge { position: fixed; right: 12px; bottom: 8px; color: #888; background: #111d; padding: 1px 8px; border-radius: 9px; pointer-events: none; z-index: 5; }
     #bridge:empty { display: none; }
     #bridge.connected { color: #6c6; }

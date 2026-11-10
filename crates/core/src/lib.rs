@@ -31,7 +31,7 @@ pub use light::{LightData, LightKind};
 pub use mesh::{Mesh, MeshSource, Modifier, Primitive, Skin, TriMesh};
 pub use scene::{CameraReference, Entity, EntityKind, Scene, Transform};
 pub use shared::Shared;
-pub use timeline::{ExpressionMix, Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
+pub use timeline::{Channel, ExpressionMix, Interp, Key, KeyValue, Shot, Timeline, Track, TrackProperty};
 
 /// Errors produced by scene operations. Messages are written for agents as well as people.
 #[derive(Debug, thiserror::Error, PartialEq)]

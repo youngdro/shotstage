@@ -5,6 +5,7 @@
 //! registry as the CLI and MCP server (see `web.rs`).
 
 mod autosave;
+mod curves;
 mod files;
 pub mod hub;
 pub mod i18n;

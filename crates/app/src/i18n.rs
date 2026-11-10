@@ -176,6 +176,23 @@ Shift+拖动：抬起 · Alt+拖动：复制 · R / Shift+R 或拖动时滚轮�
 按键：Cmd/Ctrl+Z 撤销 · Cmd/Ctrl+Shift+Z 重做 · Cmd/Ctrl+C / X / V 复制、剪切、粘贴（也能跨场景）· Cmd/Ctrl+D 复制一份 · Delete 删除 · 空格 播放 · K 关键帧 · F 聚焦 · Cmd/Ctrl+S 保存。\n\
 多个物体：Shift+单击 加选 · 在空白处 Cmd/Ctrl+拖动 框选 · Cmd/Ctrl+G 编组 · Cmd/Ctrl+Shift+G 解组。";
 
+/// How to work the view with fingers (phones and tablets).
+pub fn touch_help() -> &'static str {
+    if zh() {
+        "手指操作：\n\
+单指拖空白处：旋转视角 · 双指拖动：平移 · 双指捏合：缩放 · 双指扭转：转动视角。\n\
+轻点：选中 · 双击：聚焦 · 单指拖物体：在表面上滑动 · 拖彩色箭头 / 圆环：沿轴移动、旋转。\n\
+素材：轻点放到视图中央，或横着拖进场景（上下拖动是滚动列表）。\n\
+小屏幕上，顶栏的「素材」「属性」按钮会把面板滑出来盖在视图上，再点一次收起。"
+    } else {
+        "With fingers:\n\
+One finger on empty space: orbit · two-finger drag: pan · pinch: zoom · twist: turn the view.\n\
+Tap: select · double-tap: focus · drag an object: slide it over surfaces · drag the coloured arrows / rings: move along an axis, turn.\n\
+Blocks: tap to drop one in the middle of the view, or drag it sideways into the scene (up and down scrolls the list).\n\
+On a small screen the Blocks and Properties buttons in the top bar slide those panels over the view; tap again to put them away."
+    }
+}
+
 /// English wording → Chinese.
 static ZH_TABLE: &[(&str, &str)] = &[
     // top bar, toolbars, menus
@@ -183,6 +200,16 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("Save", "保存"),
     ("New", "新建"),
     ("Undo", "撤销"),
+    ("☰ Menu", "☰ 菜单"),
+    ("＋ Blocks", "＋ 素材"),
+    ("Properties", "属性"),
+    ("✕ Close", "✕ 收起"),
+    ("View options ▾", "视图选项 ▾"),
+    ("Search every block, move, pose, template and action", "搜索所有素材、运动、姿势、模板和操作"),
+    (
+        "Tap to drop one in the middle of the view, or drag it sideways into the scene.",
+        "轻点放到视图中央，或横着拖进场景。",
+    ),
     ("Redo", "重做"),
     ("History", "历史"),
     ("Import…", "导入…"),
@@ -1783,6 +1810,53 @@ static ZH_TABLE: &[(&str, &str)] = &[
     ("Redo up to this step", "重做到这一步"),
     ("Go back to before this step", "回到这一步之前"),
     ("● Now", "● 当前"),
+    // timeline: curve editor and cut preview
+    ("Curves", "曲线"),
+    ("Edit curve", "编辑曲线"),
+    (
+        "The selection's animation as curves: drag keys to change values, click a stretch to shape its easing",
+        "把选中对象的动画显示为曲线：拖动关键帧改数值，点击一段调整它的缓动",
+    ),
+    (
+        "Curves: select an animated object or camera to see its curves.",
+        "曲线：选中一个有动画的物体或相机即可看到它的曲线。",
+    ),
+    (
+        "Curves: this has no keys yet. Press ◆ Key at two frames, or use a preset under Animate.",
+        "曲线：它还没有关键帧。在两个帧上按 ◆ 关键帧，或用右侧“动画”里的预设。",
+    ),
+    (
+        "Nothing changes yet: key this object at two frames with different poses.",
+        "还没有变化：在两个帧上以不同姿态给它打关键帧。",
+    ),
+    ("Changing only", "只看变化的"),
+    ("Show all", "显示全部"),
+    ("Holds, then jumps", "保持不动，然后跳变"),
+    ("Custom curve…", "自定义曲线…"),
+    ("Shape this stretch's easing with two handles in the curve editor", "在曲线编辑器里用两个手柄调整这一段的缓动"),
+    ("Position X", "位置 X"),
+    ("Position Y", "位置 Y"),
+    ("Position Z", "位置 Z"),
+    ("Tilt (rot X)", "俯仰（旋转 X）"),
+    ("Pan (rot Y)", "摇移（旋转 Y）"),
+    ("Roll (rot Z)", "翻滚（旋转 Z）"),
+    ("Scale X", "缩放 X"),
+    ("Scale Y", "缩放 Y"),
+    ("Scale Z", "缩放 Z"),
+    ("Previous cut ( [ )", "上一个切点（[）"),
+    ("Next cut ( ] )", "下一个切点（]）"),
+    ("✂ Preview cut", "✂ 预览切换"),
+    (
+        "Play through the next cut: a moment before it to a moment after, through the shot cameras",
+        "播放下一个镜头切换：从切点前一小段到切点后一小段，通过镜头相机观看",
+    ),
+    ("🔁 Loop shot", "🔁 循环当前镜头"),
+    ("Playback repeats the shot under the playhead", "播放时只循环播放头所在的镜头"),
+    (
+        "The shot after the next cut: click to play through the cut, double-click to jump to it",
+        "下一次切换后的镜头：单击播放这次切换，双击跳到那里",
+    ),
+    ("Drag to move, drag an edge to trim, double-click to look through", "拖动可移动，拖边缘可裁剪，双击通过它观看"),
 ];
 
 #[cfg(test)]
