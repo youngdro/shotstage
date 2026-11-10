@@ -252,6 +252,107 @@ struct Pip {
     rect: Option<Rect>,
 }
 
+impl Pip {
+    fn new(device: &wgpu::Device) -> Self {
+        Self { renderer: Renderer::new(device), tex: None, rect: None, key: None, at: 0.0 }
+    }
+
+    /// Render `camera` at `frame` when that picture changed (at most ~20 times a second);
+    /// the texture to show, once there is one. `look`: pass, studio light, shadows, scene
+    /// revision, time now.
+    fn update(
+        &mut self,
+        rs: &eframe::egui_wgpu::RenderState,
+        scene: &Scene,
+        camera: &str,
+        frame: f32,
+        px: Vec2,
+        (pass, studio_light, shadows, revision, now): (Pass, bool, bool, u64, f64),
+    ) -> Option<egui::TextureId> {
+        let ppx = (px.x.max(1.0) as u32, px.y.max(1.0) as u32);
+        let key = format!("{revision}|{frame}|{camera}|{:?}|{ppx:?}|{studio_light}|{shadows}", pass as u32);
+        if self.key.as_deref() != Some(key.as_str()) && (now - self.at >= 0.05 || self.key.is_none()) {
+            let (Ok(lens), Ok(world)) = (camera_data_at(scene, camera, frame), world_at(scene, camera, frame)) else {
+                return None;
+            };
+            let a = lens.aspect.clamp(0.3, 4.0);
+            let view = View { view: world.inverse(), proj: lens.projection(a), depth: None };
+            let mut ov = shotstage_render::clean_overlay(camera);
+            ov.studio_light = studio_light;
+            ov.no_shadows = !shadows;
+            self.renderer.render(&rs.device, &rs.queue, scene, frame, view, pass, &ov, ppx);
+            self.key = Some(key);
+            self.at = now;
+            let generation = self.renderer.target_generation;
+            if self.tex.is_none_or(|(_, g)| g != generation)
+                && let Some(v) = self.renderer.color_view()
+            {
+                let mut egui_renderer = rs.renderer.write();
+                if let Some((old, _)) = self.tex.take() {
+                    egui_renderer.free_texture(&old);
+                }
+                self.tex =
+                    Some((egui_renderer.register_native_texture(&rs.device, v, wgpu::FilterMode::Linear), generation));
+            }
+        }
+        self.tex.map(|(t, _)| t)
+    }
+}
+
+/// A small monitor over the view: a picture with a label, clickable.
+fn monitor(
+    ctx: &egui::Context,
+    id: &str,
+    tex: egui::TextureId,
+    rect: Rect,
+    label: &str,
+    accent: Color32,
+) -> egui::Response {
+    egui::Area::new(egui::Id::unique(id))
+        .order(egui::Order::Middle)
+        .fixed_pos(rect.min)
+        .show(ctx, |ui| {
+            let (r, mut p) = ui.allocate_painter(rect.size(), Sense::click());
+            p.set_clip_rect(r.rect.expand(2.0));
+            p.image(tex, r.rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            let stroke = if r.hovered() { (1.5, accent) } else { (1.0, Color32::from_white_alpha(60)) };
+            p.rect_stroke(r.rect, 3.0, stroke, egui::StrokeKind::Outside);
+            let g = p.layout_no_wrap(label.to_string(), egui::FontId::proportional(11.0), Color32::WHITE);
+            let lr = Rect::from_min_size(r.rect.min + Vec2::new(4.0, 4.0), g.size() + Vec2::new(8.0, 4.0));
+            p.rect_filled(lr, 3.0, Color32::from_black_alpha(140));
+            p.galley(lr.min + Vec2::new(4.0, 2.0), g, Color32::WHITE);
+            r.on_hover_cursor(CursorIcon::PointingHand)
+        })
+        .inner
+}
+
+/// The frames where the picture switches to another shot (each later shot's first frame), in
+/// order.
+fn cuts(scene: &Scene) -> Vec<(f32, shotstage_core::Shot)> {
+    let mut shots = scene.timeline.shots.clone();
+    shots.sort_by_key(|s| s.start);
+    let mut out = Vec::new();
+    for w in shots.windows(2) {
+        if w[1].start > scene.timeline.start {
+            out.push((w[1].start as f32, w[1].clone()));
+        }
+    }
+    out
+}
+
+/// The first cut after `frame`.
+fn next_cut(scene: &Scene, frame: f32) -> Option<(f32, shotstage_core::Shot)> {
+    cuts(scene).into_iter().find(|(f, _)| *f > frame + 0.01)
+}
+
+/// A stretch being played on its own (a cut preview).
+#[derive(Clone, Copy)]
+struct PlayRange {
+    end: f32,
+    /// Look through the cameras only for this preview: back to the free view after it.
+    restore_free_view: bool,
+}
+
 /// One entry of the quick-actions box.
 struct QuickItem {
     label: String,
@@ -380,7 +481,7 @@ const COMMON_POSES: &[&str] = &[
 ];
 
 /// The one accent colour of the UI.
-const ACCENT: Color32 = Color32::from_rgb(70, 150, 255);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(70, 150, 255);
 
 const HELP: &str = "Quick actions: Cmd/Ctrl+K or / opens a search box for every block, move, pose, template and action.\n\
 Blocks: drag from the left panel into the view (or click to drop in the middle).\n\
@@ -790,11 +891,22 @@ pub struct EditorApp {
     texture: Option<(egui::TextureId, u64)>,
     /// The small shot-camera preview in the corner of the free view.
     pip: Option<Pip>,
+    /// The next shot's monitor beside it.
+    pip_next: Option<Pip>,
+    /// Playing a stretch only: stop (or loop back) at its end.
+    play_range: Option<PlayRange>,
+    /// Playback loops inside the shot under the playhead.
+    loop_shot: bool,
     cam_preview: bool,
     /// The frames the timeline shows when zoomed in (None: all of it).
     tl_view: Option<(f32, f32)>,
     /// The storyboard strip above the timeline.
     show_board: bool,
+    /// The curve editor under the keyframe rows.
+    show_curves: bool,
+    /// The shots row is hovered: keep the storyboard pictures ready for its tooltips.
+    board_wanted: bool,
+    curves: crate::curves::CurveEditor,
     board: Option<crate::storyboard::Storyboard>,
     /// What scrolling does in the view, and whether the last wheel input looked like a trackpad.
     scroll_mode: ScrollMode,
@@ -917,8 +1029,14 @@ impl EditorApp {
             renderer,
             texture: None,
             pip: None,
+            pip_next: None,
+            play_range: None,
+            loop_shot: false,
             cam_preview: true,
             show_board: false,
+            show_curves: false,
+            board_wanted: false,
+            curves: Default::default(),
             tl_view: None,
             board: None,
             scroll_mode: ScrollMode::Auto,
@@ -1959,6 +2077,39 @@ impl EditorApp {
     fn frame(&self) -> f32 {
         self.hub.borrow().frame
     }
+
+    /// Play through the cut at frame `at`: from a moment before it to a moment after, through
+    /// the shot cameras, then stop (back in the free view if that is where it started).
+    fn preview_cut(&mut self, at: f32) {
+        let t = self.scene().timeline.clone();
+        let pad = (t.fps * 1.5).max(1.0);
+        let restore = !self.look_through;
+        let mut h = self.hub.borrow_mut();
+        h.frame = (at - pad).max(t.start as f32);
+        h.look_through = true;
+        drop(h);
+        self.look_through = true;
+        self.play_range = Some(PlayRange { end: (at + pad).min(t.end as f32), restore_free_view: restore });
+        self.playing = true;
+    }
+
+    /// Put the playhead on the previous (`dir` < 0) or next cut between shots.
+    fn jump_cut(&mut self, dir: i32) {
+        let scene = self.scene();
+        let now = self.frame();
+        let mut stops: Vec<f32> = cuts(&scene).into_iter().map(|(f, _)| f).collect();
+        stops.push(scene.timeline.start as f32);
+        stops.sort_by(f32::total_cmp);
+        let to = if dir < 0 {
+            stops.iter().rev().find(|f| **f < now - 0.5).copied()
+        } else {
+            stops.iter().find(|f| **f > now + 0.5).copied()
+        };
+        if let Some(f) = to {
+            self.playing = false;
+            self.hub.borrow_mut().frame = f;
+        }
+    }
     fn selected(&self) -> Option<String> {
         self.hub.borrow().selected.clone()
     }
@@ -2024,13 +2175,32 @@ impl eframe::App for EditorApp {
                 self.last_subject = Some(root_of(&scene, &sel));
             }
         }
+        if !self.playing {
+            self.play_range = None;
+        }
         if self.playing {
             let dt = ui.input(|i| i.stable_dt).min(0.1);
             let scene = self.scene();
             let t = &scene.timeline;
             let mut h = self.hub.borrow_mut();
+            let before = h.frame;
             h.frame += dt * t.fps;
-            if h.frame > t.end as f32 {
+            let looping = self.loop_shot.then(|| t.shot_at(before)).flatten();
+            if let Some(r) = self.play_range {
+                if h.frame >= r.end {
+                    h.frame = r.end;
+                    self.playing = false;
+                    self.play_range = None;
+                    if r.restore_free_view {
+                        self.look_through = false;
+                        h.look_through = false;
+                    }
+                }
+            } else if let Some(sh) = looping
+                && h.frame >= sh.end as f32 + 1.0
+            {
+                h.frame = sh.start as f32;
+            } else if h.frame > t.end as f32 {
                 h.frame = t.start as f32;
             }
             ui.ctx().request_repaint();
@@ -2044,6 +2214,10 @@ impl eframe::App for EditorApp {
         }
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("timeline").resizable(false).show(ui, |ui| self.bottom(ui));
+        if self.board_wanted && !self.show_board {
+            self.update_board(ui.ctx(), frame);
+        }
+        self.board_wanted = false;
         if self.show_board {
             egui::Panel::bottom("storyboard").resizable(false).show(ui, |ui| self.storyboard_strip(ui, frame));
         }
@@ -2194,6 +2368,18 @@ impl EditorApp {
                 }
                 Err(e) => self.toast(crate::lf!("Could not ungroup: {}", "无法解组：{}", e.message)),
             }
+        }
+        let cut_step = ui.input(|i| {
+            if i.key_pressed(egui::Key::OpenBracket) {
+                -1
+            } else if i.key_pressed(egui::Key::CloseBracket) {
+                1
+            } else {
+                0
+            }
+        });
+        if cut_step != 0 {
+            self.jump_cut(cut_step);
         }
         let (key, home, end, step) = ui.input(|i| {
             let step = if i.key_pressed(egui::Key::ArrowLeft) {
@@ -3829,6 +4015,36 @@ impl EditorApp {
                 self.hub.borrow_mut().look_through = true;
                 self.playing = true;
             }
+            if !t.shots.is_empty() {
+                let has_cuts = !cuts(&scene).is_empty();
+                if ui
+                    .add_enabled(has_cuts, egui::Button::new(tr("⇤")).small())
+                    .on_hover_text(tr("Previous cut ( [ )"))
+                    .clicked()
+                {
+                    self.jump_cut(-1);
+                }
+                let upcoming = next_cut(&scene, self.frame()).or_else(|| cuts(&scene).into_iter().next());
+                if ui
+                    .add_enabled(upcoming.is_some(), egui::Button::new(tr("✂ Preview cut")).small())
+                    .on_hover_text(tr(
+                        "Play through the next cut: a moment before it to a moment after, through the shot cameras",
+                    ))
+                    .clicked()
+                    && let Some((f, _)) = upcoming
+                {
+                    self.preview_cut(f);
+                }
+                if ui
+                    .add_enabled(has_cuts, egui::Button::new(tr("⇥")).small())
+                    .on_hover_text(tr("Next cut ( ] )"))
+                    .clicked()
+                {
+                    self.jump_cut(1);
+                }
+                ui.toggle_value(&mut self.loop_shot, tr("🔁 Loop shot"))
+                    .on_hover_text(tr("Playback repeats the shot under the playhead"));
+            }
             ui.separator();
             ui.monospace(format!("{:>4.0}", self.frame()));
             ui.weak(format!("/ {} · {:.2} s", t.end, (self.frame() - t.start as f32) / fps));
@@ -3888,6 +4104,9 @@ impl EditorApp {
             {
                 self.tl_view = None;
             }
+            ui.toggle_value(&mut self.show_curves, tr("Curves")).on_hover_text(tr(
+                "The selection's animation as curves: drag keys to change values, click a stretch to shape its easing",
+            ));
             ui.toggle_value(&mut self.show_board, tr("Storyboard"))
                 .on_hover_text(tr("Every shot as a picture through its camera; click one to go there"));
             ui.separator();
@@ -4112,7 +4331,36 @@ impl EditorApp {
         if let Some(h) = sresp.hover_pos() {
             match shot_at(h.x) {
                 Some((_, 1 | 2)) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
-                Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
+                Some((id, _)) => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                    // what the shot shows, from the storyboard pictures
+                    self.board_wanted = true;
+                    if self.shot_drag.is_none()
+                        && let Some(i) = t.shots.iter().position(|s| s.id == id)
+                    {
+                        let sh = &t.shots[i];
+                        let pic = self.board.as_ref().and_then(|b| b.get(i));
+                        let cam = scene.get(&sh.camera).map(|e| e.name.clone()).unwrap_or(sh.camera.clone());
+                        let secs = (sh.end + 1 - sh.start) as f32 / t.fps.max(1.0);
+                        sresp.clone().on_hover_ui_at_pointer(|ui| {
+                            if let Some((tex, uv, aspect)) = pic {
+                                let h = 90.0;
+                                ui.add(
+                                    egui::Image::new(egui::load::SizedTexture::new(tex, Vec2::new(h * aspect, h)))
+                                        .uv(uv),
+                                );
+                            }
+                            ui.label(crate::lf!(
+                                "{} · {cam} · frames {}–{} · {secs:.1}s",
+                                "{} · {cam} · 第 {}–{} 帧 · {secs:.1} 秒",
+                                sh.name,
+                                sh.start,
+                                sh.end
+                            ));
+                            ui.weak(tr("Drag to move, drag an edge to trim, double-click to look through"));
+                        });
+                    }
+                }
                 None => {}
             }
         }
@@ -4334,6 +4582,23 @@ impl EditorApp {
                             ui.close();
                         }
                     }
+                    let curve = row.tracks.iter().filter(|(id, prop)| {
+                        *prop != TrackProperty::Expression
+                            && scene.timeline.track(id, *prop).is_some_and(|tr| {
+                                tr.keys.iter().position(|k| (k.frame - f).abs() < 1e-3).is_some_and(|i| i + 1 < tr.keys.len())
+                            })
+                    }).min_by_key(|(id, _)| *id != row.id);
+                    if let Some((id, prop)) = curve
+                        && ui
+                            .button(tr("Custom curve…"))
+                            .on_hover_text(tr("Shape this stretch's easing with two handles in the curve editor"))
+                            .clicked()
+                    {
+                        self.select(Some(id.clone()));
+                        self.show_curves = true;
+                        self.curves.focus(id, *prop, f);
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button(tr("Delete key")).clicked() {
                         let steps: Vec<Value> = row.tracks.iter().filter(|(id, prop)| scene.timeline.track(id, *prop).is_some_and(|tr| tr.keys.iter().any(|k| (k.frame - f).abs() < 1e-3)))
@@ -4344,19 +4609,59 @@ impl EditorApp {
                 });
             }
         });
+        // the cuts, as faint lines down the rows
+        for (f, _) in cuts(scene) {
+            let cx = x_of(f);
+            if cx > area.left() && cx < area.right() {
+                ui.painter().line_segment(
+                    [egui::pos2(cx, srow.top()), egui::pos2(cx, playhead_bottom)],
+                    (1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 40)),
+                );
+            }
+        }
         // playhead across the ruler and the rows
         let x = x_of(self.frame());
         ui.painter().line_segment(
             [egui::pos2(x, ruler.top()), egui::pos2(x, playhead_bottom)],
             (1.5, Color32::from_rgb(255, 120, 90)),
         );
+        if self.show_curves {
+            self.curve_panel(ui, scene, label_w, (t0, t1));
+        }
     }
 
-    /// One card per shot: its picture at the middle frame, number, name, length and camera.
-    /// Clicking a card puts the playhead at the shot's start and looks through its camera.
-    fn storyboard_strip(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+    /// The curve editor for the selection (or its group), under the keyframe rows.
+    fn curve_panel(&mut self, ui: &mut egui::Ui, scene: &Scene, label_w: f32, view: (f32, f32)) {
+        let Some(sel) = self.selected() else {
+            ui.weak(tr("Curves: select an animated object or camera to see its curves."));
+            return;
+        };
+        let root = root_of(scene, &sel);
+        let Some(id) = crate::curves::subject(scene, &sel, &root) else {
+            ui.weak(tr("Curves: this has no keys yet. Press ◆ Key at two frames, or use a preset under Animate."));
+            return;
+        };
+        let now = self.frame();
+        let actions = self.curves.show(ui, scene, &id, label_w, view, now, 150.0);
+        for a in actions {
+            match a {
+                crate::curves::CurveAction::Run { merge: Some(m), command, params } => {
+                    self.run_key(&m, command, params);
+                }
+                crate::curves::CurveAction::Run { merge: None, command, params } => {
+                    self.run(command, params);
+                }
+                crate::curves::CurveAction::SetFrame(f) => {
+                    self.playing = false;
+                    self.hub.borrow_mut().frame = f;
+                }
+            }
+        }
+    }
+
+    /// Bring the storyboard pictures up to date (a couple per frame).
+    fn update_board(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let scene = self.scene();
-        let shots = scene.timeline.shots.clone();
         if let Some(rs) = frame.wgpu_render_state() {
             let board = self.board.get_or_insert_with(|| crate::storyboard::Storyboard::new(&rs.device));
             let look = crate::storyboard::Look {
@@ -4369,9 +4674,17 @@ impl EditorApp {
             // then); they catch up when the drag ends
             let dragging = !matches!(self.drag, Gesture::Idle | Gesture::Cancelled) || self.palette.is_some();
             if !dragging && board.update(rs, &scene, &look, 2) {
-                ui.ctx().request_repaint();
+                ctx.request_repaint();
             }
         }
+    }
+
+    /// One card per shot: its picture at the middle frame, number, name, length and camera.
+    /// Clicking a card puts the playhead at the shot's start and looks through its camera.
+    fn storyboard_strip(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        let scene = self.scene();
+        let shots = scene.timeline.shots.clone();
+        self.update_board(ui.ctx(), frame);
         ui.add_space(4.0);
         if shots.is_empty() {
             ui.weak(tr("No shots yet: add one with + Shot, or right-click the Shots row on the timeline."));
@@ -5365,93 +5678,75 @@ impl EditorApp {
             let id = egui_renderer.register_native_texture(&rs.device, view_tex, wgpu::FilterMode::Linear);
             self.texture = Some((id, generation));
         }
-        // the shot camera's view in the corner, re-rendered only when what it shows changes
+        // the shot camera's view in the corner (the programme), and beside it the next shot
+        // (what the cut will switch to), each re-rendered only when what it shows changes
         let pip_cam = (!clean && self.cam_preview && self.palette.is_none()).then(|| camera_id_at(&scene, f)).flatten();
         let mut pip_show = None;
-        if let Some(p) = self.pip.as_mut() {
+        let mut next_show = None;
+        for p in [self.pip.as_mut(), self.pip_next.as_mut()].into_iter().flatten() {
             p.rect = None;
         }
+        let revision = self.hub.borrow().session.revision();
+        let now = ui.input(|i| i.time);
+        let look = (pass, self.studio_light, self.shadows, revision, now);
+        let next_cut = pip_cam.as_ref().and_then(|_| next_cut(&scene, f));
         if let Some(c) = pip_cam
-            && let (Ok(lens), Ok(world)) = (camera_data_at(&scene, &c, f), world_at(&scene, &c, f))
+            && let Ok(lens) = camera_data_at(&scene, &c, f)
         {
             let a = lens.aspect.clamp(0.3, 4.0);
             let w = (full.width() * 0.24).clamp(150.0, 300.0);
             let size = Vec2::new(w, w / a);
             let prect = Rect::from_min_size(full.right_bottom() - size - Vec2::splat(12.0), size);
-            let ppx = ((size.x * ppp).round() as u32, (size.y * ppp).round() as u32);
-            let pip = self.pip.get_or_insert_with(|| Pip {
-                renderer: Renderer::new(&rs.device),
-                tex: None,
-                rect: None,
-                key: None,
-                at: 0.0,
-            });
-            let key = format!(
-                "{}|{f}|{c}|{:?}|{ppx:?}|{}|{}",
-                self.hub.borrow().session.revision(),
-                pass as u32,
-                self.studio_light,
-                self.shadows
-            );
-            let now = ui.input(|i| i.time);
-            if pip.key.as_deref() != Some(key.as_str()) {
-                // at most ~20 times a second while something is being dragged
-                if now - pip.at >= 0.05 || pip.key.is_none() {
-                    let view = View { view: world.inverse(), proj: lens.projection(a), depth: None };
-                    let mut ov = shotstage_render::clean_overlay(&c);
-                    ov.studio_light = self.studio_light;
-                    ov.no_shadows = !self.shadows;
-                    pip.renderer.render(&rs.device, &rs.queue, &scene, f, view, pass, &ov, ppx);
-                    pip.key = Some(key);
-                    pip.at = now;
-                    let generation = pip.renderer.target_generation;
-                    if pip.tex.is_none_or(|(_, g)| g != generation)
-                        && let Some(v) = pip.renderer.color_view()
-                    {
-                        let mut egui_renderer = rs.renderer.write();
-                        if let Some((old, _)) = pip.tex.take() {
-                            egui_renderer.free_texture(&old);
-                        }
-                        pip.tex = Some((
-                            egui_renderer.register_native_texture(&rs.device, v, wgpu::FilterMode::Linear),
-                            generation,
-                        ));
-                    }
-                } else {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-                }
-            }
-            if let Some((tex, _)) = pip.tex {
+            let pip = self.pip.get_or_insert_with(|| Pip::new(&rs.device));
+            if let Some(tex) = pip.update(rs, &scene, &c, f, (size * ppp).round(), look) {
                 pip.rect = Some(prect);
-                let name = scene.get(&c).map(|e| e.name.clone()).unwrap_or(c.clone());
+                let cam = scene.get(&c).map(|e| e.name.clone()).unwrap_or(c.clone());
+                let name = match scene.timeline.shot_at(f) {
+                    Some(sh) => format!("{} · {cam}", sh.name),
+                    None => cam,
+                };
                 pip_show = Some((tex, prect, name));
+            } else if pip.key.is_some() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            // the next shot, smaller, to the left
+            if let Some((nf, shot)) = next_cut.clone()
+                && let Ok(nl) = camera_data_at(&scene, &shot.camera, nf)
+            {
+                let na = nl.aspect.clamp(0.3, 4.0);
+                let nw = w * 0.62;
+                let nsize = Vec2::new(nw, nw / na);
+                let nrect =
+                    Rect::from_min_size(egui::pos2(prect.left() - nsize.x - 10.0, prect.bottom() - nsize.y), nsize);
+                if nrect.left() > full.left() + 8.0 {
+                    let np = self.pip_next.get_or_insert_with(|| Pip::new(&rs.device));
+                    if let Some(tex) = np.update(rs, &scene, &shot.camera, nf, (nsize * ppp).round(), look) {
+                        np.rect = Some(nrect);
+                        let secs = (nf - f) / scene.timeline.fps.max(1.0);
+                        let label = crate::lf!("Next in {secs:.1}s · {}", "{secs:.1} 秒后切到 · {}", shot.name);
+                        next_show = Some((tex, nrect, label, nf));
+                    }
+                }
             }
         }
         if let Some((tex, prect, name)) = pip_show {
-            let r = egui::Area::new(egui::Id::unique("cam_preview"))
-                .order(egui::Order::Middle)
-                .fixed_pos(prect.min)
-                .show(ui.ctx(), |ui| {
-                    let (r, p) = ui.allocate_painter(prect.size(), Sense::click());
-                    p.image(
-                        tex,
-                        r.rect,
-                        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                    let stroke = if r.hovered() { (1.5, ACCENT) } else { (1.0, Color32::from_white_alpha(60)) };
-                    p.rect_stroke(r.rect, 3.0, stroke, egui::StrokeKind::Outside);
-                    let label = p.layout_no_wrap(name, egui::FontId::proportional(11.0), Color32::WHITE);
-                    let lr = Rect::from_min_size(r.rect.min + Vec2::new(4.0, 4.0), label.size() + Vec2::new(8.0, 4.0));
-                    p.rect_filled(lr, 3.0, Color32::from_black_alpha(140));
-                    p.galley(lr.min + Vec2::new(4.0, 2.0), label, Color32::WHITE);
-                    r.on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text(tr("Shot camera at the playhead: click to look through it"))
-                })
-                .inner;
+            let r = monitor(ui.ctx(), "cam_preview", tex, prect, &name, ACCENT)
+                .on_hover_text(tr("Shot camera at the playhead: click to look through it"));
             if r.clicked() {
                 self.look_through = true;
                 self.hub.borrow_mut().look_through = true;
+            }
+        }
+        if let Some((tex, nrect, label, nf)) = next_show {
+            let r = monitor(ui.ctx(), "next_preview", tex, nrect, &label, Color32::from_rgb(90, 200, 120))
+                .on_hover_text(tr(
+                    "The shot after the next cut: click to play through the cut, double-click to jump to it",
+                ));
+            if r.double_clicked() {
+                self.playing = false;
+                self.hub.borrow_mut().frame = nf;
+            } else if r.clicked() {
+                self.preview_cut(nf);
             }
         }
         let painter = ui.painter_at(full);
@@ -6043,6 +6338,12 @@ mod i18n_tests {
         for p in shotstage_commands::motion::PRESETS {
             texts.extend([p.label.to_string(), p.description.to_string()]);
         }
+        for c in shotstage_core::Channel::TRANSFORM.into_iter().chain([shotstage_core::Channel::Focal]) {
+            texts.push(crate::curves::channel_name(c).to_string());
+        }
+        for (label, _) in crate::curves::PRESETS {
+            texts.push(label.to_string());
+        }
         for (_, key, desc) in shotstage_core::environment::SKIES {
             let mut c = key.chars();
             texts.push(c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default());
@@ -6057,6 +6358,7 @@ mod i18n_tests {
             include_str!("material.rs"),
             include_str!("uveditor.rs"),
             include_str!("storyboard.rs"),
+            include_str!("curves.rs"),
         ] {
             for part in src.split("tr(\"").skip(1) {
                 let Some(end) = part.find("\")") else { continue };
