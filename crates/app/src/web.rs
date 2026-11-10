@@ -60,6 +60,9 @@ pub struct Shotstage {
 
 /// Create an editor inside `container` (an `Element` or a CSS selector string). The editor fills
 /// the container and follows its size. `options.scene` opens a saved scene document.
+/// `options.autosaveKey` names where this editor autosaves in the browser (IndexedDB; default
+/// `"shotstage.autosave"`, `null` for no autosave); `options.restorePrompt: false` skips the
+/// editor's own "pick up where you left off?" offer (see `editor.autosaved()`).
 /// `options.toolbar` adds buttons to the top bar: `[{ id, label, labelZh?, tooltip?, tooltipZh? }]`;
 /// a click sends `{ type: "toolbar", id }` to `editor.on` listeners.
 #[wasm_bindgen]
@@ -86,6 +89,22 @@ pub async fn mount(container: JsValue, options: JsValue) -> Result<Shotstage, Js
     container.append_child(&canvas)?;
 
     let hub = Hub::new(session);
+    // `autosaveKey`: the slot to autosave to (null or false: none); `restorePrompt: false`
+    // when the page restores the autosave itself (`editor.autosaved()`)
+    {
+        let mut h = hub.borrow_mut();
+        match opts.get("autosaveKey") {
+            Some(Value::String(k)) if !k.is_empty() => h.autosave.key = Some(k.clone()),
+            Some(Value::Null | Value::Bool(false)) => h.autosave.key = None,
+            None => {}
+            Some(other) => {
+                return Err(JsValue::from_str(&format!("options.autosaveKey: expected a string, got {other}")));
+            }
+        }
+        if let Some(p) = opts.get("restorePrompt") {
+            h.autosave.prompt = p.as_bool().ok_or("options.restorePrompt: expected true or false")?;
+        }
+    }
     if let Some(buttons) = opts.get("toolbar").filter(|b| !b.is_null()) {
         hub.borrow_mut().host_buttons =
             serde_json::from_value(buttons.clone()).map_err(|e| JsValue::from_str(&format!("options.toolbar: {e}")))?;
@@ -161,6 +180,19 @@ impl Shotstage {
     /// Replace the scene (undoable).
     pub fn load(&self, scene: JsValue) -> Result<JsValue, JsValue> {
         self.dispatch("scene.load", to_js(&json!({ "scene": from_js(&scene)? })))
+    }
+
+    /// The scene this editor last autosaved (in this browser), or `null`: for a page that
+    /// restores it itself (mount with `restorePrompt: false`). Resolves to the scene document.
+    pub fn autosaved(&self) -> js_sys::Promise {
+        let key = self.hub.borrow().autosave.key.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let Some(key) = key else { return Ok(JsValue::NULL) };
+            Ok(match crate::autosave::read(&key).await {
+                Some(json) => js_sys::JSON::parse(&json).unwrap_or(JsValue::NULL),
+                None => JsValue::NULL,
+            })
+        })
     }
 
     /// Current document revision; increases on every change.

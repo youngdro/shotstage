@@ -865,10 +865,8 @@ pub struct EditorApp {
     frame_side: &'static str,
     block_filter: String,
     show_console: bool,
-    /// Autosave: the revision last written and when (seconds), and a found autosave offered for
-    /// restoring: (scene JSON, object count).
-    autosaved: (u64, f64),
-    autosave_warned: bool,
+    /// Autosave, and the autosaved scene found at start while it is offered for restoring.
+    autosaver: crate::autosave::Autosaver,
     restore_offer: Option<(std::rc::Rc<Scene>, usize)>,
     /// Draw shadows in the view.
     shadows: bool,
@@ -940,6 +938,7 @@ pub struct EditorApp {
 
 impl EditorApp {
     pub fn new(cc: &eframe::CreationContext<'_>, hub: SharedHub) -> Self {
+        let autosaver = crate::autosave::Autosaver::new(hub.borrow().autosave.clone(), &hub);
         hub.borrow_mut().repaint = Some(cc.egui_ctx.clone());
         hub.borrow_mut().gpu = cc.wgpu_render_state.clone();
         cc.egui_ctx.set_theme(egui::Theme::Dark);
@@ -996,13 +995,8 @@ impl EditorApp {
             also: vec![],
             shadows: true,
             depth_seen: Default::default(),
-            autosaved: (u64::MAX, 0.0),
-            autosave_warned: false,
-            restore_offer: crate::files::autosave_read().and_then(|j| {
-                let sc: Scene = serde_json::from_str(&j).ok()?;
-                let n = sc.entities.iter().filter(|e| e.parent.is_none()).count();
-                (n > 0).then(|| (std::rc::Rc::new(sc), n))
-            }),
+            autosaver,
+            restore_offer: None,
             ref_textures: Default::default(),
             auto_key: false,
             key_drag: None,
@@ -1161,43 +1155,25 @@ impl EditorApp {
         }
     }
 
-    /// Write the scene to the autosave a couple of seconds after it last changed (not while an
-    /// autosave is waiting to be restored, so it is not overwritten).
+    /// Autosave when due (not while an autosave is waiting to be restored, so it is not
+    /// overwritten), and offer the one found at start once it has been read.
     fn autosave(&mut self, ctx: &egui::Context) {
-        let now = ctx.input(|i| i.time);
-        if self.restore_offer.is_some() {
-            return;
-        }
-        let rev = self.hub.borrow().session.revision();
-        if self.autosaved.0 == u64::MAX {
-            // first frame: remember where we start; save after the next change
-            self.autosaved = (rev, now);
-            return;
-        }
-        if rev == self.autosaved.0 {
-            return;
-        }
-        if now - self.autosaved.1 < 2.0 {
-            // egui only draws on input: come back when the save is due
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(2.0 - (now - self.autosaved.1) + 0.05));
-            return;
-        }
-        let json = serde_json::to_string(&*self.scene()).unwrap_or_default();
-        match crate::files::autosave_write(&json) {
-            Ok(()) => self.autosave_warned = false,
-            Err(e) => {
-                log::warn!("autosave: {e}");
-                // say it once, not every two seconds
-                if !self.autosave_warned {
-                    self.autosave_warned = true;
-                    self.toast(crate::lf!(
-                        "Autosave is not keeping this scene ({e}): use Save (Cmd/Ctrl+S)",
-                        "自动保存没能保存这个场景（{e}）：请手动保存（Cmd/Ctrl+S）"
-                    ));
-                }
+        if let Some(j) = self.autosaver.take_found()
+            && let Ok(sc) = serde_json::from_str::<Scene>(&j)
+        {
+            let n = sc.entities.iter().filter(|e| e.parent.is_none()).count();
+            if n > 0 {
+                self.restore_offer = Some((std::rc::Rc::new(sc), n));
             }
         }
-        self.autosaved = (rev, now);
+        let busy = ctx.input(|i| i.pointer.any_down());
+        let hold = self.restore_offer.is_some();
+        if let Some(e) = self.autosaver.tick(ctx, &self.hub, hold, busy) {
+            self.toast(crate::lf!(
+                "Autosave is not keeping this scene ({e}): use Save (Cmd/Ctrl+S)",
+                "自动保存没能保存这个场景（{e}）：请手动保存（Cmd/Ctrl+S）"
+            ));
+        }
     }
 
     fn save_scene(&mut self) {
@@ -2047,6 +2023,11 @@ impl EditorApp {
 }
 
 impl eframe::App for EditorApp {
+    /// The window is closing: keep the last changes.
+    fn on_exit(&mut self) {
+        self.autosaver.flush(&self.hub);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Drop a selection that an agent deleted.
         // WebGL needs polling for buffer maps; keep frames coming while snapshots are pending.

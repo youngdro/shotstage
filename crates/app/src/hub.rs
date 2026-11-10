@@ -41,6 +41,8 @@ pub struct Hub {
     pub uv: Option<UvState>,
     /// Buttons the host page put in the top bar (`mount(el, { toolbar: [...] })`).
     pub host_buttons: Vec<HostButton>,
+    /// Where and whether this editor autosaves (`mount(el, { autosaveKey, restorePrompt })`).
+    pub autosave: crate::autosave::Settings,
 }
 
 /// A button the host page adds to the editor's top bar. Clicking it sends listeners

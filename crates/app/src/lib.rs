@@ -4,6 +4,7 @@
 //! inside any DOM element and returns an instance whose methods reach the same command
 //! registry as the CLI and MCP server (see `web.rs`).
 
+mod autosave;
 mod files;
 pub mod hub;
 pub mod i18n;
